@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Rocket Jump</title>
+    <link rel="stylesheet" href="/src/client/style.css" />
+  </head>
+  <body>
+    <canvas id="game"></canvas>
+
+    <div id="crosshair"></div>
+    <div id="speed">0.0 m/s</div>
+
+    <div id="overlay">
+      <div class="panel">
+        <h1>ROCKET JUMP</h1>
+        <p class="start">Click to play</p>
+        <table>
+          <tr><td>WASD</td><td>Move</td></tr>
+          <tr><td>Mouse</td><td>Look</td></tr>
+          <tr><td>Space</td><td>Jump (hold to bunny-hop)</td></tr>
+          <tr><td>Left click</td><td>Fire rocket</td></tr>
+          <tr><td>Right click / E / Shift</td><td>Grapple (hold)</td></tr>
+          <tr><td>Esc</td><td>Release mouse</td></tr>
+        </table>
+        <p class="tip">Tip: aim at your feet and fire while jumping to rocket jump. Crosshair turns green when the grapple can reach.</p>
+      </div>
+    </div>
+
+    <script type="module" src="/src/client/main.ts"></script>
+  </body>
+</html>

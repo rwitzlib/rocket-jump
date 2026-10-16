@@ -1,0 +1,119 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #111;
+  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  user-select: none;
+}
+
+#game {
+  display: block;
+  width: 100vw;
+  height: 100vh;
+}
+
+#crosshair {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  width: 8px;
+  height: 8px;
+  margin: -4px 0 0 -4px;
+  border: 2px solid rgba(255, 255, 255, 0.9);
+  border-radius: 50%;
+  box-shadow: 0 0 2px rgba(0, 0, 0, 0.8);
+  pointer-events: none;
+  transition: border-color 80ms, transform 80ms;
+}
+
+#crosshair.can-grapple {
+  border-color: #7cf0a0;
+}
+
+#crosshair.grappling {
+  border-color: #7cf0a0;
+  transform: scale(1.6);
+}
+
+#speed {
+  position: fixed;
+  left: 50%;
+  bottom: 32px;
+  transform: translateX(-50%);
+  color: #fff;
+  font-size: 20px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+  pointer-events: none;
+}
+
+#overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  padding: 16px;
+  overflow-y: auto;
+  background: rgba(10, 14, 22, 0.6);
+  color: #eef2f7;
+  cursor: pointer;
+}
+
+#overlay.hidden {
+  display: none;
+}
+
+.panel {
+  max-width: 440px;
+  width: 100%;
+  margin: auto;
+  padding: 28px 32px;
+  background: rgba(20, 26, 38, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  text-align: center;
+}
+
+.panel h1 {
+  margin: 0 0 6px;
+  font-size: 36px;
+  letter-spacing: 3px;
+  color: #ff8a5c;
+}
+
+.panel .start {
+  margin: 0 0 20px;
+  font-size: 18px;
+  color: #7cf0a0;
+}
+
+.panel table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+  text-align: left;
+}
+
+.panel td {
+  padding: 5px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.panel td:first-child {
+  width: 50%;
+  font-weight: 600;
+  color: #aab4c4;
+}
+
+.panel .tip {
+  margin: 18px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #8a94a6;
+}

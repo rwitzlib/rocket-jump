@@ -1,0 +1,46 @@
+// All gameplay tuning lives here. Units are meters and seconds.
+// This file is shared so a future server simulates with identical numbers.
+
+export const TICK_RATE = 60;
+export const DT = 1 / TICK_RATE;
+export const GRAVITY = 20;
+
+export const PLAYER = {
+  radius: 0.4,
+  halfHeight: 0.5, // capsule cylinder half-height; total height = 2 * (halfHeight + radius) = 1.8
+  eyeOffset: 0.6, // eye height above capsule center
+};
+
+// Quake-style movement: ground acceleration + friction, weak air control that still allows air-strafing.
+export const MOVE = {
+  maxSpeed: 8,
+  groundAccel: 10,
+  airAccel: 10,
+  airWishCap: 1.0, // caps the speed gained per direction in the air (the strafe-jump trick)
+  friction: 6,
+  stopSpeed: 2,
+  jumpSpeed: 7,
+};
+
+export const ROCKET = {
+  speed: 30,
+  cooldown: 0.8,
+  lifetime: 4,
+  blastRadius: 4.5,
+  knockback: 15, // velocity change at the center of the blast, falls off linearly to 0 at the edge
+  crateKnockback: 12,
+};
+
+export const GRAPPLE = {
+  range: 70,
+  pullAccel: 38,
+  maxPullSpeed: 28, // stop adding pull once already moving toward the anchor this fast
+  minLength: 2,
+  stiffness: 30, // how hard the rope corrects when stretched past its length
+  attachHop: 5, // upward kick when the hook lands while you're on the ground, so it can lift you off
+};
+
+export const CRATE = {
+  size: 1.2,
+  density: 0.6,
+};
