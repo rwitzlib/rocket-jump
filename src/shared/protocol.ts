@@ -27,6 +27,7 @@ export interface RemotePlayerState {
   anchor: Vec3Tuple | null; // grapple anchor, when attached
   alive: boolean;
   protected: boolean; // spawn protection
+  grounded: boolean; // only drives the remote player's animation
 }
 
 export interface ScoreEntry {

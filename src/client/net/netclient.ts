@@ -35,6 +35,7 @@ export interface RemotePlayer {
   anchor: Vector3 | null;
   alive: boolean;
   protected: boolean;
+  grounded: boolean;
 }
 
 export class NetStats {
@@ -231,7 +232,7 @@ export class NetClient {
       const pa = a.players.find((p) => p.id === pb.id) ?? pb;
       let r = this.remotes.get(pb.id);
       if (!r) {
-        r = { id: pb.id, pos: new Vector3(), yaw: 0, pitch: 0, anchor: null, alive: true, protected: false };
+        r = { id: pb.id, pos: new Vector3(), yaw: 0, pitch: 0, anchor: null, alive: true, protected: false, grounded: true };
         this.remotes.set(pb.id, r);
       }
       // Dying or respawning is a teleport: show one end or the other, never a slide between them.
@@ -241,6 +242,7 @@ export class NetClient {
       r.pitch = pa.pitch + (pb.pitch - pa.pitch) * t;
       r.alive = t < 0.5 ? pa.alive : pb.alive;
       r.protected = t < 0.5 ? pa.protected : pb.protected;
+      r.grounded = t < 0.5 ? pa.grounded : pb.grounded;
       // Anchors move when hooked into a player or crate, so blend them when both ends have one.
       if (pa.anchor && pb.anchor) (r.anchor ??= new Vector3()).set(...pa.anchor).lerp(_v.set(...pb.anchor), t);
       else {

@@ -6,9 +6,11 @@ import { ParticleSystem } from './particles';
 const _pos = new THREE.Vector3();
 const _vel = new THREE.Vector3();
 const _rand = new THREE.Vector3();
+const _step = new THREE.Vector3();
 const Z = new THREE.Vector3(0, 0, 1);
 
 const TRAIL_SPACING = 0.3; // meters between smoke puffs, so trails look the same at any frame rate
+const MUZZLE_BLEND_TIME = 0.2; // seconds for a rocket drawn from a barrel to merge onto its simulated path
 const RING_TIME = 0.3;
 const LIGHT_TIME = 0.35;
 const DECAL_TIME = 12;
@@ -51,7 +53,12 @@ export class Effects {
   readonly fire = new ParticleSystem(3000, THREE.AdditiveBlending);
   readonly smoke = new ParticleSystem(3000, THREE.NormalBlending);
 
-  private rocketMeshes = new Map<number, { mesh: THREE.Object3D; lastTrail: THREE.Vector3; seen: number }>();
+  private rocketMeshes = new Map<number, { mesh: THREE.Object3D; lastTrail: THREE.Vector3; seen: number; offset: THREE.Vector3; age: number }>();
+  /**
+   * Rockets are simulated from the shooter's eye. When the shooter has a visible weapon, this gives
+   * the barrel's offset from that eye; the rocket is drawn starting there and eases onto its real path.
+   */
+  muzzleOffset: ((ownerId: string, out: THREE.Vector3) => THREE.Vector3 | null) | null = null;
   private frameNo = 0;
   private rocketProto: THREE.Object3D;
   private lights: Timed<THREE.PointLight>[] = [];
@@ -232,7 +239,7 @@ export class Effects {
   }
 
   update(rockets: readonly Rocket[], alpha: number, dt: number) {
-    this.syncRockets(rockets, alpha);
+    this.syncRockets(rockets, alpha, dt);
     this.fire.update(dt);
     this.smoke.update(dt);
 
@@ -270,25 +277,29 @@ export class Effects {
     decal.scale.setScalar(1.4 + Math.random() * 0.5);
   }
 
-  private syncRockets(rockets: readonly Rocket[], alpha: number) {
+  private syncRockets(rockets: readonly Rocket[], alpha: number, dt: number) {
     const frame = ++this.frameNo;
     for (const r of rockets) {
       let entry = this.rocketMeshes.get(r.id);
       if (!entry) {
         const mesh = this.rocketProto.clone();
         this.scene.add(mesh);
-        entry = { mesh, lastTrail: r.prevPos.clone(), seen: frame };
+        const offset = this.muzzleOffset?.(r.ownerId, new THREE.Vector3()) ?? new THREE.Vector3();
+        entry = { mesh, lastTrail: r.prevPos.clone().add(offset), seen: frame, offset, age: 0 };
         this.rocketMeshes.set(r.id, entry);
       }
       entry.seen = frame;
+      entry.age += dt;
       const { mesh, lastTrail } = entry;
-      mesh.position.lerpVectors(r.prevPos, r.pos, alpha);
+      const blend = Math.min(entry.age / MUZZLE_BLEND_TIME, 1);
+      mesh.position.lerpVectors(r.prevPos, r.pos, alpha).addScaledVector(entry.offset, 1 - blend * blend * (3 - 2 * blend));
       mesh.lookAt(_pos.copy(mesh.position).sub(r.dir));
 
       // Lay smoke + exhaust glow at fixed spacing along the path traveled since the last frame.
       let gap = lastTrail.distanceTo(mesh.position);
+      _step.subVectors(mesh.position, lastTrail).normalize();
       while (gap >= TRAIL_SPACING) {
-        lastTrail.addScaledVector(r.dir, TRAIL_SPACING);
+        lastTrail.addScaledVector(_step, TRAIL_SPACING);
         gap -= TRAIL_SPACING;
         randomInSphere(_rand).multiplyScalar(0.4);
         this.smoke.emit({

@@ -71,6 +71,7 @@ async function main() {
   const effects = new Effects(scene);
   const rope = new Rope(scene);
   const remoteView = new RemotePlayersView(scene);
+  effects.muzzleOffset = (id, out) => remoteView.muzzleOffset(id, out);
   const viewModel = new ViewModel(VIEWMODEL_FOV);
   const cameraFx = new CameraFX(FOV);
   const audio = new GameAudio();
@@ -134,6 +135,7 @@ async function main() {
           audio.play('fire', { volume: 0.8 });
           cameraFx.shake(0.12);
         } else {
+          remoteView.fired(e.playerId);
           const at = playerPos(e.playerId);
           if (at) audio.play('fire', { at });
         }
@@ -234,7 +236,7 @@ async function main() {
     }
     if (client) {
       for (const e of client.update(dt, now)) handleEvent(e);
-      remoteView.sync(client.remotes);
+      remoteView.sync(client.remotes, dt);
       netOverlay?.update(now);
     }
     const alpha = accumulator / DT;

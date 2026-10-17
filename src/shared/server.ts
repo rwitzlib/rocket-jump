@@ -129,7 +129,7 @@ export class GameServer {
     const scores: ScoreEntry[] = [];
     for (const p of sim.players.values()) {
       const a = p.grapple?.anchor;
-      players.push({ id: p.id, pos: [p.pos.x, p.pos.y, p.pos.z], yaw: p.yaw, pitch: p.pitch, anchor: a ? [a.x, a.y, a.z] : null, alive: p.alive, protected: p.protectedFor > 0 });
+      players.push({ id: p.id, pos: [p.pos.x, p.pos.y, p.pos.z], yaw: p.yaw, pitch: p.pitch, anchor: a ? [a.x, a.y, a.z] : null, alive: p.alive, protected: p.protectedFor > 0, grounded: p.grounded });
       scores.push({ id: p.id, kills: p.kills, deaths: p.deaths });
     }
     const rockets: RocketState[] = sim.rockets.map((r) => ({
