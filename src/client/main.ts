@@ -2,10 +2,11 @@ import RAPIER from '@dimforge/rapier3d-compat';
 import * as THREE from 'three';
 import { DT } from '../shared/config';
 import { ARENA } from '../shared/map';
-import { GameSim, type PlayerSim, type SimEvent } from '../shared/sim';
+import { GameSim, type DeathCause, type PlayerSim, type SimEvent } from '../shared/sim';
 import { GameAudio } from './audio';
 import { CameraFX } from './camerafx';
 import { Effects } from './effects';
+import { Hud } from './hud';
 import { Input } from './input';
 import { buildLevel, CrateView } from './level';
 import { Loopback, type NetConditions } from './net/loopback';
@@ -77,6 +78,8 @@ async function main() {
   input.yaw = me.yaw;
   const perf = new PerfOverlay(gpuName(renderer));
   const netOverlay = loopback && client && new NetOverlay(loopback, client);
+  const hud = new Hud(localId);
+  let death: { killerId: string | null; cause: DeathCause } | null = null;
 
   overlay.addEventListener('click', () => {
     audio.resume();
@@ -177,6 +180,24 @@ async function main() {
           input.yaw = e.yaw;
           input.pitch = 0;
           rope.release();
+          death = null;
+        }
+        break;
+      case 'damaged':
+        if (mine) flash = Math.max(flash, 0.3 + e.amount / 60);
+        else if (e.sourceId === localId) {
+          hud.hitMarker(false);
+          audio.play('hit', { volume: 0.6 });
+        }
+        break;
+      case 'killed':
+        hud.killed(e.playerId, e.killerId, e.cause);
+        if (mine) {
+          death = { killerId: e.killerId, cause: e.cause };
+          rope.release();
+        } else if (e.killerId === localId) {
+          hud.hitMarker(true);
+          audio.play('kill', { volume: 0.7 });
         }
         break;
     }
@@ -244,18 +265,26 @@ async function main() {
     if (speedText !== shownSpeed) speedEl.textContent = shownSpeed = speedText;
     crosshair.classList.toggle('can-grapple', !me.grapple && sim.grappleTarget(me, target) !== null);
     crosshair.classList.toggle('grappling', !!me.grapple);
+    hud.setHealth(me.health);
+    hud.setProtected(me.alive && me.protectedFor > 0);
+    hud.setDeath(me.alive ? null : (death ?? { killerId: null, cause: 'rocket' }), me.respawnIn);
+    if (hud.boardOpen) {
+      hud.setScores(client ? client.scores : [...sim.players.values()].map((p) => ({ id: p.id, kills: p.kills, deaths: p.deaths })));
+    }
 
     renderer.clear();
     renderer.render(scene, camera);
-    renderer.clearDepth();
-    renderer.render(viewModel.scene, viewModel.camera);
+    if (me.alive) {
+      renderer.clearDepth();
+      renderer.render(viewModel.scene, viewModel.camera);
+    }
 
     requestAnimationFrame(frame);
   };
   requestAnimationFrame(frame);
 
   // Handy for tweaking from the browser console during development: `game.me.vel`, `game.sim`, etc.
-  if (import.meta.env.DEV) Object.assign(window, { game: { sim, me, client, loopback, input, camera, scene, renderer, effects, audio, handleEvent, frame } });
+  if (import.meta.env.DEV) Object.assign(window, { game: { sim, me, client, loopback, hud, input, camera, scene, renderer, effects, audio, handleEvent, frame } });
 }
 
 function gpuName(renderer: THREE.WebGLRenderer): string {

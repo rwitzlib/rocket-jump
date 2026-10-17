@@ -8,6 +8,7 @@ import {
   type InputFrame,
   type RemotePlayerState,
   type RocketState,
+  type ScoreEntry,
   type ServerMessage,
   type WireEvent,
 } from './protocol';
@@ -87,7 +88,7 @@ export class GameServer {
     }
     for (const [id, bot] of this.bots) {
       const p = this.sim.players.get(id);
-      if (p) this.inputs.set(id, bot.think(p));
+      if (p) this.inputs.set(id, bot.think(p, this.sim));
     }
 
     const events = this.sim.step(this.inputs);
@@ -125,9 +126,11 @@ export class GameServer {
   private broadcast() {
     const sim = this.sim;
     const players: RemotePlayerState[] = [];
+    const scores: ScoreEntry[] = [];
     for (const p of sim.players.values()) {
       const a = p.grapple?.anchor;
-      players.push({ id: p.id, pos: [p.pos.x, p.pos.y, p.pos.z], yaw: p.yaw, pitch: p.pitch, anchor: a ? [a.x, a.y, a.z] : null });
+      players.push({ id: p.id, pos: [p.pos.x, p.pos.y, p.pos.z], yaw: p.yaw, pitch: p.pitch, anchor: a ? [a.x, a.y, a.z] : null, alive: p.alive, protected: p.protectedFor > 0 });
+      scores.push({ id: p.id, kills: p.kills, deaths: p.deaths });
     }
     const rockets: RocketState[] = sim.rockets.map((r) => ({
       id: r.id,
@@ -152,6 +155,7 @@ export class GameServer {
         players: players.filter((p) => p.id !== id),
         rockets,
         crates,
+        scores,
         events: this.recentEvents,
         input: { queued: conn.queue.length, starved: conn.starved, dropped: conn.dropped },
       });

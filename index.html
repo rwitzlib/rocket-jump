@@ -15,6 +15,19 @@
     <div id="speed">0.0 m/s</div>
     <div id="mute"></div>
 
+    <div id="health"><span id="health-value">100</span><span class="shield">Spawn protection</span><div class="bar"><div id="health-bar"></div></div></div>
+    <div id="killfeed"></div>
+    <div id="death" hidden>
+      <div id="death-title"></div>
+      <div id="death-timer"></div>
+    </div>
+    <div id="scoreboard" hidden>
+      <table>
+        <thead><tr><th>Player</th><th>Kills</th><th>Deaths</th></tr></thead>
+        <tbody id="scoreboard-body"></tbody>
+      </table>
+    </div>
+
     <div id="overlay">
       <div class="panel">
         <h1>ROCKET JUMP</h1>
@@ -25,6 +38,7 @@
           <tr><td>Space</td><td>Jump (hold to bunny-hop)</td></tr>
           <tr><td>Left click</td><td>Fire rocket</td></tr>
           <tr><td>Right click / E / Shift</td><td>Grapple (hold)</td></tr>
+          <tr><td>Tab (hold)</td><td>Scoreboard</td></tr>
           <tr><td>M</td><td>Mute / unmute</td></tr>
           <tr><td>Esc</td><td>Release mouse</td></tr>
         </table>

@@ -6,6 +6,7 @@ import {
   type ClientMessage,
   type InputFrame,
   type RocketState,
+  type ScoreEntry,
   type ServerMessage,
   type SnapshotMessage,
   type WireEvent,
@@ -32,6 +33,8 @@ export interface RemotePlayer {
   yaw: number;
   pitch: number;
   anchor: Vector3 | null;
+  alive: boolean;
+  protected: boolean;
 }
 
 export class NetStats {
@@ -61,6 +64,8 @@ export class NetClient {
   readonly stats = new NetStats();
   /** Rockets to draw this frame: our predicted ones (sim.rockets) plus everyone else's, interpolated. */
   readonly renderRockets: Rocket[] = [];
+  /** Latest kills/deaths for everyone. Not interpolated: the scoreboard just shows the newest. */
+  scores: ScoreEntry[] = [];
 
   private seq = 0;
   private pending: InputFrame[] = [];
@@ -123,6 +128,7 @@ export class NetClient {
     this.snapshots.push(msg);
     this.stats.serverTick = msg.tick;
     this.stats.serverInput = msg.input;
+    this.scores = msg.scores;
     this.reconcile(msg);
 
     for (const e of msg.events) {
@@ -134,9 +140,10 @@ export class NetClient {
       }
       // Our jumps, shots and grapples were already played by prediction, and usually our explosions
       // too. What's left (a rocket that hit something we couldn't predict, another player's
-      // knockback, a respawn) shows right away, in step with the state correction it comes with.
+      // knockback, damage, death, a respawn) shows right away, in step with the state correction it comes with.
       const sim = fromWireEvent(e);
-      if ((e.type === 'explosion' || e.type === 'knockback' || e.type === 'respawn') && this.firstSighting(sim)) {
+      const unpredicted = e.type === 'explosion' || e.type === 'knockback' || e.type === 'respawn' || e.type === 'damaged' || e.type === 'killed';
+      if (unpredicted && this.firstSighting(sim)) {
         this.immediate.push(sim);
       }
     }
@@ -220,12 +227,16 @@ export class NetClient {
       const pa = a.players.find((p) => p.id === pb.id) ?? pb;
       let r = this.remotes.get(pb.id);
       if (!r) {
-        r = { id: pb.id, pos: new Vector3(), yaw: 0, pitch: 0, anchor: null };
+        r = { id: pb.id, pos: new Vector3(), yaw: 0, pitch: 0, anchor: null, alive: true, protected: false };
         this.remotes.set(pb.id, r);
       }
-      r.pos.set(...pa.pos).lerp(_v.set(...pb.pos), t);
+      // Dying or respawning is a teleport: show one end or the other, never a slide between them.
+      if (pa.alive !== pb.alive) r.pos.set(...(t < 0.5 ? pa.pos : pb.pos));
+      else r.pos.set(...pa.pos).lerp(_v.set(...pb.pos), t);
       r.yaw = lerpAngle(pa.yaw, pb.yaw, t);
       r.pitch = pa.pitch + (pb.pitch - pa.pitch) * t;
+      r.alive = t < 0.5 ? pa.alive : pb.alive;
+      r.protected = t < 0.5 ? pa.protected : pb.protected;
       const anchor = t < 0.5 ? pa.anchor : pb.anchor;
       if (anchor) (r.anchor ??= new Vector3()).set(...anchor);
       else r.anchor = null;

@@ -11,7 +11,9 @@ type SoundName =
   | 'grappleRelease'
   | 'grappleMiss'
   | 'jump'
-  | 'land';
+  | 'land'
+  | 'hit'
+  | 'kill';
 
 interface PlayOptions {
   at?: THREE.Vector3; // omit for non-positional (your own weapon, UI)
@@ -129,6 +131,18 @@ function synthesize(ctx: BaseAudioContext): Record<SoundName | 'noise', AudioBuf
       const osc = sweep(sr);
       return (t) =>
         osc(45 + 70 * Math.exp(-t * 20)) * env(t, 0.002, 0.07) + lp(noise(), 700) * env(t, 0.001, 0.05) * 1.3;
+    }),
+
+    // Hit confirmation for the shooter: a short, bright tick that cuts through explosions.
+    hit: build(0.12, () => {
+      const osc = sweep(sr);
+      return (t) => osc(1750) * env(t, 0.001, 0.025) + osc(3500) * env(t, 0.001, 0.012) * 0.3;
+    }),
+
+    // Kill confirmation: two rising tones.
+    kill: build(0.4, () => {
+      const osc = sweep(sr);
+      return (t) => osc(t < 0.09 ? 880 : 1320) * (t < 0.09 ? env(t, 0.002, 0.04) : env(t - 0.09, 0.002, 0.09));
     }),
   };
 }

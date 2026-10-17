@@ -25,6 +25,14 @@ export interface RemotePlayerState {
   yaw: number;
   pitch: number;
   anchor: Vec3Tuple | null; // grapple anchor, when attached
+  alive: boolean;
+  protected: boolean; // spawn protection
+}
+
+export interface ScoreEntry {
+  id: string;
+  kills: number;
+  deaths: number;
 }
 
 export interface RocketState {
@@ -56,6 +64,7 @@ export interface SnapshotMessage {
   players: RemotePlayerState[]; // everyone else
   rockets: RocketState[];
   crates: CrateState[];
+  scores: ScoreEntry[]; // everyone, including the recipient
   events: WireEvent[]; // the last NET.eventWindow ticks of events; clients skip ones they've seen
   input: { queued: number; starved: number; dropped: number }; // the recipient's input stream health, for debugging
 }

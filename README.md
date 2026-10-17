@@ -20,11 +20,15 @@ Open http://localhost:5173 and click to play.
 | Space | Jump (hold to bunny-hop) |
 | Left click | Fire rocket |
 | Right click / E / Shift | Grapple (hold) |
+| Tab (hold) | Scoreboard |
 | M | Mute / unmute |
 | P | Frame-time overlay (long frames are also logged to the console) |
 | Esc | Release mouse |
 
-Aim at your feet and fire while jumping to rocket jump. The crosshair turns green when the grapple can reach.
+Aim at your feet and fire while jumping to rocket jump. Your own rockets never hurt you, so rocket jumping is free.
+Everyone has 100 health, which regenerates after 5 seconds without damage. You respawn 3 seconds after dying, with
+3 seconds of spawn protection. Knocking someone off the map counts as your kill. All of this is tuned in `COMBAT` in
+`shared/config.ts`. The crosshair turns green when the grapple can reach.
 
 ## Layout
 
@@ -72,5 +76,5 @@ Code: `shared/server.ts` (transport-agnostic `GameServer`), `shared/protocol.ts`
 2. ~~Weapon polish: sounds, better explosion VFX, rope visuals, hit feedback~~
 3. Basic multiplayer: Node server + WebSockets, players see each other
 4. Server-authoritative sim with client-side prediction and interpolation of remote players
-5. Combat loop: health, damage, kills, respawns, scoreboard
+5. ~~Combat loop: health, damage, kills, respawns, scoreboard~~
 6. Maps, polish, deployment

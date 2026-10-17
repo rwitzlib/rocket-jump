@@ -52,3 +52,14 @@ export const NET = {
   maxInputQueue: 8, // past this the server drops a client's oldest inputs to catch up
   eventWindow: 6, // ticks of past events repeated in each snapshot, so one lost snapshot loses no explosions
 };
+
+export const COMBAT = {
+  maxHealth: 100,
+  rocketDamage: 100, // at the center of the blast, falling off linearly like knockback
+  selfDamage: false, // your own rockets never hurt you, so rocket jumping is free
+  spawnProtection: 3, // seconds of invulnerability after spawning
+  regenDelay: 5, // seconds without taking damage before health starts coming back
+  regenRate: 10, // health per second
+  respawnDelay: 3,
+  killCredit: 5, // falling off the map within this many seconds of being hit counts as a kill for the hitter
+};

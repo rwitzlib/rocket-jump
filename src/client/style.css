@@ -155,8 +155,8 @@ body {
 
 #net {
   position: fixed;
-  left: 12px;
-  bottom: 12px;
+  right: 12px;
+  bottom: 40px;
   padding: 8px 10px;
   background: rgba(0, 0, 0, 0.6);
   color: #fff;
@@ -165,4 +165,177 @@ body {
   border-radius: 6px;
   pointer-events: none;
   z-index: 10;
+}
+
+#crosshair.hit,
+#crosshair.kill {
+  animation: hitmarker 220ms ease-out;
+}
+
+#crosshair.kill {
+  animation-duration: 400ms;
+}
+
+@keyframes hitmarker {
+  from {
+    border-color: #ff5c5c;
+    transform: scale(1.9);
+  }
+}
+
+#health {
+  position: fixed;
+  left: 24px;
+  bottom: 24px;
+  width: 180px;
+  color: #fff;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+  pointer-events: none;
+}
+
+#health-value {
+  font-size: 34px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+#health .bar {
+  height: 6px;
+  margin-top: 2px;
+  background: rgba(0, 0, 0, 0.45);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+#health-bar {
+  height: 100%;
+  background: #7cf0a0;
+  transform-origin: left;
+  transition: transform 120ms;
+}
+
+#health .shield {
+  display: none;
+  margin-left: 10px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #7ce0ff;
+}
+
+#health.protected .shield {
+  display: inline;
+}
+
+#health.protected #health-bar {
+  background: #7ce0ff;
+}
+
+#health.low #health-value {
+  color: #ff6b5c;
+}
+
+#health.low #health-bar {
+  background: #ff6b5c;
+}
+
+#killfeed {
+  position: fixed;
+  right: 16px;
+  top: 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  pointer-events: none;
+}
+
+#killfeed > div {
+  padding: 4px 10px;
+  background: rgba(0, 0, 0, 0.55);
+  border-radius: 4px;
+  color: #d8e0ea;
+  font-size: 14px;
+}
+
+#killfeed > div.mine {
+  background: rgba(150, 50, 30, 0.7);
+  color: #fff;
+}
+
+#killfeed b {
+  color: #fff;
+}
+
+#death {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: radial-gradient(ellipse at center, rgba(60, 0, 0, 0.25), rgba(60, 0, 0, 0.6));
+  color: #fff;
+  text-shadow: 0 2px 6px rgba(0, 0, 0, 0.9);
+  pointer-events: none;
+}
+
+#death[hidden],
+#scoreboard[hidden] {
+  display: none;
+}
+
+#death-title {
+  font-size: 32px;
+  font-weight: 800;
+}
+
+#death-timer {
+  font-size: 16px;
+  color: #d8c0bc;
+}
+
+#scoreboard {
+  position: fixed;
+  left: 50%;
+  top: 18%;
+  transform: translateX(-50%);
+  width: min(420px, calc(100vw - 32px));
+  padding: 14px 18px;
+  background: rgba(20, 26, 38, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  color: #eef2f7;
+  pointer-events: none;
+}
+
+#scoreboard table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+}
+
+#scoreboard th {
+  padding-bottom: 6px;
+  color: #8a94a6;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: right;
+}
+
+#scoreboard td {
+  padding: 5px 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  text-align: right;
+}
+
+#scoreboard th:first-child,
+#scoreboard td:first-child {
+  text-align: left;
+}
+
+#scoreboard tr.mine td {
+  color: #ff8a5c;
+  font-weight: 700;
 }

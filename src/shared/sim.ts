@@ -1,7 +1,7 @@
 import RAPIER from '@dimforge/rapier3d-compat';
 import { Euler, Quaternion, Vector3 } from 'three';
-import { CRATE, DT, GRAPPLE, GRAVITY, PLAYER, ROCKET } from './config';
-import type { MapDef, Vec3Tuple } from './map';
+import { COMBAT, CRATE, DT, GRAPPLE, GRAVITY, PLAYER, ROCKET } from './config';
+import type { MapDef, SpawnDef, Vec3Tuple } from './map';
 import { aimDirection, applyGrapple, updateVelocity, type GrappleState } from './movement';
 import { EMPTY_INPUT, type PlayerInput } from './types';
 
@@ -28,7 +28,13 @@ export interface PlayerState {
   wasGrappleHeld: boolean;
   yaw: number;
   pitch: number;
+  health: number;
+  alive: boolean;
+  respawnIn: number; // seconds, while dead
+  protectedFor: number; // seconds of spawn protection left
 }
+
+export type DeathCause = 'rocket' | 'fall';
 
 // Players are in their own collision group and ignore each other. Movement stays predictable on
 // the client, which only knows where other players were ~100ms ago. Rockets still hit players.
@@ -49,6 +55,16 @@ export class PlayerSim {
   pitch = 0;
   /** Seq of the input being simulated (0 offline). Tags fired rockets so a client can match its predictions. */
   seq = 0;
+
+  health: number = COMBAT.maxHealth;
+  alive = true;
+  respawnIn = 0;
+  protectedFor = 0;
+  sinceDamaged = Infinity; // seconds, for regen
+  lastAttacker: string | null = null; // who to credit if this player dies soon after being hit by them
+  sinceAttacked = Infinity; // seconds since lastAttacker's hit
+  kills = 0;
+  deaths = 0;
 
   constructor(
     readonly id: string,
@@ -71,6 +87,10 @@ export class PlayerSim {
       wasGrappleHeld: this.wasGrappleHeld,
       yaw: this.yaw,
       pitch: this.pitch,
+      health: this.health,
+      alive: this.alive,
+      respawnIn: this.respawnIn,
+      protectedFor: this.protectedFor,
     };
   }
 
@@ -86,6 +106,13 @@ export class PlayerSim {
     this.wasGrappleHeld = s.wasGrappleHeld;
     this.yaw = s.yaw;
     this.pitch = s.pitch;
+    this.health = s.health;
+    this.respawnIn = s.respawnIn;
+    this.protectedFor = s.protectedFor;
+    if (s.alive !== this.alive) {
+      this.alive = s.alive;
+      this.collider.setEnabled(s.alive);
+    }
     this.collider.setTranslation(this.pos);
     this.body.setNextKinematicTranslation(this.pos);
   }
@@ -109,7 +136,9 @@ export type SimEvent =
   | { type: 'jumped'; playerId: string }
   | { type: 'landed'; playerId: string; impactSpeed: number }
   | { type: 'knockback'; playerId: string; strength: number; sourceId: string; shot: number } // strength 0..1
-  | { type: 'respawn'; playerId: string; yaw: number };
+  | { type: 'respawn'; playerId: string; yaw: number }
+  | { type: 'damaged'; playerId: string; sourceId: string; amount: number }
+  | { type: 'killed'; playerId: string; killerId: string | null; cause: DeathCause }; // killerId null: suicide
 
 const _desired = new Vector3();
 const _dir = new Vector3();
@@ -189,7 +218,15 @@ export class GameSim {
   }
 
   respawn(p: PlayerSim) {
-    const spawn = this.map.spawns[this.spawnIndex++ % this.map.spawns.length];
+    const spawn = this.pickSpawn(p);
+    p.health = COMBAT.maxHealth;
+    p.alive = true;
+    p.respawnIn = 0;
+    p.protectedFor = COMBAT.spawnProtection;
+    p.sinceDamaged = Infinity;
+    p.lastAttacker = null;
+    p.sinceAttacked = Infinity;
+    p.collider.setEnabled(true);
     p.pos.set(...spawn.pos);
     p.yaw = spawn.yaw;
     p.pitch = 0;
@@ -199,6 +236,36 @@ export class GameSim {
     p.body.setTranslation(p.pos, true);
     p.body.setNextKinematicTranslation(p.pos);
     this.pendingEvents.push({ type: 'respawn', playerId: p.id, yaw: spawn.yaw });
+  }
+
+  /** The spawn point farthest from any living opponent. Ties (e.g. an empty map) rotate through the list. */
+  private pickSpawn(p: PlayerSim): SpawnDef {
+    const spawns = this.map.spawns;
+    const start = this.spawnIndex++;
+    let best = spawns[start % spawns.length];
+    let bestDist = -1;
+    for (let i = 0; i < spawns.length; i++) {
+      const s = spawns[(start + i) % spawns.length];
+      let nearest = Infinity;
+      for (const o of this.players.values()) {
+        if (o !== p && o.alive) nearest = Math.min(nearest, Math.hypot(o.pos.x - s.pos[0], o.pos.y - s.pos[1], o.pos.z - s.pos[2]));
+      }
+      if (nearest > bestDist) {
+        best = s;
+        bestDist = nearest;
+      }
+    }
+    return best;
+  }
+
+  /** True if nothing static (walls, floor, tower) blocks the straight line between two points. */
+  canSee(from: Vector3, to: Vector3): boolean {
+    _rayOrigin.copy(from);
+    const dist = _rayDir.subVectors(to, from).length();
+    if (dist < 1e-3) return true;
+    _rayDir.divideScalar(dist);
+    const flags = RAPIER.QueryFilterFlags.EXCLUDE_DYNAMIC | RAPIER.QueryFilterFlags.EXCLUDE_KINEMATIC;
+    return this.world.castRay(_ray, dist, true, flags) === null;
   }
 
   /** Where this player's grapple would attach if fired now (static geometry only), or null if out of range. */
@@ -254,6 +321,23 @@ export class GameSim {
 
   private stepPlayer(p: PlayerSim, input: PlayerInput, events: SimEvent[], mode: StepMode) {
     p.prevPos.copy(p.pos);
+    if (!p.alive) {
+      // Only the server brings players back. Tracking held grapple means holding it through the
+      // respawn doesn't fire it on the first tick alive.
+      p.wasGrappleHeld = input.grapple;
+      p.respawnIn = Math.max(0, p.respawnIn - DT);
+      if (mode === 'authority' && p.respawnIn === 0) {
+        this.respawn(p);
+        events.push(...this.takePendingEvents());
+      }
+      return;
+    }
+    if (mode === 'authority') {
+      p.sinceDamaged += DT;
+      p.sinceAttacked += DT;
+      p.protectedFor = Math.max(0, p.protectedFor - DT);
+      if (p.sinceDamaged > COMBAT.regenDelay) p.health = Math.min(COMBAT.maxHealth, p.health + COMBAT.regenRate * DT);
+    }
     p.yaw = input.yaw;
     p.pitch = input.pitch;
     // `pos` is the source of truth. Normally the collider is already there (world.step moved it),
@@ -301,8 +385,7 @@ export class GameSim {
     p.body.setNextKinematicTranslation(p.pos);
 
     if (p.pos.y < this.map.killY && mode === 'authority') {
-      this.respawn(p);
-      events.push(...this.takePendingEvents());
+      this.kill(p, this.recentAttacker(p), 'fall', events);
       return;
     }
 
@@ -354,6 +437,7 @@ export class GameSim {
     const radius = ROCKET.blastRadius;
 
     for (const p of this.players.values()) {
+      if (!p.alive) continue;
       const dist = p.pos.distanceTo(at);
       if (dist >= radius) continue;
       const falloff = 1 - dist / radius;
@@ -362,11 +446,46 @@ export class GameSim {
       p.vel.addScaledVector(_dir, ROCKET.knockback * falloff);
       p.grounded = false;
       events.push({ type: 'knockback', playerId: p.id, strength: falloff, sourceId: r.ownerId, shot: r.shot });
+      // Health is server-only: clients show what the server says, a round trip later.
+      if (mode === 'authority' && (p.id !== r.ownerId || COMBAT.selfDamage)) {
+        this.damage(p, Math.round(COMBAT.rocketDamage * falloff), r.ownerId, events);
+      }
     }
 
     // On a client the crates are only server-placed obstacles.
     if (mode === 'authority') this.pushCrates(at);
     events.push({ type: 'explosion', pos: at.clone(), normal, surface, ownerId: r.ownerId, shot: r.shot });
+  }
+
+  private damage(p: PlayerSim, amount: number, sourceId: string, events: SimEvent[]) {
+    if (amount <= 0 || p.protectedFor > 0) return;
+    // Finishing yourself off right after someone hit you still counts as their kill.
+    const killer = sourceId === p.id ? this.recentAttacker(p) : sourceId;
+    p.health -= amount;
+    p.sinceDamaged = 0;
+    if (sourceId !== p.id) {
+      p.lastAttacker = sourceId;
+      p.sinceAttacked = 0;
+    }
+    events.push({ type: 'damaged', playerId: p.id, sourceId, amount });
+    if (p.health <= 0) this.kill(p, killer, 'rocket', events);
+  }
+
+  private recentAttacker(p: PlayerSim): string | null {
+    return p.sinceAttacked < COMBAT.killCredit ? p.lastAttacker : null;
+  }
+
+  private kill(p: PlayerSim, killerId: string | null, cause: DeathCause, events: SimEvent[]) {
+    p.alive = false;
+    p.health = 0;
+    p.respawnIn = COMBAT.respawnDelay;
+    p.vel.set(0, 0, 0);
+    p.grapple = null;
+    p.collider.setEnabled(false); // rockets fly through the dead
+    p.deaths++;
+    const killer = killerId ? this.players.get(killerId) : undefined;
+    if (killer) killer.kills++;
+    events.push({ type: 'killed', playerId: p.id, killerId, cause });
   }
 
   private pushCrates(at: Vector3) {

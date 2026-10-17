@@ -1,11 +1,21 @@
-import { DT } from './config';
-import type { PlayerSim } from './sim';
+import { Vector3 } from 'three';
+import { DT, ROCKET } from './config';
+import type { GameSim, PlayerSim } from './sim';
 import type { PlayerInput } from './types';
 
-// A dumb server-side player, so there's something moving to look at when testing netcode alone.
-// It circles the tower bunny-hopping, rocket jumps now and then, and grapples upward.
+// A simple server-side opponent. It circles the tower bunny-hopping, and when it can see another
+// player it shoots at them: leading their movement, aiming at the feet of grounded targets for
+// splash, with some reaction time and aim error so it's beatable. With nobody in sight it rocket
+// jumps and grapples now and then, so it keeps moving.
 
 const ORBIT_RADIUS = 28;
+const SIGHT_RANGE = 50;
+const REACTION = 0.45; // seconds between spotting someone and the first shot
+const AIM_ERROR = 0.07; // radians, re-rolled every shot
+
+const _eye = new Vector3();
+const _aim = new Vector3();
+const _targetEye = new Vector3();
 
 export class Bot {
   private t = Math.random() * 100;
@@ -13,15 +23,19 @@ export class Bot {
   private nextRocketJump = 2 + Math.random() * 2;
   private nextGrapple = 5 + Math.random() * 3;
   private grappleFor = 0;
+  private targetId: string | null = null;
+  private retarget = 0;
+  private reaction = 0;
+  private errYaw = 0;
+  private errPitch = 0;
 
-  think(p: PlayerSim): PlayerInput {
+  think(p: PlayerSim, sim: GameSim): PlayerInput {
     this.t += DT;
 
     // Head for a point that slides around a circle, strafing side to side like an air-strafer.
     const a = this.t * this.orbitSpeed;
     const dx = Math.cos(a) * ORBIT_RADIUS - p.pos.x;
     const dz = Math.sin(a) * ORBIT_RADIUS - p.pos.z;
-    const yaw = Math.atan2(-dx, -dz);
 
     const input: PlayerInput = {
       forward: 1,
@@ -29,9 +43,22 @@ export class Bot {
       jump: true,
       fire: false,
       grapple: false,
-      yaw,
+      yaw: Math.atan2(-dx, -dz),
       pitch: 0,
     };
+
+    const target = this.updateTarget(p, sim);
+    if (target) {
+      this.aimAt(p, target, input);
+      input.forward = 0.3; // strafe around them rather than running into its own splash
+      this.reaction -= DT;
+      if (this.reaction <= 0 && p.fireCooldown === 0) {
+        input.fire = true;
+        this.errYaw = (Math.random() * 2 - 1) * AIM_ERROR;
+        this.errPitch = (Math.random() * 2 - 1) * AIM_ERROR;
+      }
+      return input;
+    }
 
     this.nextRocketJump -= DT;
     if (this.nextRocketJump <= 0 && p.grounded) {
@@ -51,5 +78,38 @@ export class Bot {
       input.grapple = true;
     }
     return input;
+  }
+
+  /** The nearest living player in sight, re-checked a few times a second. */
+  private updateTarget(p: PlayerSim, sim: GameSim): PlayerSim | null {
+    this.retarget -= DT;
+    const target = this.targetId ? sim.players.get(this.targetId) : undefined;
+    if (this.retarget > 0 && target?.alive) return target;
+    this.retarget = 0.25;
+
+    p.eye(_eye);
+    let best: PlayerSim | null = null;
+    let bestDist = SIGHT_RANGE;
+    for (const o of sim.players.values()) {
+      if (o === p || !o.alive) continue;
+      const dist = o.pos.distanceTo(p.pos);
+      if (dist < bestDist && sim.canSee(_eye, o.eye(_targetEye))) {
+        best = o;
+        bestDist = dist;
+      }
+    }
+    if (best && best.id !== this.targetId) this.reaction = REACTION;
+    this.targetId = best?.id ?? null;
+    return best;
+  }
+
+  private aimAt(p: PlayerSim, target: PlayerSim, input: PlayerInput) {
+    p.eye(_eye);
+    const flight = target.pos.distanceTo(_eye) / ROCKET.speed;
+    _aim.copy(target.pos).addScaledVector(target.vel, flight);
+    if (target.grounded) _aim.y -= 0.8; // the floor at their feet: splash is easier to land than a direct hit
+    _aim.sub(_eye);
+    input.yaw = Math.atan2(-_aim.x, -_aim.z) + this.errYaw;
+    input.pitch = Math.atan2(_aim.y, Math.hypot(_aim.x, _aim.z)) + this.errPitch;
   }
 }
