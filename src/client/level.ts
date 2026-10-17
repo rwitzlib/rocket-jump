@@ -91,6 +91,9 @@ export class CrateView {
 
   sync() {
     this.sim.crates.forEach((body, i) => {
+      // Resting crates are asleep and can't have moved. Skipping them also avoids allocating
+      // Rapier result objects for every crate on every frame.
+      if (body.isSleeping()) return;
       const t = body.translation();
       const r = body.rotation();
       this.meshes[i].position.set(t.x, t.y, t.z);

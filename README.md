@@ -20,6 +20,8 @@ Open http://localhost:5173 and click to play.
 | Space | Jump (hold to bunny-hop) |
 | Left click | Fire rocket |
 | Right click / E / Shift | Grapple (hold) |
+| M | Mute / unmute |
+| P | Frame-time overlay (long frames are also logged to the console) |
 | Esc | Release mouse |
 
 Aim at your feet and fire while jumping to rocket jump. The crosshair turns green when the grapple can reach.
@@ -38,19 +40,24 @@ src/
     main.ts        # bootstrap, fixed-timestep loop, interpolated camera
     input.ts       # keyboard + pointer lock
     level.ts       # meshes for the map and crates
-    effects.ts     # rockets, smoke, explosions, grapple rope
+    effects.ts     # rockets, trails, explosions (fireball, sparks, smoke, shockwave, scorch marks)
+    particles.ts   # GPU point-sprite particle system
+    rope.ts        # grapple rope + hook visuals
+    audio.ts       # procedurally synthesized 3D sound (no audio files)
+    camerafx.ts    # screen shake, speed FOV, landing dip
     viewmodel.ts   # first-person weapons (rendered in a separate pass)
 ```
 
 The simulation is kept separate from rendering on purpose. In multiplayer the server runs `GameSim`
 with every player's inputs, and each client runs the same code locally for prediction.
 
-In dev builds the game is exposed as `window.game` (`game.sim`, `game.me`) for tweaking from the console.
+In dev builds the game is exposed as `window.game` (`game.sim`, `game.me`, `game.effects`, ...) for tweaking from
+the console. `game.frame(t)` advances one rendered frame manually, which is handy for stepping through effects.
 
 ## Roadmap
 
 1. ~~Single-player movement sandbox: rocket jumping, grappling, test arena~~
-2. Weapon polish: sounds, better explosion VFX, rope visuals, hit feedback
+2. ~~Weapon polish: sounds, better explosion VFX, rope visuals, hit feedback~~
 3. Basic multiplayer: Node server + WebSockets, players see each other
 4. Server-authoritative sim with client-side prediction and interpolation of remote players
 5. Combat loop: health, damage, kills, respawns, scoreboard

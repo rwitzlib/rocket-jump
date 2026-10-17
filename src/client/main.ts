@@ -3,9 +3,13 @@ import * as THREE from 'three';
 import { DT } from '../shared/config';
 import { ARENA } from '../shared/map';
 import { GameSim, type SimEvent } from '../shared/sim';
+import { GameAudio } from './audio';
+import { CameraFX } from './camerafx';
 import { Effects } from './effects';
 import { Input } from './input';
 import { buildLevel, CrateView } from './level';
+import { PerfOverlay } from './perf';
+import { Rope } from './rope';
 import { ViewModel } from './viewmodel';
 
 const FOV = 90;
@@ -19,8 +23,12 @@ async function main() {
   const overlay = document.querySelector<HTMLElement>('#overlay')!;
   const crosshair = document.querySelector<HTMLElement>('#crosshair')!;
   const speedEl = document.querySelector<HTMLElement>('#speed')!;
+  const hitFlash = document.querySelector<HTMLElement>('#hit-flash')!;
+  const muteEl = document.querySelector<HTMLElement>('#mute')!;
 
-  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  // On laptops with two GPUs this asks for the discrete one. Some browsers ignore it on Windows,
+  // where the OS graphics setting for the browser decides (see the P overlay for which GPU is in use).
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFShadowMap;
@@ -37,12 +45,26 @@ async function main() {
   buildLevel(scene, ARENA);
   const crates = new CrateView(scene, sim);
   const effects = new Effects(scene);
+  const rope = new Rope(scene);
   const viewModel = new ViewModel(VIEWMODEL_FOV);
+  const cameraFx = new CameraFX(FOV);
+  const audio = new GameAudio();
   const input = new Input(canvas);
   input.yaw = me.yaw;
+  const perf = new PerfOverlay(gpuName(renderer));
 
-  overlay.addEventListener('click', () => input.lock());
+  overlay.addEventListener('click', () => {
+    audio.resume();
+    input.lock();
+  });
   input.onLockChange = (locked) => overlay.classList.toggle('hidden', locked);
+
+  const showMuted = (muted: boolean) => {
+    muteEl.textContent = muted ? 'Sound off (M)' : '';
+  };
+  document.addEventListener('keydown', (e) => {
+    if (e.code === 'KeyM') showMuted(audio.toggleMute());
+  });
 
   const resize = () => {
     const w = window.innerWidth;
@@ -51,16 +73,82 @@ async function main() {
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
     viewModel.resize(w / h);
+    rope.setResolution(w, h);
   };
   window.addEventListener('resize', resize);
   resize();
 
+  // Draw every effect once behind the start menu so all shaders compile now. Browsers compile
+  // shaders lazily on first draw, which otherwise freezes the game at the first rocket/grapple.
+  effects.setWarmup(true);
+  rope.setWarmup(true);
+  renderer.render(scene, camera);
+  renderer.render(viewModel.scene, viewModel.camera);
+  effects.setWarmup(false);
+  rope.setWarmup(false);
+
+  let flash = 0;
   const handleEvent = (e: SimEvent) => {
-    if (e.type === 'explosion') effects.explosion(e.pos);
-    else if (e.type === 'fired' && e.playerId === LOCAL_ID) viewModel.fire();
-    else if (e.type === 'respawn' && e.playerId === LOCAL_ID) {
-      input.yaw = e.yaw;
-      input.pitch = 0;
+    const mine = 'playerId' in e && e.playerId === LOCAL_ID;
+    switch (e.type) {
+      case 'explosion': {
+        effects.explosion(e.pos, e.normal, e.surface);
+        audio.play('explosion', { at: e.pos, volume: 1.6 });
+        const dist = e.pos.distanceTo(me.pos);
+        cameraFx.shake(Math.max(0, 0.7 * (1 - dist / 25)));
+        break;
+      }
+      case 'fired':
+        if (mine) {
+          viewModel.fire();
+          audio.play('fire', { volume: 0.8 });
+          cameraFx.shake(0.12);
+        } else audio.play('fire', { at: sim.players.get(e.playerId)!.pos });
+        break;
+      case 'knockback':
+        if (mine) {
+          cameraFx.shake(0.3 * e.strength);
+          flash = Math.max(flash, 0.25 + 0.5 * e.strength);
+        }
+        break;
+      case 'grapple':
+        if (!mine) break;
+        if (e.attached && me.grapple) {
+          rope.attach(me.grapple.anchor, me.grapple.normal);
+          viewModel.fireGrapple();
+          audio.play('grappleFire', { volume: 0.6 });
+          // The clank plays at the anchor, slightly delayed to match the visual hook travel.
+          const anchor = me.grapple.anchor.clone();
+          setTimeout(() => audio.play('grappleAttach', { at: anchor, volume: 1.2 }), 80);
+        } else {
+          rope.release();
+          audio.play('grappleRelease', { volume: 0.4 });
+        }
+        break;
+      case 'grappleMiss':
+        if (mine) {
+          viewModel.fireGrapple();
+          audio.play('grappleMiss', { volume: 0.4 });
+        }
+        break;
+      case 'jumped':
+        if (mine) audio.play('jump', { volume: 0.25 });
+        break;
+      case 'landed':
+        if (mine) {
+          const hard = Math.min(e.impactSpeed / 25, 1);
+          audio.play('land', { volume: 0.2 + hard * 0.8, rate: 1.1 - hard * 0.3 });
+          cameraFx.impact(Math.min(e.impactSpeed / 60, 0.25));
+          if (hard > 0.5) cameraFx.shake(hard * 0.25);
+        }
+        break;
+      case 'respawn':
+        if (mine) {
+          input.yaw = e.yaw;
+          input.pitch = 0;
+          rope.release();
+        }
+        break;
     }
   };
 
@@ -71,10 +159,14 @@ async function main() {
   const target = new THREE.Vector3();
   let accumulator = 0;
   let last = performance.now();
+  let shownFlash = '';
+  let shownSpeed = '';
 
   // Fixed-timestep simulation (60 Hz, same as a server would run) with interpolated rendering.
   const frame = (now: number) => {
-    const dt = Math.min((now - last) / 1000, 0.25);
+    // rAF timestamps can land slightly before `last`; a negative dt would run springs backwards.
+    const dt = Math.min(Math.max((now - last) / 1000, 0), 0.25);
+    perf.frame(now - last, now);
     last = now;
     accumulator += dt;
 
@@ -84,23 +176,29 @@ async function main() {
       accumulator -= DT;
     }
     const alpha = accumulator / DT;
+    const speed = me.vel.length();
+    const horizontalSpeed = Math.hypot(me.vel.x, me.vel.z);
 
     // Camera: interpolated position, but the latest mouse look so aiming never lags.
     me.eye(eye);
     prevEye.copy(me.prevPos).y += eye.y - me.pos.y;
     camera.position.lerpVectors(prevEye, eye, alpha);
     camera.rotation.set(input.pitch, input.yaw, 0);
-    camera.updateMatrixWorld();
+    const fov = cameraFx.apply(camera, dt, speed);
 
     crates.sync();
+    effects.setViewport(renderer.domElement.height, fov);
     effects.update(sim, alpha, dt);
-    const horizontalSpeed = Math.hypot(me.vel.x, me.vel.z);
     viewModel.update(dt, horizontalSpeed, me.grounded, !!me.grapple);
-    effects.setRope(
-      me.grapple ? camera.localToWorld(viewModel.ropeOrigin(FOV, hand)) : null,
-      me.grapple?.anchor ?? null,
-    );
-    speedEl.textContent = `${horizontalSpeed.toFixed(1)} m/s`;
+    rope.update(dt, camera.localToWorld(viewModel.ropeOrigin(fov, hand)), camera);
+    audio.update(camera, speed, sim.rockets);
+
+    // Only touch the DOM when something visibly changed; style writes every frame cost layout/paint work.
+    flash = Math.max(0, flash - dt * 2.5);
+    const flashText = flash.toFixed(2);
+    if (flashText !== shownFlash) hitFlash.style.opacity = shownFlash = flashText;
+    const speedText = `${horizontalSpeed.toFixed(1)} m/s`;
+    if (speedText !== shownSpeed) speedEl.textContent = shownSpeed = speedText;
     crosshair.classList.toggle('can-grapple', !me.grapple && sim.grappleTarget(me, target) !== null);
     crosshair.classList.toggle('grappling', !!me.grapple);
 
@@ -114,7 +212,15 @@ async function main() {
   requestAnimationFrame(frame);
 
   // Handy for tweaking from the browser console during development: `game.me.vel`, `game.sim`, etc.
-  if (import.meta.env.DEV) Object.assign(window, { game: { sim, me, input, camera } });
+  if (import.meta.env.DEV) Object.assign(window, { game: { sim, me, input, camera, scene, renderer, effects, audio, handleEvent, frame } });
+}
+
+function gpuName(renderer: THREE.WebGLRenderer): string {
+  const gl = renderer.getContext();
+  const info = gl.getExtension('WEBGL_debug_renderer_info');
+  const name = info ? String(gl.getParameter(info.UNMASKED_RENDERER_WEBGL)) : 'unknown GPU';
+  // "ANGLE (NVIDIA, NVIDIA GeForce RTX 4060 Laptop GPU (0x...) Direct3D11 ...)" -> the readable part.
+  return name.match(/ANGLE \([^,]+, (.+?)(?: \(0x[0-9A-Fa-f]+\))? Direct3D/)?.[1] ?? name;
 }
 
 main();

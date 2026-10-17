@@ -42,15 +42,23 @@ export interface Rocket {
 
 export type SimEvent =
   | { type: 'fired'; playerId: string }
-  | { type: 'explosion'; pos: Vector3 }
+  | { type: 'explosion'; pos: Vector3; normal: Vector3; surface: boolean } // surface = false for mid-air
   | { type: 'grapple'; playerId: string; attached: boolean }
+  | { type: 'grappleMiss'; playerId: string }
+  | { type: 'jumped'; playerId: string }
+  | { type: 'landed'; playerId: string; impactSpeed: number }
+  | { type: 'knockback'; playerId: string; strength: number } // strength 0..1
   | { type: 'respawn'; playerId: string; yaw: number };
 
-const _aim = new Vector3();
-const _eye = new Vector3();
 const _desired = new Vector3();
 const _dir = new Vector3();
 const _crate = new Vector3();
+
+// Reused for every ray cast so per-tick queries don't create garbage (GC pauses show up as hitches).
+// Rapier's Ray just holds references to these vectors.
+const _rayOrigin = new Vector3();
+const _rayDir = new Vector3();
+const _ray = new RAPIER.Ray(_rayOrigin, _rayDir);
 
 // Removes velocity the collision pass refused to let us travel (walls, floors, ceilings).
 function clipVelocity(v: number, desired: number, actual: number): number {
@@ -122,14 +130,14 @@ export class GameSim {
   }
 
   /** Where this player's grapple would attach if fired now (static geometry only), or null if out of range. */
-  grappleTarget(p: PlayerSim, out: Vector3): Vector3 | null {
-    aimDirection(p.yaw, p.pitch, _aim);
-    const ray = new RAPIER.Ray(p.eye(_eye), _aim);
+  grappleTarget(p: PlayerSim, out: Vector3, outNormal?: Vector3): Vector3 | null {
+    aimDirection(p.yaw, p.pitch, _rayDir);
+    p.eye(_rayOrigin);
     const flags = RAPIER.QueryFilterFlags.EXCLUDE_DYNAMIC | RAPIER.QueryFilterFlags.EXCLUDE_KINEMATIC;
-    const hit = this.world.castRay(ray, GRAPPLE.range, true, flags);
+    const hit = this.world.castRayAndGetNormal(_ray, GRAPPLE.range, true, flags);
     if (!hit) return null;
-    const pt = ray.pointAt(hit.timeOfImpact);
-    return out.set(pt.x, pt.y, pt.z);
+    outNormal?.set(hit.normal.x, hit.normal.y, hit.normal.z);
+    return out.copy(_rayOrigin).addScaledVector(_rayDir, hit.timeOfImpact);
   }
 
   step(inputs: ReadonlyMap<string, PlayerInput>): SimEvent[] {
@@ -151,9 +159,11 @@ export class GameSim {
 
     // Grapple: attach on press, release on let go.
     if (input.grapple && !p.wasGrappleHeld) {
-      const anchor = this.grappleTarget(p, new Vector3());
+      const normal = new Vector3();
+      const anchor = this.grappleTarget(p, new Vector3(), normal);
+      if (!anchor) events.push({ type: 'grappleMiss', playerId: p.id });
       if (anchor) {
-        p.grapple = { anchor, length: p.pos.distanceTo(anchor) };
+        p.grapple = { anchor, normal, length: p.pos.distanceTo(anchor) };
         if (p.grounded) {
           p.vel.y = Math.max(p.vel.y, GRAPPLE.attachHop);
           p.grounded = false;
@@ -166,7 +176,9 @@ export class GameSim {
     }
     p.wasGrappleHeld = input.grapple;
 
-    updateVelocity(p.vel, input, p.grounded, DT);
+    if (updateVelocity(p.vel, input, p.grounded, DT)) events.push({ type: 'jumped', playerId: p.id });
+    const wasGrounded = p.grounded;
+    const fallSpeed = -p.vel.y;
     if (p.grapple) applyGrapple(p.pos, p.vel, p.grapple, DT);
 
     // Move through the world with collision, then drop whatever velocity was blocked.
@@ -174,6 +186,9 @@ export class GameSim {
     this.controller.computeColliderMovement(p.collider, _desired);
     const moved = this.controller.computedMovement();
     p.grounded = this.controller.computedGrounded();
+    if (p.grounded && !wasGrounded && fallSpeed > 2) {
+      events.push({ type: 'landed', playerId: p.id, impactSpeed: fallSpeed });
+    }
     p.vel.x = clipVelocity(p.vel.x, _desired.x, moved.x);
     p.vel.y = clipVelocity(p.vel.y, _desired.y, moved.y);
     p.vel.z = clipVelocity(p.vel.z, _desired.z, moved.z);
@@ -211,23 +226,26 @@ export class GameSim {
       const r = this.rockets[i];
       r.prevPos.copy(r.pos);
       const owner = this.players.get(r.ownerId);
-      const ray = new RAPIER.Ray(r.pos, r.dir);
-      const hit = this.world.castRay(ray, travel, true, undefined, undefined, undefined, owner?.body);
+      _rayOrigin.copy(r.pos);
+      _rayDir.copy(r.dir);
+      const hit = this.world.castRayAndGetNormal(_ray, travel, true, undefined, undefined, undefined, owner?.body);
 
+      const normal = new Vector3();
       if (hit) {
-        const pt = ray.pointAt(hit.timeOfImpact);
-        r.pos.set(pt.x, pt.y, pt.z).addScaledVector(r.dir, -0.1);
+        r.pos.addScaledVector(r.dir, hit.timeOfImpact - 0.1);
+        normal.set(hit.normal.x, hit.normal.y, hit.normal.z);
       } else {
         r.pos.addScaledVector(r.dir, travel);
         r.life -= DT;
         if (r.life > 0) continue;
+        normal.copy(r.dir).negate();
       }
-      this.explode(r.pos, events);
+      this.explode(r.pos, normal, !!hit, events);
       this.rockets.splice(i, 1);
     }
   }
 
-  private explode(at: Vector3, events: SimEvent[]) {
+  private explode(at: Vector3, normal: Vector3, surface: boolean, events: SimEvent[]) {
     const radius = ROCKET.blastRadius;
 
     for (const p of this.players.values()) {
@@ -238,6 +256,7 @@ export class GameSim {
       else _dir.subVectors(p.pos, at).divideScalar(dist);
       p.vel.addScaledVector(_dir, ROCKET.knockback * falloff);
       p.grounded = false;
+      events.push({ type: 'knockback', playerId: p.id, strength: falloff });
     }
 
     for (const crate of this.crates) {
@@ -252,6 +271,6 @@ export class GameSim {
       crate.applyImpulse(_dir, true);
     }
 
-    events.push({ type: 'explosion', pos: at.clone() });
+    events.push({ type: 'explosion', pos: at.clone(), normal, surface });
   }
 }

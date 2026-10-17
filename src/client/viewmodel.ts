@@ -13,6 +13,7 @@ export class ViewModel {
   private grappler = new THREE.Group();
   private flash: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>;
   private recoil = 0;
+  private grappleKick = 0;
   private bob = 0;
 
   constructor(fov: number) {
@@ -55,8 +56,13 @@ export class ViewModel {
     this.recoil = 1;
   }
 
+  fireGrapple() {
+    this.grappleKick = 1;
+  }
+
   update(dt: number, speed: number, grounded: boolean, grappling: boolean) {
     this.recoil = Math.max(0, this.recoil - dt * 5);
+    this.grappleKick = Math.max(0, this.grappleKick - dt * 7);
     this.bob += dt * (grounded ? Math.min(speed, 10) : 0);
     const bobX = Math.sin(this.bob) * 0.012;
     const bobY = Math.abs(Math.cos(this.bob)) * 0.012;
@@ -66,7 +72,8 @@ export class ViewModel {
     this.flash.material.opacity = this.recoil > 0.7 ? (this.recoil - 0.7) / 0.3 : 0;
 
     const reach = grappling ? -0.08 : 0;
-    this.grappler.position.set(LEFT_HAND.x - bobX, LEFT_HAND.y + bobY, LEFT_HAND.z + reach);
+    this.grappler.position.set(LEFT_HAND.x - bobX, LEFT_HAND.y + bobY, LEFT_HAND.z + reach + this.grappleKick * 0.07);
+    this.grappler.rotation.x = this.grappleKick * 0.2;
   }
 
   /**

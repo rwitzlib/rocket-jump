@@ -30,8 +30,8 @@ function applyFriction(vel: Vector3, dt: number) {
   vel.z *= scale;
 }
 
-/** Applies input, friction and gravity to a player's velocity for one tick. */
-export function updateVelocity(vel: Vector3, input: PlayerInput, grounded: boolean, dt: number) {
+/** Applies input, friction and gravity to a player's velocity for one tick. Returns true if the player jumped. */
+export function updateVelocity(vel: Vector3, input: PlayerInput, grounded: boolean, dt: number): boolean {
   const sy = Math.sin(input.yaw);
   const cy = Math.cos(input.yaw);
   wish.set(-sy * input.forward + cy * input.right, 0, -cy * input.forward - sy * input.right);
@@ -51,10 +51,12 @@ export function updateVelocity(vel: Vector3, input: PlayerInput, grounded: boole
   }
 
   vel.y -= GRAVITY * dt;
+  return grounded && input.jump;
 }
 
 export interface GrappleState {
   anchor: Vector3;
+  normal: Vector3; // surface normal at the anchor, used to orient the hook
   length: number;
 }
 
