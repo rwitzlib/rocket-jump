@@ -17,6 +17,7 @@ export const MOVE = {
   groundAccel: 10,
   airAccel: 10,
   airWishCap: 1.0, // caps the speed gained per direction in the air (the strafe-jump trick)
+  airControl: 3, // extra air acceleration toward WASD, up to maxSpeed: steer and brake mid-air without losing a rocket jump's speed
   friction: 6,
   stopSpeed: 2,
   jumpSpeed: 7,
@@ -24,10 +25,11 @@ export const MOVE = {
 
 export const ROCKET = {
   speed: 30,
-  cooldown: 0.8,
+  cooldown: 1.0,
   lifetime: 4,
   blastRadius: 4.5,
   knockback: 15, // velocity change at the center of the blast, falls off linearly to 0 at the edge
+  selfKnockback: 1.4, // your own rockets launch you this much harder: bigger rocket jumps
   crateKnockback: 12,
 };
 
@@ -37,6 +39,7 @@ export const GRAPPLE = {
   maxPullSpeed: 28, // stop adding pull once already moving toward the anchor this fast
   minLength: 2,
   stiffness: 30, // how hard the rope corrects when stretched past its length
+  cooldown: 0.6, // after letting go (or missing) before the grapple can fire again
   attachHop: 5, // upward kick when the hook lands while you're on the ground, so it can lift you off
   playerTug: 0.6, // a hooked player is pulled toward you at this fraction of your own pull
   cratePull: 0.35, // fraction of the usual pull you get when hooked to a crate; the rest reels the crate in

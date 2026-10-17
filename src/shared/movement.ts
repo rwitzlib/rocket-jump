@@ -48,6 +48,9 @@ export function updateVelocity(vel: Vector3, input: PlayerInput, grounded: boole
     accelerate(vel, wish, wishSpeed, MOVE.groundAccel, dt);
   } else {
     accelerate(vel, wish, wishSpeed, MOVE.airAccel, dt, Math.min(wishSpeed, MOVE.airWishCap));
+    // Air control: WASD steers and brakes in the air. It only pushes toward the wish direction until
+    // you're moving maxSpeed that way, so holding W never caps a rocket jump that's already faster.
+    accelerate(vel, wish, wishSpeed, MOVE.airControl, dt);
   }
 
   vel.y -= GRAVITY * dt;

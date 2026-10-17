@@ -339,3 +339,43 @@ body {
   color: #ff8a5c;
   font-weight: 700;
 }
+
+#cooldowns {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  width: 48px;
+  height: 48px;
+  margin: -24px 0 0 -24px;
+  overflow: visible;
+  pointer-events: none;
+  filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.8));
+}
+
+#cooldowns.hidden {
+  display: none;
+}
+
+#cooldowns path {
+  fill: none;
+  stroke-width: 2.5;
+  stroke-linecap: round;
+}
+
+#cooldowns .track {
+  stroke: rgba(255, 255, 255, 0.15);
+}
+
+#cooldowns .fill.rocket {
+  stroke: #ff8a5c;
+}
+
+#cooldowns .fill.grapple {
+  stroke: #7cf0a0;
+}
+
+/* Charged weapons fade back so the arcs only draw the eye while something is recharging. */
+#cooldowns .fill.ready {
+  opacity: 0.35;
+  transition: opacity 250ms;
+}

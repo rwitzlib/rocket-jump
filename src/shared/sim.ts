@@ -26,7 +26,8 @@ export interface PlayerState {
   grounded: boolean;
   grapple: { anchor: Vec3Tuple; normal: Vec3Tuple; length: number; hook: HookState | null } | null;
   fireCooldown: number;
-  wasGrappleHeld: boolean;
+  grappleCooldown: number;
+  grappleUsed: boolean;
   yaw: number;
   pitch: number;
   health: number;
@@ -69,7 +70,8 @@ export class PlayerSim {
   grounded = false;
   grapple: GrappleState | null = null;
   fireCooldown = 0;
-  wasGrappleHeld = false;
+  grappleCooldown = 0;
+  grappleUsed = false; // this press of the grapple button already fired; cleared on release
   yaw = 0;
   pitch = 0;
   /** Seq of the input being simulated (0 offline). Tags fired rockets so a client can match its predictions. */
@@ -105,7 +107,8 @@ export class PlayerSim {
       grounded: this.grounded,
       grapple: g && { anchor: tuple(g.anchor), normal: tuple(g.normal), length: g.length, hook: hookToState(g.hook) },
       fireCooldown: this.fireCooldown,
-      wasGrappleHeld: this.wasGrappleHeld,
+      grappleCooldown: this.grappleCooldown,
+      grappleUsed: this.grappleUsed,
       yaw: this.yaw,
       pitch: this.pitch,
       health: this.health,
@@ -129,7 +132,8 @@ export class PlayerSim {
       hook: hookFromState(g.hook),
     };
     this.fireCooldown = s.fireCooldown;
-    this.wasGrappleHeld = s.wasGrappleHeld;
+    this.grappleCooldown = s.grappleCooldown;
+    this.grappleUsed = s.grappleUsed;
     this.yaw = s.yaw;
     this.pitch = s.pitch;
     this.health = s.health;
@@ -465,9 +469,9 @@ export class GameSim {
   private stepPlayer(p: PlayerSim, input: PlayerInput, events: SimEvent[], mode: StepMode) {
     p.prevPos.copy(p.pos);
     if (!p.alive) {
-      // Only the server brings players back. Tracking held grapple means holding it through the
-      // respawn doesn't fire it on the first tick alive.
-      p.wasGrappleHeld = input.grapple;
+      // Only the server brings players back. Holding grapple through the respawn doesn't fire it
+      // on the first tick alive.
+      p.grappleUsed = input.grapple;
       p.respawnIn = Math.max(0, p.respawnIn - DT);
       if (mode === 'authority' && p.respawnIn === 0) {
         this.respawn(p);
@@ -487,11 +491,18 @@ export class GameSim {
     // but a replay runs several ticks without stepping the world.
     p.collider.setTranslation(p.pos);
 
-    // Grapple: attach on press, release on let go.
-    if (input.grapple && !p.wasGrappleHeld) {
+    // Grapple: fires on press, or the moment its cooldown ends if the button is still held.
+    // Releases on let go.
+    p.grappleCooldown = Math.max(0, p.grappleCooldown - DT);
+    if (!input.grapple) p.grappleUsed = false;
+    if (input.grapple && !p.grappleUsed && !p.grapple && p.grappleCooldown === 0) {
+      p.grappleUsed = true;
       const normal = new Vector3();
       const anchor = this.grappleTarget(p, new Vector3(), normal, input.view);
-      if (!anchor) events.push({ type: 'grappleMiss', playerId: p.id });
+      if (!anchor) {
+        events.push({ type: 'grappleMiss', playerId: p.id });
+        p.grappleCooldown = GRAPPLE.cooldown;
+      }
       if (anchor) {
         let hook: Hook | null = null;
         if (_aim.kind === 'player') {
@@ -518,15 +529,16 @@ export class GameSim {
       }
     } else if (!input.grapple && p.grapple) {
       p.grapple = null;
+      p.grappleCooldown = GRAPPLE.cooldown;
       events.push({ type: 'grapple', playerId: p.id, attached: false });
     }
-    p.wasGrappleHeld = input.grapple;
 
     if (updateVelocity(p.vel, input, p.grounded, DT)) events.push({ type: 'jumped', playerId: p.id });
     const wasGrounded = p.grounded;
     const fallSpeed = -p.vel.y;
     if (p.grapple && !this.followHook(p.grapple)) {
       p.grapple = null;
+      p.grappleCooldown = GRAPPLE.cooldown;
       events.push({ type: 'grapple', playerId: p.id, attached: false });
     }
     if (p.grapple) {
@@ -624,7 +636,8 @@ export class GameSim {
       const falloff = 1 - dist / radius;
       if (dist < 1e-3) _dir.set(0, 1, 0);
       else _dir.subVectors(center, at).divideScalar(dist);
-      p.vel.addScaledVector(_dir, ROCKET.knockback * falloff);
+      const boost = p.id === r.ownerId ? ROCKET.selfKnockback : 1;
+      p.vel.addScaledVector(_dir, ROCKET.knockback * boost * falloff);
       p.grounded = false;
       events.push({ type: 'knockback', playerId: p.id, strength: falloff, sourceId: r.ownerId, shot: r.shot });
       // Health is server-only: clients show what the server says, a round trip later.

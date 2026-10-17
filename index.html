@@ -12,6 +12,13 @@
 
     <div id="hit-flash"></div>
     <div id="crosshair"></div>
+    <!-- Weapon cooldowns around the crosshair: grapple on the left, rocket on the right. They fill bottom to top. -->
+    <svg id="cooldowns" viewBox="-24 -24 48 48" aria-hidden="true">
+      <path class="track" d="M -5.56 17.12 A 18 18 0 0 1 -5.56 -17.12" />
+      <path id="cd-grapple" class="fill grapple" pathLength="1" d="M -5.56 17.12 A 18 18 0 0 1 -5.56 -17.12" />
+      <path class="track" d="M 5.56 17.12 A 18 18 0 0 0 5.56 -17.12" />
+      <path id="cd-rocket" class="fill rocket" pathLength="1" d="M 5.56 17.12 A 18 18 0 0 0 5.56 -17.12" />
+    </svg>
     <div id="speed">0.0 m/s</div>
     <div id="mute"></div>
 

@@ -1,6 +1,6 @@
 import RAPIER from '@dimforge/rapier3d-compat';
 import * as THREE from 'three';
-import { DT } from '../shared/config';
+import { DT, GRAPPLE, ROCKET } from '../shared/config';
 import { ARENA } from '../shared/map';
 import { GameSim, type DeathCause, type PlayerSim, type SimEvent } from '../shared/sim';
 import { GameAudio } from './audio';
@@ -268,6 +268,7 @@ async function main() {
     crosshair.classList.toggle('grappling', !!me.grapple);
     hud.setHealth(me.health);
     hud.setProtected(me.alive && me.protectedFor > 0);
+    hud.setCooldowns(1 - me.fireCooldown / ROCKET.cooldown, 1 - me.grappleCooldown / GRAPPLE.cooldown);
     hud.setDeath(me.alive ? null : (death ?? { killerId: null, cause: 'rocket' }), me.respawnIn);
     if (hud.boardOpen) {
       hud.setScores(client ? client.scores : [...sim.players.values()].map((p) => ({ id: p.id, kills: p.kills, deaths: p.deaths })));

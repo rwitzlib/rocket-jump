@@ -25,7 +25,9 @@ Open http://localhost:5173 and click to play.
 | P | Frame-time overlay (long frames are also logged to the console) |
 | Esc | Release mouse |
 
-Aim at your feet and fire while jumping to rocket jump. Your own rockets never hurt you, so rocket jumping is free.
+Aim at your feet and fire while jumping to rocket jump. Your own rockets never hurt you and launch you harder than
+they push others, so rocket jumping is free. WASD steers you in the air. The arcs around the crosshair show weapon
+cooldowns: rocket (1 s) on the right, grapple (0.6 s after letting go) on the left.
 Everyone has 100 health, which regenerates after 5 seconds without damage. You respawn 3 seconds after dying, with
 3 seconds of spawn protection. Knocking someone off the map counts as your kill. All of this is tuned in `COMBAT` in
 `shared/config.ts`. The crosshair turns green when the grapple can reach.

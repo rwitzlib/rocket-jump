@@ -21,6 +21,10 @@ export class Hud {
   private readonly board = el('scoreboard');
   private readonly boardBody = el<HTMLTableSectionElement>('scoreboard-body');
   private readonly crosshair = el('crosshair');
+  private readonly cooldowns = document.querySelector<SVGSVGElement>('#cooldowns')!;
+  private readonly rocketArc = document.querySelector<SVGPathElement>('#cd-rocket')!;
+  private readonly grappleArc = document.querySelector<SVGPathElement>('#cd-grapple')!;
+  private readonly shownCharge = { rocket: -1, grapple: -1 };
 
   private shownHealth = -1;
   private shownProtected = false;
@@ -57,10 +61,25 @@ export class Hud {
     this.health.classList.toggle('protected', on);
   }
 
+  /** How charged each weapon is, 0 (just used) to 1 (ready). */
+  setCooldowns(rocket: number, grapple: number) {
+    this.setArc(this.rocketArc, 'rocket', rocket);
+    this.setArc(this.grappleArc, 'grapple', grapple);
+  }
+
+  private setArc(arc: SVGPathElement, key: 'rocket' | 'grapple', charge: number) {
+    const shown = Math.round(Math.min(Math.max(charge, 0), 1) * 50) / 50;
+    if (shown === this.shownCharge[key]) return;
+    this.shownCharge[key] = shown;
+    arc.style.strokeDasharray = `${shown} 1`;
+    arc.classList.toggle('ready', shown === 1);
+  }
+
   /** Pass null while alive. */
   setDeath(info: { killerId: string | null; cause: DeathCause } | null, respawnIn: number) {
     this.death.hidden = !info;
     this.crosshair.hidden = !!info;
+    this.cooldowns.classList.toggle('hidden', !!info);
     if (!info) return;
     const timer = respawnIn > 0 ? `Respawning in ${Math.ceil(respawnIn)}` : 'Respawning…';
     if (timer !== this.shownTimer) this.deathTimer.textContent = this.shownTimer = timer;
