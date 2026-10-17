@@ -17,7 +17,8 @@ export const MOVE = {
   groundAccel: 10,
   airAccel: 10,
   airWishCap: 1.0, // caps the speed gained per direction in the air (the strafe-jump trick)
-  airControl: 3, // extra air acceleration toward WASD, up to maxSpeed: steer and brake mid-air without losing a rocket jump's speed
+  airControl: 1.5, // extra air acceleration toward WASD: steer and brake a little mid-air without losing a rocket jump's speed
+  airControlSpeed: 6, // air control only pushes until you're moving this fast that way: half the ground speed
   friction: 6,
   stopSpeed: 2,
   jumpSpeed: 7,

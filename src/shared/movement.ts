@@ -47,10 +47,14 @@ export function updateVelocity(vel: Vector3, input: PlayerInput, grounded: boole
     applyFriction(vel, dt);
     accelerate(vel, wish, wishSpeed, MOVE.groundAccel, dt);
   } else {
-    accelerate(vel, wish, wishSpeed, MOVE.airAccel, dt, Math.min(wishSpeed, MOVE.airWishCap));
-    // Air control: WASD steers and brakes in the air. It only pushes toward the wish direction until
-    // you're moving maxSpeed that way, so holding W never caps a rocket jump that's already faster.
-    accelerate(vel, wish, wishSpeed, MOVE.airControl, dt);
+    // The strafe-jump term is for turning: pressed roughly sideways to your motion it adds a little
+    // speed each tick. Pressed against your motion it would brake almost instantly, so it stops
+    // helping there and only the (weaker) air control below slows you down.
+    if (vel.dot(wish) > -MOVE.airWishCap) accelerate(vel, wish, wishSpeed, MOVE.airAccel, dt, Math.min(wishSpeed, MOVE.airWishCap));
+    // Air control: WASD steers and brakes in the air, more weakly than on the ground. It only pushes
+    // toward the wish direction until you're moving airControlSpeed that way, so holding W never caps
+    // a rocket jump that's already faster.
+    accelerate(vel, wish, MOVE.airControlSpeed * Math.min(len, 1), MOVE.airControl, dt);
   }
 
   vel.y -= GRAVITY * dt;
