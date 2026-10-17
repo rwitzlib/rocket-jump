@@ -38,6 +38,9 @@ export const GRAPPLE = {
   minLength: 2,
   stiffness: 30, // how hard the rope corrects when stretched past its length
   attachHop: 5, // upward kick when the hook lands while you're on the ground, so it can lift you off
+  playerTug: 0.6, // a hooked player is pulled toward you at this fraction of your own pull
+  cratePull: 0.35, // fraction of the usual pull you get when hooked to a crate; the rest reels the crate in
+  crateReelForce: 45, // newtons-ish pulling a hooked crate toward you: light crates fly, stacked ones resist
 };
 
 export const CRATE = {

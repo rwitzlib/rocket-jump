@@ -74,6 +74,13 @@ export class Rope {
     this.state = { kind: 'attached', anchor: anchor.clone(), normal: normal.clone(), age: 0 };
   }
 
+  /** Keeps an attached hook on a moving anchor (a hooked player or crate). */
+  follow(anchor: THREE.Vector3, normal: THREE.Vector3) {
+    if (this.state.kind !== 'attached') return;
+    this.state.anchor.copy(anchor);
+    this.state.normal.copy(normal);
+  }
+
   release() {
     if (this.state.kind !== 'attached') return;
     _tip.copy(this.state.anchor);

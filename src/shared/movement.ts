@@ -54,17 +54,23 @@ export function updateVelocity(vel: Vector3, input: PlayerInput, grounded: boole
   return grounded && input.jump;
 }
 
+/** What a grapple is hooked into when it isn't static level geometry. The anchor follows it. */
+export type Hook =
+  | { kind: 'player'; id: string; offset: Vector3 } // offset from the player's center
+  | { kind: 'crate'; index: number; local: Vector3; localNormal: Vector3 }; // in the crate's own frame
+
 export interface GrappleState {
   anchor: Vector3;
   normal: Vector3; // surface normal at the anchor, used to orient the hook
   length: number;
+  hook: Hook | null; // null: static geometry
 }
 
 /**
  * Grapple = constant pull toward the anchor + a rope that only ever shortens.
  * The rope removes outward velocity, which turns sideways momentum into swinging.
  */
-export function applyGrapple(pos: Vector3, vel: Vector3, g: GrappleState, dt: number) {
+export function applyGrapple(pos: Vector3, vel: Vector3, g: GrappleState, dt: number, pullScale = 1) {
   toAnchor.subVectors(g.anchor, pos);
   const dist = toAnchor.length();
   if (dist < 1e-3) return;
@@ -73,7 +79,7 @@ export function applyGrapple(pos: Vector3, vel: Vector3, g: GrappleState, dt: nu
   g.length = Math.min(g.length, Math.max(dist, GRAPPLE.minLength));
 
   if (dist > GRAPPLE.minLength && vel.dot(toAnchor) < GRAPPLE.maxPullSpeed) {
-    vel.addScaledVector(toAnchor, GRAPPLE.pullAccel * dt);
+    vel.addScaledVector(toAnchor, GRAPPLE.pullAccel * pullScale * dt);
   }
 
   if (dist > g.length) {

@@ -79,6 +79,7 @@ export class NetClient {
   private rocketCache = new Map<number, Rocket>();
   private exploded = new Set<number>(); // shots of ours whose explosion has been shown
   private crateCache: number[][] = [];
+  private readonly alivePositions = new Map<string, Vector3>(); // what the sim hit-tests hooks and our rockets against
 
   constructor(
     readonly sim: GameSim,
@@ -86,12 +87,15 @@ export class NetClient {
     private readonly send: (msg: ClientMessage) => void,
   ) {
     this.me = sim.addPlayer(id);
+    sim.remotePositions = this.alivePositions;
     // Crates are simulated by the server. Here they're just obstacles placed from snapshots.
     for (const crate of sim.crates) crate.setBodyType(RAPIER.RigidBodyType.KinematicPositionBased, true);
   }
 
   /** Call once per fixed tick with the local input: sends it and predicts its result. */
   predict(input: PlayerInput): SimEvent[] {
+    // Tells the server what we were looking at, so it judges our hooks and rockets against that.
+    if (this.renderTick >= 0) input.view = Math.round(this.renderTick * 100) / 100;
     this.pending.push({ seq: ++this.seq, input });
     if (this.pending.length > MAX_PENDING) this.pending.shift();
     this.stats.pending = this.pending.length;
@@ -181,7 +185,7 @@ export class NetClient {
     for (const r of msg.rockets) {
       if (r.ownerId !== this.id) continue;
       const pos = new Vector3(...r.pos);
-      rockets.push({ id: -r.shot, ownerId: r.ownerId, shot: r.shot, pos, prevPos: pos.clone(), dir: new Vector3(...r.dir), life: r.life });
+      rockets.push({ id: -r.shot, ownerId: r.ownerId, shot: r.shot, pos, prevPos: pos.clone(), dir: new Vector3(...r.dir), life: r.life, lag: 0 });
     }
   }
 
@@ -237,13 +241,19 @@ export class NetClient {
       r.pitch = pa.pitch + (pb.pitch - pa.pitch) * t;
       r.alive = t < 0.5 ? pa.alive : pb.alive;
       r.protected = t < 0.5 ? pa.protected : pb.protected;
-      const anchor = t < 0.5 ? pa.anchor : pb.anchor;
-      if (anchor) (r.anchor ??= new Vector3()).set(...anchor);
-      else r.anchor = null;
+      // Anchors move when hooked into a player or crate, so blend them when both ends have one.
+      if (pa.anchor && pb.anchor) (r.anchor ??= new Vector3()).set(...pa.anchor).lerp(_v.set(...pb.anchor), t);
+      else {
+        const anchor = t < 0.5 ? pa.anchor : pb.anchor;
+        if (anchor) (r.anchor ??= new Vector3()).set(...anchor);
+        else r.anchor = null;
+      }
     }
     for (const id of this.remotes.keys()) {
       if (!b.players.some((p) => p.id === id)) this.remotes.delete(id);
     }
+    this.alivePositions.clear();
+    for (const r of this.remotes.values()) if (r.alive) this.alivePositions.set(r.id, r.pos);
   }
 
   private interpolateRockets(a: SnapshotMessage, b: SnapshotMessage, t: number) {
@@ -265,7 +275,7 @@ export class NetClient {
   private rocketFor(s: RocketState): Rocket {
     let r = this.rocketCache.get(s.id);
     if (!r) {
-      r = { id: s.id, ownerId: s.ownerId, shot: s.shot, pos: new Vector3(), prevPos: new Vector3(), dir: new Vector3(...s.dir), life: s.life };
+      r = { id: s.id, ownerId: s.ownerId, shot: s.shot, pos: new Vector3(), prevPos: new Vector3(), dir: new Vector3(...s.dir), life: s.life, lag: 0 };
       this.rocketCache.set(s.id, r);
     }
     return r;

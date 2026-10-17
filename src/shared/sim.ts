@@ -2,7 +2,8 @@ import RAPIER from '@dimforge/rapier3d-compat';
 import { Euler, Quaternion, Vector3 } from 'three';
 import { COMBAT, CRATE, DT, GRAPPLE, GRAVITY, PLAYER, ROCKET } from './config';
 import type { MapDef, SpawnDef, Vec3Tuple } from './map';
-import { aimDirection, applyGrapple, updateVelocity, type GrappleState } from './movement';
+import { capsuleNormal, PositionHistory, rayCapsule, REWIND_TICKS } from './hits';
+import { aimDirection, applyGrapple, updateVelocity, type GrappleState, type Hook } from './movement';
 import { EMPTY_INPUT, type PlayerInput } from './types';
 
 // The authoritative game simulation. It has no rendering or DOM code, so the same class can run
@@ -23,7 +24,7 @@ export interface PlayerState {
   pos: Vec3Tuple;
   vel: Vec3Tuple;
   grounded: boolean;
-  grapple: { anchor: Vec3Tuple; normal: Vec3Tuple; length: number } | null;
+  grapple: { anchor: Vec3Tuple; normal: Vec3Tuple; length: number; hook: HookState | null } | null;
   fireCooldown: number;
   wasGrappleHeld: boolean;
   yaw: number;
@@ -35,6 +36,24 @@ export interface PlayerState {
 }
 
 export type DeathCause = 'rocket' | 'fall';
+
+export type HookState =
+  | { kind: 'player'; id: string; offset: Vec3Tuple }
+  | { kind: 'crate'; index: number; local: Vec3Tuple; localNormal: Vec3Tuple };
+
+function hookToState(h: Hook | null): HookState | null {
+  if (!h) return null;
+  return h.kind === 'player'
+    ? { kind: 'player', id: h.id, offset: tuple(h.offset) }
+    : { kind: 'crate', index: h.index, local: tuple(h.local), localNormal: tuple(h.localNormal) };
+}
+
+function hookFromState(h: HookState | null): Hook | null {
+  if (!h) return null;
+  return h.kind === 'player'
+    ? { kind: 'player', id: h.id, offset: new Vector3(...h.offset) }
+    : { kind: 'crate', index: h.index, local: new Vector3(...h.local), localNormal: new Vector3(...h.localNormal) };
+}
 
 // Players are in their own collision group and ignore each other. Movement stays predictable on
 // the client, which only knows where other players were ~100ms ago. Rockets still hit players.
@@ -65,6 +84,8 @@ export class PlayerSim {
   sinceAttacked = Infinity; // seconds since lastAttacker's hit
   kills = 0;
   deaths = 0;
+  /** Recent positions, server-side, for lag-compensated hit tests. */
+  readonly history = new PositionHistory();
 
   constructor(
     readonly id: string,
@@ -82,7 +103,7 @@ export class PlayerSim {
       pos: tuple(this.pos),
       vel: tuple(this.vel),
       grounded: this.grounded,
-      grapple: g && { anchor: tuple(g.anchor), normal: tuple(g.normal), length: g.length },
+      grapple: g && { anchor: tuple(g.anchor), normal: tuple(g.normal), length: g.length, hook: hookToState(g.hook) },
       fireCooldown: this.fireCooldown,
       wasGrappleHeld: this.wasGrappleHeld,
       yaw: this.yaw,
@@ -101,7 +122,12 @@ export class PlayerSim {
     this.vel.set(...s.vel);
     this.grounded = s.grounded;
     const g = s.grapple;
-    this.grapple = g && { anchor: new Vector3(...g.anchor), normal: new Vector3(...g.normal), length: g.length };
+    this.grapple = g && {
+      anchor: new Vector3(...g.anchor),
+      normal: new Vector3(...g.normal),
+      length: g.length,
+      hook: hookFromState(g.hook),
+    };
     this.fireCooldown = s.fireCooldown;
     this.wasGrappleHeld = s.wasGrappleHeld;
     this.yaw = s.yaw;
@@ -126,6 +152,7 @@ export interface Rocket {
   prevPos: Vector3;
   dir: Vector3;
   life: number;
+  lag: number; // ticks to rewind other players by when testing hits: how far behind the shooter was seeing
 }
 
 export type SimEvent =
@@ -144,6 +171,16 @@ const _desired = new Vector3();
 const _dir = new Vector3();
 const _crate = new Vector3();
 const _discard: SimEvent[] = [];
+const _q = new Quaternion();
+const _center = new Vector3();
+const _toTarget = new Vector3();
+const _aimOrigin = new Vector3();
+const _aimDir = new Vector3();
+
+type AimKind = 'none' | 'world' | 'player' | 'crate';
+
+/** Result of aimHit, reused between calls. */
+const _aim = { kind: 'none' as AimKind, dist: 0, playerId: '', crateIndex: -1, center: new Vector3() };
 
 // Reused for every ray cast so per-tick queries don't create garbage (GC pauses show up as hitches).
 // Rapier's Ray just holds references to these vectors.
@@ -164,7 +201,13 @@ export class GameSim {
   readonly rockets: Rocket[] = [];
   readonly crates: RAPIER.RigidBody[] = [];
   tick = 0;
+  /**
+   * Client only: where other players are being drawn (alive ones), set by the netcode. A client's
+   * sim has no colliders for them, so hooks and predicted rockets test against these instead.
+   */
+  remotePositions: ReadonlyMap<string, Vector3> | null = null;
 
+  private readonly crateIndex = new Map<number, number>(); // rigid-body handle -> index in `crates`
   private readonly controller: RAPIER.KinematicCharacterController;
   private nextRocketId = 1;
   private spawnIndex = 0;
@@ -188,6 +231,7 @@ export class GameSim {
     for (const pos of map.crates) {
       const body = this.world.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(...pos));
       this.world.createCollider(RAPIER.ColliderDesc.cuboid(h, h, h).setDensity(CRATE.density), body);
+      this.crateIndex.set(body.handle, this.crates.length);
       this.crates.push(body);
     }
 
@@ -227,6 +271,7 @@ export class GameSim {
     p.lastAttacker = null;
     p.sinceAttacked = Infinity;
     p.collider.setEnabled(true);
+    p.history.clear();
     p.pos.set(...spawn.pos);
     p.yaw = spawn.yaw;
     p.pitch = 0;
@@ -268,15 +313,112 @@ export class GameSim {
     return this.world.castRay(_ray, dist, true, flags) === null;
   }
 
-  /** Where this player's grapple would attach if fired now (static geometry only), or null if out of range. */
-  grappleTarget(p: PlayerSim, out: Vector3, outNormal?: Vector3): Vector3 | null {
-    aimDirection(p.yaw, p.pitch, _rayDir);
-    p.eye(_rayOrigin);
-    const flags = RAPIER.QueryFilterFlags.EXCLUDE_DYNAMIC | RAPIER.QueryFilterFlags.EXCLUDE_KINEMATIC;
-    const hit = this.world.castRayAndGetNormal(_ray, GRAPPLE.range, true, flags);
-    if (!hit) return null;
-    outNormal?.set(hit.normal.x, hit.normal.y, hit.normal.z);
-    return out.copy(_rayOrigin).addScaledVector(_rayDir, hit.timeOfImpact);
+  /** Where this player's grapple would attach if fired now, or null if nothing is in range. */
+  grappleTarget(p: PlayerSim, out: Vector3, outNormal?: Vector3, view?: number): Vector3 | null {
+    const origin = p.eye(_aimOrigin);
+    const dir = aimDirection(p.yaw, p.pitch, _aimDir);
+    if (this.aimHit(origin, dir, GRAPPLE.range, p.id, view, outNormal) === 'none') return null;
+    return out.copy(origin).addScaledVector(dir, _aim.dist);
+  }
+
+  /**
+   * Casts a ray against the level, crates and other players (except `excludeId`), nearest first.
+   * The details land in `_aim`.
+   */
+  private aimHit(origin: Vector3, dir: Vector3, maxDist: number, excludeId: string, view: number | undefined, outNormal?: Vector3): AimKind {
+    _rayOrigin.copy(origin);
+    _rayDir.copy(dir);
+    // Players are filtered out by collision group here: they're tested below, at the right time.
+    const hit = this.world.castRayAndGetNormal(_ray, maxDist, true, undefined, PLAYER_COLLISION_GROUPS);
+    _aim.kind = 'none';
+    if (hit) {
+      _aim.dist = hit.timeOfImpact;
+      const body = hit.collider.parent();
+      const crate = body ? this.crateIndex.get(body.handle) : undefined;
+      _aim.kind = crate === undefined ? 'world' : 'crate';
+      _aim.crateIndex = crate ?? -1;
+      outNormal?.set(hit.normal.x, hit.normal.y, hit.normal.z);
+    }
+    this.forEachTarget(excludeId, view, (id, center) => {
+      const t = rayCapsule(origin, dir, center, _aim.kind === 'none' ? maxDist : _aim.dist);
+      if (t === null) return;
+      _aim.kind = 'player';
+      _aim.dist = t;
+      _aim.playerId = id;
+      _aim.center.copy(center);
+    });
+    // (Re-read through a cast: TypeScript can't see that the callback above may have changed it.)
+    const kind = _aim.kind as AimKind;
+    if (kind === 'player' && outNormal) {
+      capsuleNormal(_toTarget.copy(origin).addScaledVector(dir, _aim.dist), _aim.center, outNormal);
+    }
+    return kind;
+  }
+
+  /**
+   * Every other living player, at the position hit tests should use: on a client, where it draws
+   * them; on the server, rewound to `view` (the tick the shooter was seeing), capped at REWIND_TICKS.
+   */
+  private forEachTarget(excludeId: string, view: number | undefined, fn: (id: string, center: Vector3) => void) {
+    if (this.remotePositions) {
+      for (const [id, pos] of this.remotePositions) if (id !== excludeId) fn(id, pos);
+      return;
+    }
+    const rewind = view === undefined ? null : Math.min(Math.max(view, this.tick - REWIND_TICKS), this.tick);
+    for (const o of this.players.values()) {
+      if (o.id === excludeId || !o.alive) continue;
+      if (rewind === null || !o.history.sample(rewind, _center)) _center.copy(o.pos);
+      fn(o.id, _center);
+    }
+  }
+
+  /** Moves a grapple's anchor along with whatever it's hooked into. False if that's gone (died, left). */
+  private followHook(g: GrappleState): boolean {
+    const h = g.hook;
+    if (!h) return true;
+    if (h.kind === 'player') {
+      let pos: Vector3 | undefined;
+      if (this.remotePositions) pos = this.remotePositions.get(h.id);
+      else {
+        const target = this.players.get(h.id);
+        if (target?.alive) pos = target.pos;
+      }
+      if (!pos) return false;
+      g.anchor.copy(pos).add(h.offset);
+      return true;
+    }
+    const crate = this.crates[h.index];
+    const r = crate.rotation();
+    _q.set(r.x, r.y, r.z, r.w);
+    const t = crate.translation();
+    g.anchor.copy(h.local).applyQuaternion(_q).add(_center.set(t.x, t.y, t.z));
+    g.normal.copy(h.localNormal).applyQuaternion(_q);
+    return true;
+  }
+
+  /** The other end of a rope's pull, on whatever it's hooked into. Server only. */
+  private pullHooked(p: PlayerSim, h: Hook) {
+    if (h.kind === 'player') {
+      // Tug of war: they get dragged toward us too.
+      const target = this.players.get(h.id);
+      if (!target) return;
+      const dist = _toTarget.subVectors(p.pos, target.pos).length();
+      if (dist <= GRAPPLE.minLength) return;
+      _toTarget.divideScalar(dist);
+      if (target.vel.dot(_toTarget) < GRAPPLE.maxPullSpeed) {
+        target.vel.addScaledVector(_toTarget, GRAPPLE.pullAccel * GRAPPLE.playerTug * DT);
+      }
+      return;
+    }
+    // A fixed force, so the crate's mass (and whatever is stacked on or wedged against it) decides how far it moves.
+    const crate = this.crates[h.index];
+    const t = crate.translation();
+    const dist = _toTarget.subVectors(p.pos, _center.set(t.x, t.y, t.z)).length();
+    if (dist <= GRAPPLE.minLength + 0.5) return;
+    _toTarget.divideScalar(dist);
+    const v = crate.linvel();
+    if (v.x * _toTarget.x + v.y * _toTarget.y + v.z * _toTarget.z >= GRAPPLE.maxPullSpeed) return;
+    crate.applyImpulse(_toTarget.multiplyScalar(GRAPPLE.crateReelForce * DT), true);
   }
 
   /** One authoritative tick for every player, rocket and crate. */
@@ -288,6 +430,7 @@ export class GameSim {
     this.stepRockets(events, 'authority');
     this.world.step();
     this.tick++;
+    for (const p of this.players.values()) if (p.alive) p.history.record(this.tick, p.pos);
     return events;
   }
 
@@ -347,10 +490,26 @@ export class GameSim {
     // Grapple: attach on press, release on let go.
     if (input.grapple && !p.wasGrappleHeld) {
       const normal = new Vector3();
-      const anchor = this.grappleTarget(p, new Vector3(), normal);
+      const anchor = this.grappleTarget(p, new Vector3(), normal, input.view);
       if (!anchor) events.push({ type: 'grappleMiss', playerId: p.id });
       if (anchor) {
-        p.grapple = { anchor, normal, length: p.pos.distanceTo(anchor) };
+        let hook: Hook | null = null;
+        if (_aim.kind === 'player') {
+          // Offset from where they were when hit; from now on the anchor follows where they are.
+          hook = { kind: 'player', id: _aim.playerId, offset: anchor.clone().sub(_aim.center) };
+        } else if (_aim.kind === 'crate') {
+          const crate = this.crates[_aim.crateIndex];
+          const r = crate.rotation();
+          _q.set(r.x, r.y, r.z, r.w).invert();
+          const t = crate.translation();
+          hook = {
+            kind: 'crate',
+            index: _aim.crateIndex,
+            local: anchor.clone().sub(_center.set(t.x, t.y, t.z)).applyQuaternion(_q),
+            localNormal: normal.clone().applyQuaternion(_q),
+          };
+        }
+        p.grapple = { anchor, normal, length: p.pos.distanceTo(anchor), hook };
         if (p.grounded) {
           p.vel.y = Math.max(p.vel.y, GRAPPLE.attachHop);
           p.grounded = false;
@@ -366,7 +525,15 @@ export class GameSim {
     if (updateVelocity(p.vel, input, p.grounded, DT)) events.push({ type: 'jumped', playerId: p.id });
     const wasGrounded = p.grounded;
     const fallSpeed = -p.vel.y;
-    if (p.grapple) applyGrapple(p.pos, p.vel, p.grapple, DT);
+    if (p.grapple && !this.followHook(p.grapple)) {
+      p.grapple = null;
+      events.push({ type: 'grapple', playerId: p.id, attached: false });
+    }
+    if (p.grapple) {
+      const hook = p.grapple.hook;
+      applyGrapple(p.pos, p.vel, p.grapple, DT, hook?.kind === 'crate' ? GRAPPLE.cratePull : 1);
+      if (hook && mode === 'authority') this.pullHooked(p, hook);
+    }
 
     // Move through the world with collision, then drop whatever velocity was blocked.
     _desired.copy(p.vel).multiplyScalar(DT);
@@ -402,6 +569,7 @@ export class GameSim {
         prevPos: pos.clone(),
         dir: aimDirection(p.yaw, p.pitch, new Vector3()),
         life: ROCKET.lifetime,
+        lag: mode === 'authority' && input.view !== undefined ? Math.min(Math.max(this.tick - input.view, 0), REWIND_TICKS) : 0,
       });
       events.push({ type: 'fired', playerId: p.id });
     }
@@ -412,37 +580,50 @@ export class GameSim {
     for (let i = this.rockets.length - 1; i >= 0; i--) {
       const r = this.rockets[i];
       r.prevPos.copy(r.pos);
-      const owner = this.players.get(r.ownerId);
-      _rayOrigin.copy(r.pos);
-      _rayDir.copy(r.dir);
-      const hit = this.world.castRayAndGetNormal(_ray, travel, true, undefined, undefined, undefined, owner?.body);
-
       const normal = new Vector3();
-      if (hit) {
-        r.pos.addScaledVector(r.dir, hit.timeOfImpact - 0.1);
-        normal.set(hit.normal.x, hit.normal.y, hit.normal.z);
+      // Other players are rewound by the shooter's lag, so a rocket that hits someone on the
+      // shooter's screen hits them here too.
+      const kind = this.aimHit(r.pos, r.dir, travel, r.ownerId, r.lag ? this.tick - r.lag : undefined, normal);
+      if (kind === 'player') {
+        r.pos.addScaledVector(r.dir, Math.max(0, _aim.dist - 0.1));
+        this.explode(r, normal, false, events, mode, { id: _aim.playerId, center: _aim.center.clone() });
+        this.rockets.splice(i, 1);
+        continue;
+      }
+      if (kind !== 'none') {
+        r.pos.addScaledVector(r.dir, _aim.dist - 0.1);
       } else {
         r.pos.addScaledVector(r.dir, travel);
         r.life -= DT;
         if (r.life > 0) continue;
         normal.copy(r.dir).negate();
       }
-      this.explode(r, normal, !!hit, events, mode);
+      this.explode(r, normal, true, events, mode);
       this.rockets.splice(i, 1);
     }
   }
 
-  private explode(r: Rocket, normal: Vector3, surface: boolean, events: SimEvent[], mode: StepMode) {
+  /** `direct`: the player the rocket hit, at the (possibly rewound) position it hit them at. */
+  private explode(
+    r: Rocket,
+    normal: Vector3,
+    surface: boolean,
+    events: SimEvent[],
+    mode: StepMode,
+    direct?: { id: string; center: Vector3 },
+  ) {
     const at = r.pos;
     const radius = ROCKET.blastRadius;
 
     for (const p of this.players.values()) {
       if (!p.alive) continue;
-      const dist = p.pos.distanceTo(at);
+      // Judge a direct hit where it landed, not where the target has moved on to since.
+      const center = direct?.id === p.id ? direct.center : p.pos;
+      const dist = center.distanceTo(at);
       if (dist >= radius) continue;
       const falloff = 1 - dist / radius;
       if (dist < 1e-3) _dir.set(0, 1, 0);
-      else _dir.subVectors(p.pos, at).divideScalar(dist);
+      else _dir.subVectors(center, at).divideScalar(dist);
       p.vel.addScaledVector(_dir, ROCKET.knockback * falloff);
       p.grounded = false;
       events.push({ type: 'knockback', playerId: p.id, strength: falloff, sourceId: r.ownerId, shot: r.shot });

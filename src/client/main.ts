@@ -254,6 +254,7 @@ async function main() {
     const rockets = client ? client.renderRockets : sim.rockets;
     effects.update(rockets, alpha, dt);
     viewModel.update(dt, horizontalSpeed, me.grounded, !!me.grapple);
+    if (me.grapple) rope.follow(me.grapple.anchor, me.grapple.normal);
     rope.update(dt, camera.localToWorld(viewModel.ropeOrigin(fov, hand)), camera);
     audio.update(camera, speed, rockets);
 

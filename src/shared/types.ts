@@ -8,6 +8,8 @@ export interface PlayerInput {
   grapple: boolean;
   yaw: number; // radians, 0 = looking down -Z
   pitch: number; // radians, positive = up
+  /** Server tick the client was showing other players at, so hits are judged against what it saw. */
+  view?: number;
 }
 
 export const EMPTY_INPUT: PlayerInput = {

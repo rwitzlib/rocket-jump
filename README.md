@@ -30,6 +30,11 @@ Everyone has 100 health, which regenerates after 5 seconds without damage. You r
 3 seconds of spawn protection. Knocking someone off the map counts as your kill. All of this is tuned in `COMBAT` in
 `shared/config.ts`. The crosshair turns green when the grapple can reach.
 
+The grapple hooks players and crates as well as walls. Hooking a player is a tug of war: you're pulled in and they get
+dragged toward you. A hooked crate is reeled in with a fixed force, so loose crates fly at you while stacked or wedged
+ones hold firm enough to swing from. Rockets and hooks are judged against where you saw other players: the server
+rewinds them by your latency (up to 500 ms).
+
 ## Layout
 
 ```
