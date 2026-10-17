@@ -12,8 +12,8 @@ import { EMPTY_INPUT, type PlayerInput } from './types';
 /**
  * How a player step treats side effects.
  * - authority: the real simulation (server, single-player).
- * - predict: a client guessing its own player ahead of the server. Feedback events still fire, but
- *   rockets and respawns are left to the server so they can't be duplicated or disagree.
+ * - predict: a client guessing its own player (and its own rockets) ahead of the server. Feedback
+ *   events still fire. Respawns and crates are left to the server.
  * - replay: re-running inputs that were already predicted, after a server correction. Silent.
  */
 export type StepMode = 'authority' | 'predict' | 'replay';
@@ -47,6 +47,8 @@ export class PlayerSim {
   wasGrappleHeld = false;
   yaw = 0;
   pitch = 0;
+  /** Seq of the input being simulated (0 offline). Tags fired rockets so a client can match its predictions. */
+  seq = 0;
 
   constructor(
     readonly id: string,
@@ -90,8 +92,9 @@ export class PlayerSim {
 }
 
 export interface Rocket {
-  id: number;
+  id: number; // server-assigned; predicted rockets use -shot until the server's copy replaces them
   ownerId: string;
+  shot: number; // seq of the owner's input that fired it
   pos: Vector3;
   prevPos: Vector3;
   dir: Vector3;
@@ -100,12 +103,12 @@ export interface Rocket {
 
 export type SimEvent =
   | { type: 'fired'; playerId: string }
-  | { type: 'explosion'; pos: Vector3; normal: Vector3; surface: boolean } // surface = false for mid-air
+  | { type: 'explosion'; pos: Vector3; normal: Vector3; surface: boolean; ownerId: string; shot: number } // surface = false for mid-air
   | { type: 'grapple'; playerId: string; attached: boolean }
   | { type: 'grappleMiss'; playerId: string }
   | { type: 'jumped'; playerId: string }
   | { type: 'landed'; playerId: string; impactSpeed: number }
-  | { type: 'knockback'; playerId: string; strength: number } // strength 0..1
+  | { type: 'knockback'; playerId: string; strength: number; sourceId: string; shot: number } // strength 0..1
   | { type: 'respawn'; playerId: string; yaw: number };
 
 const _desired = new Vector3();
@@ -215,26 +218,31 @@ export class GameSim {
     for (const p of this.players.values()) {
       this.stepPlayer(p, inputs.get(p.id) ?? EMPTY_INPUT, events, 'authority');
     }
-    this.stepRockets(events);
+    this.stepRockets(events, 'authority');
     this.world.step();
     this.tick++;
     return events;
   }
 
-  /** Client prediction: one tick for just this player. Rockets, crates and other players come from the server. */
+  /**
+   * Client prediction: one tick for just this player and the rockets in this sim (its own). Other
+   * players, their rockets and the crates come from the server.
+   */
   predict(p: PlayerSim, input: PlayerInput): SimEvent[] {
     const events = this.takePendingEvents();
     this.stepPlayer(p, input, events, 'predict');
+    this.stepRockets(events, 'predict');
     this.world.step();
     return events;
   }
 
   /**
-   * Re-runs one already-predicted tick for this player after a server correction. Only moves the
-   * player (no physics step, no events), so replaying a handful of ticks per snapshot is cheap.
+   * Re-runs one already-predicted tick for this player and its rockets after a server correction.
+   * No physics step and no events, so replaying a handful of ticks per snapshot is cheap.
    */
   replay(p: PlayerSim, input: PlayerInput) {
     this.stepPlayer(p, input, _discard, 'replay');
+    this.stepRockets(_discard, 'replay');
     _discard.length = 0;
   }
 
@@ -301,22 +309,22 @@ export class GameSim {
     p.fireCooldown = Math.max(0, p.fireCooldown - DT);
     if (input.fire && p.fireCooldown === 0) {
       p.fireCooldown = ROCKET.cooldown;
-      if (mode === 'authority') {
-        const pos = p.eye(new Vector3());
-        this.rockets.push({
-          id: this.nextRocketId++,
-          ownerId: p.id,
-          pos,
-          prevPos: pos.clone(),
-          dir: aimDirection(p.yaw, p.pitch, new Vector3()),
-          life: ROCKET.lifetime,
-        });
-      }
+      const pos = p.eye(new Vector3());
+      this.rockets.push({
+        // A predicted rocket's id must survive replays so its mesh and trail stay put: derive it from the input.
+        id: mode === 'authority' ? this.nextRocketId++ : -p.seq,
+        ownerId: p.id,
+        shot: p.seq,
+        pos,
+        prevPos: pos.clone(),
+        dir: aimDirection(p.yaw, p.pitch, new Vector3()),
+        life: ROCKET.lifetime,
+      });
       events.push({ type: 'fired', playerId: p.id });
     }
   }
 
-  private stepRockets(events: SimEvent[]) {
+  private stepRockets(events: SimEvent[], mode: StepMode) {
     const travel = ROCKET.speed * DT;
     for (let i = this.rockets.length - 1; i >= 0; i--) {
       const r = this.rockets[i];
@@ -336,12 +344,13 @@ export class GameSim {
         if (r.life > 0) continue;
         normal.copy(r.dir).negate();
       }
-      this.explode(r.pos, normal, !!hit, events);
+      this.explode(r, normal, !!hit, events, mode);
       this.rockets.splice(i, 1);
     }
   }
 
-  private explode(at: Vector3, normal: Vector3, surface: boolean, events: SimEvent[]) {
+  private explode(r: Rocket, normal: Vector3, surface: boolean, events: SimEvent[], mode: StepMode) {
+    const at = r.pos;
     const radius = ROCKET.blastRadius;
 
     for (const p of this.players.values()) {
@@ -352,9 +361,16 @@ export class GameSim {
       else _dir.subVectors(p.pos, at).divideScalar(dist);
       p.vel.addScaledVector(_dir, ROCKET.knockback * falloff);
       p.grounded = false;
-      events.push({ type: 'knockback', playerId: p.id, strength: falloff });
+      events.push({ type: 'knockback', playerId: p.id, strength: falloff, sourceId: r.ownerId, shot: r.shot });
     }
 
+    // On a client the crates are only server-placed obstacles.
+    if (mode === 'authority') this.pushCrates(at);
+    events.push({ type: 'explosion', pos: at.clone(), normal, surface, ownerId: r.ownerId, shot: r.shot });
+  }
+
+  private pushCrates(at: Vector3) {
+    const radius = ROCKET.blastRadius;
     for (const crate of this.crates) {
       const t = crate.translation();
       _crate.set(t.x, t.y, t.z);
@@ -366,7 +382,5 @@ export class GameSim {
       _dir.multiplyScalar(ROCKET.crateKnockback * falloff * crate.mass());
       crate.applyImpulse(_dir, true);
     }
-
-    events.push({ type: 'explosion', pos: at.clone(), normal, surface });
   }
 }

@@ -80,7 +80,11 @@ export class GameServer {
   }
 
   tick() {
-    for (const [id, conn] of this.connections) this.inputs.set(id, this.nextInput(conn));
+    for (const [id, conn] of this.connections) {
+      this.inputs.set(id, this.nextInput(conn));
+      const p = this.sim.players.get(id);
+      if (p) p.seq = conn.lastProcessed;
+    }
     for (const [id, bot] of this.bots) {
       const p = this.sim.players.get(id);
       if (p) this.inputs.set(id, bot.think(p));
@@ -128,8 +132,10 @@ export class GameServer {
     const rockets: RocketState[] = sim.rockets.map((r) => ({
       id: r.id,
       ownerId: r.ownerId,
+      shot: r.shot,
       pos: [r.pos.x, r.pos.y, r.pos.z],
       dir: [r.dir.x, r.dir.y, r.dir.z],
+      life: r.life,
     }));
     const crates: CrateState[] = sim.crates.map((c) => {
       const t = c.translation();

@@ -30,8 +30,10 @@ export interface RemotePlayerState {
 export interface RocketState {
   id: number;
   ownerId: string;
+  shot: number; // seq of the owner's input that fired it, so the owner can match its predicted copy
   pos: Vec3Tuple;
   dir: Vec3Tuple;
+  life: number;
 }
 
 /** Position then rotation quaternion: [x, y, z, qx, qy, qz, qw]. */

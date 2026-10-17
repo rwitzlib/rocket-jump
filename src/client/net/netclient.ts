@@ -14,8 +14,9 @@ import type { GameSim, PlayerSim, Rocket, SimEvent } from '../../shared/sim';
 import type { PlayerInput } from '../../shared/types';
 
 // The client half of the netcode.
-// - The local player is predicted: every input is simulated immediately, and when the server's
-//   answer for an input arrives we rewind to the server's state and replay the newer inputs.
+// - The local player and its rockets are predicted: every input is simulated immediately, and when
+//   the server's answer for an input arrives we rewind to the server's state and replay the newer
+//   inputs. Rocket jumps launch on the tick you fire, the same as offline.
 // - Everything else (other players, rockets, crates, explosions) is shown `interpDelay` ticks in
 //   the past, interpolated between two snapshots, so it moves smoothly despite network jitter.
 
@@ -58,6 +59,8 @@ export class NetClient {
   /** Added to the camera so prediction errors are eased out over a few frames instead of snapping. */
   readonly visualOffset = new Vector3();
   readonly stats = new NetStats();
+  /** Rockets to draw this frame: our predicted ones (sim.rockets) plus everyone else's, interpolated. */
+  readonly renderRockets: Rocket[] = [];
 
   private seq = 0;
   private pending: InputFrame[] = [];
@@ -69,6 +72,7 @@ export class NetClient {
   private timeline: WireEvent[] = []; // remote events waiting for the render clock to reach them
   private immediate: SimEvent[] = []; // events about us, shown as soon as they arrive
   private rocketCache = new Map<number, Rocket>();
+  private exploded = new Set<number>(); // shots of ours whose explosion has been shown
   private crateCache: number[][] = [];
 
   constructor(
@@ -87,7 +91,25 @@ export class NetClient {
     if (this.pending.length > MAX_PENDING) this.pending.shift();
     this.stats.pending = this.pending.length;
     this.send({ type: 'input', frames: this.pending.slice(-NET.inputRedundancy) });
-    return this.sim.predict(this.me, input);
+    this.me.seq = this.seq;
+    const events = this.sim.predict(this.me, input).filter((e) => this.firstSighting(e));
+    if (this.exploded.size > 64) {
+      for (const shot of this.exploded) if (shot < this.seq - MAX_PENDING) this.exploded.delete(shot);
+    }
+    return events;
+  }
+
+  /**
+   * One of our explosions can come up more than once: predicted, then re-predicted after a correction
+   * revived the rocket, then reported by the server. Its explosion and knockback feedback play once.
+   */
+  private firstSighting(e: SimEvent): boolean {
+    if (e.type === 'knockback' && e.sourceId === this.id) return !this.exploded.has(e.shot);
+    if (e.type === 'explosion' && e.ownerId === this.id) {
+      if (this.exploded.has(e.shot)) return false;
+      this.exploded.add(e.shot);
+    }
+    return true;
   }
 
   receive(msg: ServerMessage) {
@@ -105,10 +127,18 @@ export class NetClient {
 
     for (const e of msg.events) {
       if (e.tick <= this.lastEventTick) continue;
-      if ('playerId' in e && e.playerId === this.id) {
-        // Our own jumps, shots and grapples were already played by prediction.
-        if (e.type === 'knockback' || e.type === 'respawn') this.immediate.push(fromWireEvent(e));
-      } else this.timeline.push(e);
+      const ours = ('playerId' in e && e.playerId === this.id) || (e.type === 'explosion' && e.ownerId === this.id);
+      if (!ours) {
+        this.timeline.push(e);
+        continue;
+      }
+      // Our jumps, shots and grapples were already played by prediction, and usually our explosions
+      // too. What's left (a rocket that hit something we couldn't predict, another player's
+      // knockback, a respawn) shows right away, in step with the state correction it comes with.
+      const sim = fromWireEvent(e);
+      if ((e.type === 'explosion' || e.type === 'knockback' || e.type === 'respawn') && this.firstSighting(sim)) {
+        this.immediate.push(sim);
+      }
     }
     this.lastEventTick = msg.tick;
   }
@@ -121,8 +151,13 @@ export class NetClient {
     _oldStep.subVectors(me.pos, me.prevPos);
 
     me.restore(msg.you);
+    this.restoreRockets(msg);
     while (this.pending.length && this.pending[0].seq <= msg.ack) this.pending.shift();
-    for (const frame of this.pending) this.sim.replay(me, frame.input);
+    for (const frame of this.pending) {
+      me.seq = frame.seq;
+      this.sim.replay(me, frame.input);
+    }
+    me.seq = this.seq;
     if (!this.pending.length) me.prevPos.copy(me.pos).sub(_oldStep);
 
     const error = _old.distanceTo(me.pos);
@@ -132,11 +167,24 @@ export class NetClient {
     if (this.visualOffset.length() > SNAP_DISTANCE) this.visualOffset.set(0, 0, 0);
   }
 
+  /** Our rockets as the server has them. Ones fired by inputs it hasn't seen yet come back during the replay. */
+  private restoreRockets(msg: SnapshotMessage) {
+    const rockets = this.sim.rockets;
+    rockets.length = 0;
+    for (const r of msg.rockets) {
+      if (r.ownerId !== this.id) continue;
+      const pos = new Vector3(...r.pos);
+      rockets.push({ id: -r.shot, ownerId: r.ownerId, shot: r.shot, pos, prevPos: pos.clone(), dir: new Vector3(...r.dir), life: r.life });
+    }
+  }
+
   /** Call once per rendered frame. Moves the render clock and places remote entities. Returns events now due. */
   update(dt: number, now: number): SimEvent[] {
     const events = this.immediate;
     this.immediate = [];
     this.visualOffset.multiplyScalar(Math.exp(-dt * CORRECTION_RATE));
+    this.renderRockets.length = 0;
+    this.renderRockets.push(...this.sim.rockets);
     if (this.latestTick < 0) return events;
 
     // Render clock: run at real time, and drift gently toward "newest snapshot minus the delay".
@@ -187,18 +235,16 @@ export class NetClient {
     }
   }
 
-  // Rockets live in sim.rockets so the existing effects and audio code can draw them unchanged.
   private interpolateRockets(a: SnapshotMessage, b: SnapshotMessage, t: number) {
-    const out = this.sim.rockets;
-    out.length = 0;
     for (const rb of b.rockets) {
+      if (rb.ownerId === this.id) continue; // drawn from prediction instead
       const ra = a.rockets.find((r) => r.id === rb.id);
       const r = this.rocketFor(rb);
       if (ra) r.pos.set(...ra.pos).lerp(_v.set(...rb.pos), t);
       // Fired between the two snapshots: back it up along its path to where it was at render time.
       else r.pos.set(...rb.pos).addScaledVector(r.dir, -ROCKET.speed * DT * (b.tick - a.tick) * (1 - t));
       r.prevPos.copy(r.pos);
-      out.push(r);
+      this.renderRockets.push(r);
     }
     for (const id of this.rocketCache.keys()) {
       if (!b.rockets.some((r) => r.id === id)) this.rocketCache.delete(id);
@@ -208,7 +254,7 @@ export class NetClient {
   private rocketFor(s: RocketState): Rocket {
     let r = this.rocketCache.get(s.id);
     if (!r) {
-      r = { id: s.id, ownerId: s.ownerId, pos: new Vector3(), prevPos: new Vector3(), dir: new Vector3(...s.dir), life: 0 };
+      r = { id: s.id, ownerId: s.ownerId, shot: s.shot, pos: new Vector3(), prevPos: new Vector3(), dir: new Vector3(...s.dir), life: s.life };
       this.rocketCache.set(s.id, r);
     }
     return r;

@@ -230,10 +230,11 @@ async function main() {
 
     crates.sync();
     effects.setViewport(renderer.domElement.height, fov);
-    effects.update(sim, alpha, dt);
+    const rockets = client ? client.renderRockets : sim.rockets;
+    effects.update(rockets, alpha, dt);
     viewModel.update(dt, horizontalSpeed, me.grounded, !!me.grapple);
     rope.update(dt, camera.localToWorld(viewModel.ropeOrigin(fov, hand)), camera);
-    audio.update(camera, speed, sim.rockets);
+    audio.update(camera, speed, rockets);
 
     // Only touch the DOM when something visibly changed; style writes every frame cost layout/paint work.
     flash = Math.max(0, flash - dt * 2.5);

@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { ROCKET } from '../shared/config';
-import type { GameSim, Rocket } from '../shared/sim';
+import type { Rocket } from '../shared/sim';
 import { ParticleSystem } from './particles';
 
 const _pos = new THREE.Vector3();
@@ -46,7 +46,7 @@ function scorchTexture(): THREE.Texture {
   return new THREE.CanvasTexture(canvas);
 }
 
-/** Rockets, trails and explosions. Purely visual: reads sim state, never writes it. */
+/** Rockets, trails and explosions. Purely visual: reads game state, never writes it. */
 export class Effects {
   readonly fire = new ParticleSystem(3000, THREE.AdditiveBlending);
   readonly smoke = new ParticleSystem(3000, THREE.NormalBlending);
@@ -231,8 +231,8 @@ export class Effects {
     light.obj.position.copy(at).addScaledVector(normal, 0.8);
   }
 
-  update(sim: GameSim, alpha: number, dt: number) {
-    this.syncRockets(sim.rockets, alpha);
+  update(rockets: readonly Rocket[], alpha: number, dt: number) {
+    this.syncRockets(rockets, alpha);
     this.fire.update(dt);
     this.smoke.update(dt);
 
@@ -270,7 +270,7 @@ export class Effects {
     decal.scale.setScalar(1.4 + Math.random() * 0.5);
   }
 
-  private syncRockets(rockets: Rocket[], alpha: number) {
+  private syncRockets(rockets: readonly Rocket[], alpha: number) {
     const frame = ++this.frameNo;
     for (const r of rockets) {
       let entry = this.rocketMeshes.get(r.id);
