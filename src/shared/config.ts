@@ -44,3 +44,11 @@ export const CRATE = {
   size: 1.2,
   density: 0.6,
 };
+
+export const NET = {
+  snapshotInterval: 2, // server ticks per snapshot: 30 Hz
+  inputRedundancy: 4, // every input packet repeats the last few inputs, so one lost packet costs nothing
+  jitterBuffer: 2, // inputs the server collects from a client before it starts consuming them
+  maxInputQueue: 8, // past this the server drops a client's oldest inputs to catch up
+  eventWindow: 6, // ticks of past events repeated in each snapshot, so one lost snapshot loses no explosions
+};

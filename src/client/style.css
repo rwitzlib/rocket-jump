@@ -152,3 +152,17 @@ body {
   line-height: 1.5;
   color: #8a94a6;
 }
+
+#net {
+  position: fixed;
+  left: 12px;
+  bottom: 12px;
+  padding: 8px 10px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font: 12px/1.45 ui-monospace, Consolas, monospace;
+  white-space: pre;
+  border-radius: 6px;
+  pointer-events: none;
+  z-index: 10;
+}

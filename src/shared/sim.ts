@@ -1,13 +1,41 @@
 import RAPIER from '@dimforge/rapier3d-compat';
 import { Euler, Quaternion, Vector3 } from 'three';
 import { CRATE, DT, GRAPPLE, GRAVITY, PLAYER, ROCKET } from './config';
-import type { MapDef } from './map';
+import type { MapDef, Vec3Tuple } from './map';
 import { aimDirection, applyGrapple, updateVelocity, type GrappleState } from './movement';
 import { EMPTY_INPUT, type PlayerInput } from './types';
 
 // The authoritative game simulation. It has no rendering or DOM code, so the same class can run
 // in the browser (single-player / client prediction) or in Node (the multiplayer server).
 // Call `await RAPIER.init()` once before constructing it.
+
+/**
+ * How a player step treats side effects.
+ * - authority: the real simulation (server, single-player).
+ * - predict: a client guessing its own player ahead of the server. Feedback events still fire, but
+ *   rockets and respawns are left to the server so they can't be duplicated or disagree.
+ * - replay: re-running inputs that were already predicted, after a server correction. Silent.
+ */
+export type StepMode = 'authority' | 'predict' | 'replay';
+
+/** Everything about a player that affects how the next input plays out. Plain data, so it can go over the wire. */
+export interface PlayerState {
+  pos: Vec3Tuple;
+  vel: Vec3Tuple;
+  grounded: boolean;
+  grapple: { anchor: Vec3Tuple; normal: Vec3Tuple; length: number } | null;
+  fireCooldown: number;
+  wasGrappleHeld: boolean;
+  yaw: number;
+  pitch: number;
+}
+
+// Players are in their own collision group and ignore each other. Movement stays predictable on
+// the client, which only knows where other players were ~100ms ago. Rockets still hit players.
+const PLAYER_GROUP = 0x0002;
+const PLAYER_COLLISION_GROUPS = (PLAYER_GROUP << 16) | (0xffff & ~PLAYER_GROUP);
+
+const tuple = (v: Vector3): Vec3Tuple => [v.x, v.y, v.z];
 
 export class PlayerSim {
   readonly pos = new Vector3();
@@ -28,6 +56,36 @@ export class PlayerSim {
 
   eye(out: Vector3): Vector3 {
     return out.set(this.pos.x, this.pos.y + PLAYER.eyeOffset, this.pos.z);
+  }
+
+  capture(): PlayerState {
+    const g = this.grapple;
+    return {
+      pos: tuple(this.pos),
+      vel: tuple(this.vel),
+      grounded: this.grounded,
+      grapple: g && { anchor: tuple(g.anchor), normal: tuple(g.normal), length: g.length },
+      fireCooldown: this.fireCooldown,
+      wasGrappleHeld: this.wasGrappleHeld,
+      yaw: this.yaw,
+      pitch: this.pitch,
+    };
+  }
+
+  /** Overwrites this player with a captured state and moves its collider there immediately. */
+  restore(s: PlayerState) {
+    this.pos.set(...s.pos);
+    this.prevPos.copy(this.pos);
+    this.vel.set(...s.vel);
+    this.grounded = s.grounded;
+    const g = s.grapple;
+    this.grapple = g && { anchor: new Vector3(...g.anchor), normal: new Vector3(...g.normal), length: g.length };
+    this.fireCooldown = s.fireCooldown;
+    this.wasGrappleHeld = s.wasGrappleHeld;
+    this.yaw = s.yaw;
+    this.pitch = s.pitch;
+    this.collider.setTranslation(this.pos);
+    this.body.setNextKinematicTranslation(this.pos);
   }
 }
 
@@ -53,6 +111,7 @@ export type SimEvent =
 const _desired = new Vector3();
 const _dir = new Vector3();
 const _crate = new Vector3();
+const _discard: SimEvent[] = [];
 
 // Reused for every ray cast so per-tick queries don't create garbage (GC pauses show up as hitches).
 // Rapier's Ray just holds references to these vectors.
@@ -109,11 +168,21 @@ export class GameSim {
 
   addPlayer(id: string): PlayerSim {
     const body = this.world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased());
-    const collider = this.world.createCollider(RAPIER.ColliderDesc.capsule(PLAYER.halfHeight, PLAYER.radius), body);
+    const collider = this.world.createCollider(
+      RAPIER.ColliderDesc.capsule(PLAYER.halfHeight, PLAYER.radius).setCollisionGroups(PLAYER_COLLISION_GROUPS),
+      body,
+    );
     const player = new PlayerSim(id, body, collider);
     this.players.set(id, player);
     this.respawn(player);
     return player;
+  }
+
+  removePlayer(id: string) {
+    const p = this.players.get(id);
+    if (!p) return;
+    this.world.removeRigidBody(p.body); // also removes its collider
+    this.players.delete(id);
   }
 
   respawn(p: PlayerSim) {
@@ -140,11 +209,11 @@ export class GameSim {
     return out.copy(_rayOrigin).addScaledVector(_rayDir, hit.timeOfImpact);
   }
 
+  /** One authoritative tick for every player, rocket and crate. */
   step(inputs: ReadonlyMap<string, PlayerInput>): SimEvent[] {
-    const events = this.pendingEvents;
-    this.pendingEvents = [];
+    const events = this.takePendingEvents();
     for (const p of this.players.values()) {
-      this.stepPlayer(p, inputs.get(p.id) ?? EMPTY_INPUT, events);
+      this.stepPlayer(p, inputs.get(p.id) ?? EMPTY_INPUT, events, 'authority');
     }
     this.stepRockets(events);
     this.world.step();
@@ -152,10 +221,36 @@ export class GameSim {
     return events;
   }
 
-  private stepPlayer(p: PlayerSim, input: PlayerInput, events: SimEvent[]) {
+  /** Client prediction: one tick for just this player. Rockets, crates and other players come from the server. */
+  predict(p: PlayerSim, input: PlayerInput): SimEvent[] {
+    const events = this.takePendingEvents();
+    this.stepPlayer(p, input, events, 'predict');
+    this.world.step();
+    return events;
+  }
+
+  /**
+   * Re-runs one already-predicted tick for this player after a server correction. Only moves the
+   * player (no physics step, no events), so replaying a handful of ticks per snapshot is cheap.
+   */
+  replay(p: PlayerSim, input: PlayerInput) {
+    this.stepPlayer(p, input, _discard, 'replay');
+    _discard.length = 0;
+  }
+
+  private takePendingEvents(): SimEvent[] {
+    const events = this.pendingEvents;
+    this.pendingEvents = [];
+    return events;
+  }
+
+  private stepPlayer(p: PlayerSim, input: PlayerInput, events: SimEvent[], mode: StepMode) {
     p.prevPos.copy(p.pos);
     p.yaw = input.yaw;
     p.pitch = input.pitch;
+    // `pos` is the source of truth. Normally the collider is already there (world.step moved it),
+    // but a replay runs several ticks without stepping the world.
+    p.collider.setTranslation(p.pos);
 
     // Grapple: attach on press, release on let go.
     if (input.grapple && !p.wasGrappleHeld) {
@@ -183,7 +278,7 @@ export class GameSim {
 
     // Move through the world with collision, then drop whatever velocity was blocked.
     _desired.copy(p.vel).multiplyScalar(DT);
-    this.controller.computeColliderMovement(p.collider, _desired);
+    this.controller.computeColliderMovement(p.collider, _desired, undefined, PLAYER_COLLISION_GROUPS);
     const moved = this.controller.computedMovement();
     p.grounded = this.controller.computedGrounded();
     if (p.grounded && !wasGrounded && fallSpeed > 2) {
@@ -197,25 +292,26 @@ export class GameSim {
     p.pos.z += moved.z;
     p.body.setNextKinematicTranslation(p.pos);
 
-    if (p.pos.y < this.map.killY) {
+    if (p.pos.y < this.map.killY && mode === 'authority') {
       this.respawn(p);
-      events.push(...this.pendingEvents);
-      this.pendingEvents = [];
+      events.push(...this.takePendingEvents());
       return;
     }
 
     p.fireCooldown = Math.max(0, p.fireCooldown - DT);
     if (input.fire && p.fireCooldown === 0) {
       p.fireCooldown = ROCKET.cooldown;
-      const pos = p.eye(new Vector3());
-      this.rockets.push({
-        id: this.nextRocketId++,
-        ownerId: p.id,
-        pos,
-        prevPos: pos.clone(),
-        dir: aimDirection(p.yaw, p.pitch, new Vector3()),
-        life: ROCKET.lifetime,
-      });
+      if (mode === 'authority') {
+        const pos = p.eye(new Vector3());
+        this.rockets.push({
+          id: this.nextRocketId++,
+          ownerId: p.id,
+          pos,
+          prevPos: pos.clone(),
+          dir: aimDirection(p.yaw, p.pitch, new Vector3()),
+          life: ROCKET.lifetime,
+        });
+      }
       events.push({ type: 'fired', playerId: p.id });
     }
   }

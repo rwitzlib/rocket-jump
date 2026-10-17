@@ -54,6 +54,18 @@ with every player's inputs, and each client runs the same code locally for predi
 In dev builds the game is exposed as `window.game` (`game.sim`, `game.me`, `game.effects`, ...) for tweaking from
 the console. `game.frame(t)` advances one rendered frame manually, which is handy for stepping through effects.
 
+## Netcode testing (loopback)
+
+Open http://localhost:5173/?net=loopback to run the real server inside the page, behind a fake network.
+Optional parameters: `ping` (round trip, ms, default 100), `jitter` (ms, default 10), `loss` (0..1), `bots` (default 2).
+
+Your player is predicted locally and corrected against the server. Bots, rockets and crates are interpolated about
+100ms in the past. The overlay in the bottom left (N toggles it) shows prediction errors, the server's input queue
+and bandwidth. `[` `]` change ping, `;` `'` change jitter and `L` cycles packet loss, all while you play.
+
+Code: `shared/server.ts` (transport-agnostic `GameServer`), `shared/protocol.ts` (messages), `client/net/`
+(loopback transport, `NetClient` prediction + interpolation, overlay).
+
 ## Roadmap
 
 1. ~~Single-player movement sandbox: rocket jumping, grappling, test arena~~

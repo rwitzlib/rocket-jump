@@ -2,19 +2,29 @@ import RAPIER from '@dimforge/rapier3d-compat';
 import * as THREE from 'three';
 import { DT } from '../shared/config';
 import { ARENA } from '../shared/map';
-import { GameSim, type SimEvent } from '../shared/sim';
+import { GameSim, type PlayerSim, type SimEvent } from '../shared/sim';
 import { GameAudio } from './audio';
 import { CameraFX } from './camerafx';
 import { Effects } from './effects';
 import { Input } from './input';
 import { buildLevel, CrateView } from './level';
+import { Loopback, type NetConditions } from './net/loopback';
+import { NetClient } from './net/netclient';
+import { NetOverlay } from './net/netoverlay';
 import { PerfOverlay } from './perf';
+import { RemotePlayersView } from './remoteview';
 import { Rope } from './rope';
 import { ViewModel } from './viewmodel';
 
 const FOV = 90;
 const VIEWMODEL_FOV = 60; // weapons get their own FOV so changing the world FOV does not warp them
 const LOCAL_ID = 'local';
+
+// `?net=loopback` runs a real server in the page behind a fake network, for building and testing
+// netcode without deploying anything. Optional: &ping=100&jitter=10&loss=0.02&bots=2
+const params = new URLSearchParams(location.search);
+const LOOPBACK = params.get('net') === 'loopback';
+const numParam = (name: string, fallback: number) => Number(params.get(name) ?? fallback) || 0;
 
 async function main() {
   await RAPIER.init();
@@ -40,18 +50,33 @@ async function main() {
   camera.rotation.order = 'YXZ';
 
   const sim = new GameSim(ARENA);
-  const me = sim.addPlayer(LOCAL_ID);
+  let me: PlayerSim;
+  let loopback: Loopback | null = null;
+  let client: NetClient | null = null;
+  if (LOOPBACK) {
+    const conditions: NetConditions = { ping: numParam('ping', 100), jitter: numParam('jitter', 10), loss: numParam('loss', 0) };
+    const lb = (loopback = new Loopback(ARENA, conditions, 'player', numParam('bots', 2)));
+    const nc = (client = new NetClient(sim, lb.clientId, (msg) => lb.send(msg)));
+    lb.onMessage = (msg) => nc.receive(msg);
+    me = nc.me;
+  } else {
+    me = sim.addPlayer(LOCAL_ID);
+  }
+  const localId = me.id;
+  const playerPos = (id: string) => sim.players.get(id)?.pos ?? client?.remotes.get(id)?.pos;
 
   buildLevel(scene, ARENA);
   const crates = new CrateView(scene, sim);
   const effects = new Effects(scene);
   const rope = new Rope(scene);
+  const remoteView = new RemotePlayersView(scene);
   const viewModel = new ViewModel(VIEWMODEL_FOV);
   const cameraFx = new CameraFX(FOV);
   const audio = new GameAudio();
   const input = new Input(canvas);
   input.yaw = me.yaw;
   const perf = new PerfOverlay(gpuName(renderer));
+  const netOverlay = loopback && client && new NetOverlay(loopback, client);
 
   overlay.addEventListener('click', () => {
     audio.resume();
@@ -82,14 +107,16 @@ async function main() {
   // shaders lazily on first draw, which otherwise freezes the game at the first rocket/grapple.
   effects.setWarmup(true);
   rope.setWarmup(true);
+  remoteView.setWarmup(true);
   renderer.render(scene, camera);
   renderer.render(viewModel.scene, viewModel.camera);
   effects.setWarmup(false);
   rope.setWarmup(false);
+  remoteView.setWarmup(false);
 
   let flash = 0;
   const handleEvent = (e: SimEvent) => {
-    const mine = 'playerId' in e && e.playerId === LOCAL_ID;
+    const mine = 'playerId' in e && e.playerId === localId;
     switch (e.type) {
       case 'explosion': {
         effects.explosion(e.pos, e.normal, e.surface);
@@ -103,7 +130,10 @@ async function main() {
           viewModel.fire();
           audio.play('fire', { volume: 0.8 });
           cameraFx.shake(0.12);
-        } else audio.play('fire', { at: sim.players.get(e.playerId)!.pos });
+        } else {
+          const at = playerPos(e.playerId);
+          if (at) audio.play('fire', { at });
+        }
         break;
       case 'knockback':
         if (mine) {
@@ -152,7 +182,7 @@ async function main() {
     }
   };
 
-  const inputs = new Map([[LOCAL_ID, input.sample()]]);
+  const inputs = new Map([[localId, input.sample()]]);
   const eye = new THREE.Vector3();
   const prevEye = new THREE.Vector3();
   const hand = new THREE.Vector3();
@@ -170,10 +200,21 @@ async function main() {
     last = now;
     accumulator += dt;
 
+    loopback?.update(now);
     while (accumulator >= DT) {
-      inputs.set(LOCAL_ID, input.sample());
-      for (const e of sim.step(inputs)) handleEvent(e);
+      const sample = input.sample();
+      if (client) {
+        for (const e of client.predict(sample)) handleEvent(e);
+      } else {
+        inputs.set(localId, sample);
+        for (const e of sim.step(inputs)) handleEvent(e);
+      }
       accumulator -= DT;
+    }
+    if (client) {
+      for (const e of client.update(dt, now)) handleEvent(e);
+      remoteView.sync(client.remotes);
+      netOverlay?.update(now);
     }
     const alpha = accumulator / DT;
     const speed = me.vel.length();
@@ -183,6 +224,7 @@ async function main() {
     me.eye(eye);
     prevEye.copy(me.prevPos).y += eye.y - me.pos.y;
     camera.position.lerpVectors(prevEye, eye, alpha);
+    if (client) camera.position.add(client.visualOffset);
     camera.rotation.set(input.pitch, input.yaw, 0);
     const fov = cameraFx.apply(camera, dt, speed);
 
@@ -212,7 +254,7 @@ async function main() {
   requestAnimationFrame(frame);
 
   // Handy for tweaking from the browser console during development: `game.me.vel`, `game.sim`, etc.
-  if (import.meta.env.DEV) Object.assign(window, { game: { sim, me, input, camera, scene, renderer, effects, audio, handleEvent, frame } });
+  if (import.meta.env.DEV) Object.assign(window, { game: { sim, me, client, loopback, input, camera, scene, renderer, effects, audio, handleEvent, frame } });
 }
 
 function gpuName(renderer: THREE.WebGLRenderer): string {
