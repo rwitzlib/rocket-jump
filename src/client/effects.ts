@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { ROCKET } from '../shared/config';
 import type { Rocket } from '../shared/sim';
 import { ParticleSystem } from './particles';
+import { buildRocket } from './weapons';
 
 const _pos = new THREE.Vector3();
 const _vel = new THREE.Vector3();
@@ -72,18 +73,7 @@ export class Effects {
     this.fire.points.renderOrder = 1;
     scene.add(this.smoke.points, this.fire.points);
 
-    const body = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.08, 0.08, 0.6, 10).rotateX(Math.PI / 2),
-      new THREE.MeshStandardMaterial({ color: 0x55606e, metalness: 0.5, roughness: 0.4 }),
-    );
-    const nose = new THREE.Mesh(
-      new THREE.ConeGeometry(0.08, 0.2, 10).rotateX(-Math.PI / 2),
-      new THREE.MeshStandardMaterial({ color: 0xd96c4a, roughness: 0.5 }),
-    );
-    nose.position.z = -0.4;
-    const flame = new THREE.Mesh(new THREE.SphereGeometry(0.11, 10, 8), new THREE.MeshBasicMaterial({ color: 0xffd080 }));
-    flame.position.z = 0.33;
-    this.rocketProto = new THREE.Group().add(body, nose, flame);
+    this.rocketProto = buildRocket();
 
     const ringGeo = new THREE.RingGeometry(0.85, 1, 48);
     for (let i = 0; i < MAX_RINGS; i++) {
@@ -284,7 +274,9 @@ export class Effects {
       if (!entry) {
         const mesh = this.rocketProto.clone();
         this.scene.add(mesh);
-        const offset = this.muzzleOffset?.(r.ownerId, new THREE.Vector3()) ?? new THREE.Vector3();
+        // Only for rockets seen right as they're fired; one that first shows up mid-flight stays on its path.
+        const offset = new THREE.Vector3();
+        if (r.life > ROCKET.lifetime - MUZZLE_BLEND_TIME / 2) this.muzzleOffset?.(r.ownerId, offset);
         entry = { mesh, lastTrail: r.prevPos.clone().add(offset), seen: frame, offset, age: 0 };
         this.rocketMeshes.set(r.id, entry);
       }

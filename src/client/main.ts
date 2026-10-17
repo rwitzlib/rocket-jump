@@ -71,7 +71,13 @@ async function main() {
   const effects = new Effects(scene);
   const rope = new Rope(scene);
   const remoteView = new RemotePlayersView(scene);
-  effects.muzzleOffset = (id, out) => remoteView.muzzleOffset(id, out);
+  let fov = FOV;
+  // Rockets are drawn leaving the barrel you see: the first-person one for ours, the model's for others.
+  effects.muzzleOffset = (id, out) => {
+    if (id !== localId) return remoteView.muzzleOffset(id, out);
+    camera.updateMatrixWorld();
+    return camera.localToWorld(viewModel.muzzleOrigin(fov, out)).sub(camera.position);
+  };
   const viewModel = new ViewModel(VIEWMODEL_FOV);
   const cameraFx = new CameraFX(FOV);
   const audio = new GameAudio();
@@ -249,13 +255,13 @@ async function main() {
     camera.position.lerpVectors(prevEye, eye, alpha);
     if (client) camera.position.add(client.visualOffset);
     camera.rotation.set(input.pitch, input.yaw, 0);
-    const fov = cameraFx.apply(camera, dt, speed);
+    fov = cameraFx.apply(camera, dt, speed);
 
     crates.sync();
     effects.setViewport(renderer.domElement.height, fov);
     const rockets = client ? client.renderRockets : sim.rockets;
+    viewModel.update(dt, horizontalSpeed, me.grounded, !!me.grapple, 1 - me.fireCooldown / ROCKET.cooldown, 1 - me.grappleCooldown / GRAPPLE.cooldown);
     effects.update(rockets, alpha, dt);
-    viewModel.update(dt, horizontalSpeed, me.grounded, !!me.grapple);
     if (me.grapple) rope.follow(me.grapple.anchor, me.grapple.normal);
     rope.update(dt, camera.localToWorld(viewModel.ropeOrigin(fov, hand)), camera);
     audio.update(camera, speed, rockets);

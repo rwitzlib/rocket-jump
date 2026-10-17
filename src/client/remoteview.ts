@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { PLAYER } from '../shared/config';
 import type { RemotePlayer } from './net/netclient';
+import { buildGauntlet, buildHookHead, buildLauncher, LAUNCHER } from './weapons';
 
 // Other players: an armored figure built from primitives, sized to the hit capsule (feet at -0.9,
 // eyes at +0.6 from its center). It carries the same two weapons you do, a shoulder-mounted rocket
@@ -48,7 +49,8 @@ interface Entry {
   gauntlet: THREE.Object3D;
   hookTip: THREE.Object3D;
   rope: THREE.Line;
-  hook: THREE.Mesh;
+  hook: THREE.Object3D;
+  hookHead: THREE.Object3D; // the one loaded in the gauntlet, hidden while it's out on the rope
   shell: THREE.Mesh;
   // Animation state
   lastPos: THREE.Vector3;
@@ -65,9 +67,8 @@ export class RemotePlayersView {
   private readonly metal = new THREE.MeshStandardMaterial({ color: 0x6a7484, metalness: 0.5, roughness: 0.4 });
   private readonly darkMetal = new THREE.MeshStandardMaterial({ color: 0x3a4250, metalness: 0.6, roughness: 0.35 });
   private readonly visorMat = new THREE.MeshStandardMaterial({ color: 0x0e1218, emissive: 0x2a6f8f, emissiveIntensity: 0.6, roughness: 0.1, metalness: 0.8 });
-  private readonly glow = new THREE.MeshStandardMaterial({ color: 0x7cf0a0, emissive: 0x3cbf6a });
   private readonly ropeMat = new THREE.LineBasicMaterial({ color: 0x2a2a2a });
-  private readonly hookGeo = new THREE.OctahedronGeometry(0.08);
+  private readonly hookProto = buildHookHead();
   private readonly shellGeo = new THREE.CapsuleGeometry(PLAYER.radius + 0.15, PLAYER.halfHeight * 2, 4, 16);
   private readonly shellMat = new THREE.MeshBasicMaterial({
     color: 0x7ce0ff,
@@ -128,6 +129,7 @@ export class RemotePlayersView {
 
       const grappling = r.alive && !!r.anchor;
       e.rope.visible = e.hook.visible = grappling;
+      e.hookHead.visible = !grappling;
       if (grappling && r.anchor) {
         e.root.updateMatrixWorld(true);
         e.hookTip.getWorldPosition(_a);
@@ -137,6 +139,7 @@ export class RemotePlayersView {
         pos.needsUpdate = true;
         e.rope.geometry.computeBoundingSphere();
         e.hook.position.copy(r.anchor);
+        e.hook.lookAt(_a); // spike (-Z) points away from the thrower, into whatever it bit
       }
     }
     for (const id of this.entries.keys()) {
@@ -239,7 +242,7 @@ export class RemotePlayersView {
     const rope = new THREE.Line(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3)), this.ropeMat);
     rope.frustumCulled = false;
     rope.visible = false;
-    const hook = new THREE.Mesh(this.hookGeo, this.glow);
+    const hook = this.hookProto.clone();
     hook.visible = false;
     this.scene.add(root, rope, hook);
 
@@ -257,6 +260,7 @@ export class RemotePlayersView {
       flash,
       gauntlet: get('gauntlet'),
       hookTip: get('hookTip'),
+      hookHead: get('hookHead'),
       rope,
       hook,
       shell,
@@ -282,7 +286,7 @@ export class RemotePlayersView {
 
   /** The rig every remote player is cloned from. Named nodes are the joints `animate` drives. */
   private buildModel(): THREE.Group {
-    const { suit, metal, darkMetal, glow, teamProto: team } = this;
+    const { suit, metal, darkMetal, teamProto: team } = this;
     const mesh = (geo: THREE.BufferGeometry, mat: THREE.Material, x = 0, y = 0, z = 0) => {
       const m = new THREE.Mesh(geo, mat);
       m.position.set(x, y, z);
@@ -338,46 +342,35 @@ export class RemotePlayersView {
     head.position.y = NECK_Y;
 
     // Weapons and arms, pivoting with the aim at shoulder height. Forward is -Z.
-    const tube = mesh(new THREE.CylinderGeometry(0.1, 0.11, 1.0, 14).rotateX(Math.PI / 2), metal, 0, 0, -0.1);
-    const band = mesh(new THREE.CylinderGeometry(0.118, 0.118, 0.1, 14).rotateX(Math.PI / 2), team, 0, 0, -0.38);
-    const rear = mesh(new THREE.CylinderGeometry(0.13, 0.1, 0.12, 14).rotateX(Math.PI / 2), darkMetal, 0, 0, 0.42);
-    const bore = mesh(new THREE.CircleGeometry(0.075, 12), new THREE.MeshBasicMaterial({ color: 0x050505 }), 0, 0, -0.601);
-    bore.rotation.y = Math.PI;
-    const sight = mesh(new THREE.BoxGeometry(0.04, 0.06, 0.12), darkMetal, -0.06, 0.11, 0.05);
-    const grip = mesh(new THREE.BoxGeometry(0.06, 0.15, 0.08), darkMetal, 0, -0.14, -0.2);
-    const flash = mesh(new THREE.SphereGeometry(0.16, 10, 8), this.flashMat, 0, 0, -0.68);
+    const launcherModel = buildLauncher(team);
+    const flash = mesh(new THREE.SphereGeometry(0.16, 10, 8), this.flashMat, 0, 0, -0.06);
     flash.castShadow = false;
     flash.visible = false;
     flash.name = 'flash';
-    const muzzle = named('muzzle');
-    muzzle.position.z = -0.62;
-    const launcher = named('launcher', tube, band, rear, bore, sight, grip, flash, muzzle);
+    flash.scale.set(1, 1, 1.5);
+    launcherModel.muzzle.add(flash);
+    const launcher = named('launcher', launcherModel.root);
     const launcherMount = named('launcherMount', launcher);
-    launcherMount.position.set(0.28, 0.15, 0);
+    launcherMount.position.set(0.31, 0.13, 0);
 
     const shoulderR = v(0.28, 0, 0.02);
-    const elbowR = v(0.35, -0.17, -0.1);
-    const handR = v(0.28, 0.0, -0.2);
+    const elbowR = v(0.37, -0.2, -0.13);
+    const handR = v(0.31, 0.13, 0).add(LAUNCHER.foreGrip);
     const armR = [
       mesh(new THREE.SphereGeometry(0.11, 10, 8), team, shoulderR.x, shoulderR.y + 0.03, shoulderR.z),
       limb(shoulderR, elbowR, 0.065, suit),
       limb(elbowR, handR, 0.06, suit),
+      mesh(new THREE.BoxGeometry(0.08, 0.09, 0.09), darkMetal, handR.x, handR.y, handR.z),
     ];
 
     // Left arm is straight along -Z from the shoulder so it can be pointed down the rope.
-    const gauntletBody = mesh(new THREE.BoxGeometry(0.13, 0.13, 0.26), metal, 0, 0, -0.42);
-    const gauntletRing = mesh(new THREE.TorusGeometry(0.07, 0.018, 6, 14), team, 0, 0, -0.56);
-    const tip = mesh(new THREE.OctahedronGeometry(0.06), glow, 0, 0, -0.6);
-    const hookTip = named('hookTip');
-    hookTip.position.z = -0.64;
+    const gauntletModel = buildGauntlet(team, -1);
+    gauntletModel.root.position.z = -0.2;
     const gauntlet = named(
       'gauntlet',
       mesh(new THREE.SphereGeometry(0.11, 10, 8), team, 0, 0.03, 0),
-      limb(v(0, 0, 0), v(0, 0, -0.3), 0.065, suit),
-      gauntletBody,
-      gauntletRing,
-      tip,
-      hookTip,
+      limb(v(0, 0, 0), v(0, 0, -0.24), 0.065, suit),
+      gauntletModel.root,
     );
     gauntlet.quaternion.copy(GAUNTLET_REST);
     const shoulderL = named('shoulderL', gauntlet);
