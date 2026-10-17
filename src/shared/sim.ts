@@ -62,6 +62,23 @@ const PLAYER_GROUP = 0x0002;
 const PLAYER_COLLISION_GROUPS = (PLAYER_GROUP << 16) | (0xffff & ~PLAYER_GROUP);
 
 const tuple = (v: Vector3): Vec3Tuple => [v.x, v.y, v.z];
+/**
+ * The character controller calls you grounded whenever anything touches your capsule from below,
+ * including a crate's top edge brushing your rounded bottom as you jump past it. That let a held
+ * jump fire again off every ledge on the way up. We also require something under your feet (see
+ * `hasFooting`) and that you aren't moving up faster than this.
+ */
+const MAX_GROUNDED_RISE = 1;
+/** Footing rays start at the capsule center, here and this far out each way: support within ~30° of straight down. */
+const FOOTING_SPREAD = PLAYER.radius * 0.5;
+const FOOTING_DEPTH = PLAYER.halfHeight + PLAYER.radius + 0.3; // reaches the ground under you on slopes up to the climb limit
+const FOOTING_OFFSETS = [
+  [0, 0],
+  [FOOTING_SPREAD, 0],
+  [-FOOTING_SPREAD, 0],
+  [0, FOOTING_SPREAD],
+  [0, -FOOTING_SPREAD],
+];
 
 export class PlayerSim {
   readonly pos = new Vector3();
@@ -305,6 +322,16 @@ export class GameSim {
       }
     }
     return best;
+  }
+
+  /** True if there's something to stand on under a capsule centered here, not just an edge brushing its side. */
+  private hasFooting(center: Vector3): boolean {
+    _rayDir.set(0, -1, 0);
+    for (const [dx, dz] of FOOTING_OFFSETS) {
+      _rayOrigin.set(center.x + dx, center.y, center.z + dz);
+      if (this.world.castRay(_ray, FOOTING_DEPTH, true, undefined, PLAYER_COLLISION_GROUPS)) return true;
+    }
+    return false;
   }
 
   /** True if nothing static (walls, floor, tower) blocks the straight line between two points. */
@@ -551,10 +578,7 @@ export class GameSim {
     _desired.copy(p.vel).multiplyScalar(DT);
     this.controller.computeColliderMovement(p.collider, _desired, undefined, PLAYER_COLLISION_GROUPS);
     const moved = this.controller.computedMovement();
-    p.grounded = this.controller.computedGrounded();
-    if (p.grounded && !wasGrounded && fallSpeed > 2) {
-      events.push({ type: 'landed', playerId: p.id, impactSpeed: fallSpeed });
-    }
+    const touching = this.controller.computedGrounded() && p.vel.y <= MAX_GROUNDED_RISE;
     p.vel.x = clipVelocity(p.vel.x, _desired.x, moved.x);
     p.vel.y = clipVelocity(p.vel.y, _desired.y, moved.y);
     p.vel.z = clipVelocity(p.vel.z, _desired.z, moved.z);
@@ -562,6 +586,10 @@ export class GameSim {
     p.pos.y += moved.y;
     p.pos.z += moved.z;
     p.body.setNextKinematicTranslation(p.pos);
+    p.grounded = touching && this.hasFooting(p.pos);
+    if (p.grounded && !wasGrounded && fallSpeed > 2) {
+      events.push({ type: 'landed', playerId: p.id, impactSpeed: fallSpeed });
+    }
 
     if (p.pos.y < this.map.killY && mode === 'authority') {
       this.kill(p, this.recentAttacker(p), 'fall', events);
