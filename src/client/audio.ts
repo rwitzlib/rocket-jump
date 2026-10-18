@@ -155,8 +155,6 @@ export class GameAudio {
   private readonly buffers = synthesize(this.ctx);
   private readonly rocketLoops = new Map<number, Loop>();
   private frameNo = 0;
-  private readonly wind: { gain: GainNode; filter: BiquadFilterNode };
-  private windLevel = -1;
   private muted = false;
 
   constructor() {
@@ -172,19 +170,6 @@ export class GameAudio {
     comp.threshold.value = -12;
     comp.ratio.value = 6;
     this.master.connect(comp).connect(this.ctx.destination);
-
-    // Wind: looping noise whose volume and brightness follow your speed.
-    const source = this.ctx.createBufferSource();
-    source.buffer = this.buffers.noise;
-    source.loop = true;
-    const filter = this.ctx.createBiquadFilter();
-    filter.type = 'bandpass';
-    filter.Q.value = 0.7;
-    const gain = this.ctx.createGain();
-    gain.gain.value = 0;
-    source.connect(filter).connect(gain).connect(this.master);
-    source.start();
-    this.wind = { gain, filter };
   }
 
   /** Browsers only allow audio after a user gesture; call this from one. */
@@ -219,7 +204,7 @@ export class GameAudio {
   // Per-frame updates assign `.value` directly rather than scheduling automation events
   // (setValueAtTime etc.): queuing ~a dozen events per frame makes the audio thread's timelines
   // grow and the main thread contend with it, which shows up as periodic hitches.
-  update(camera: THREE.Camera, speed: number, rockets: { id: number; pos: THREE.Vector3 }[]) {
+  update(camera: THREE.Camera, rockets: { id: number; pos: THREE.Vector3 }[]) {
     const l = this.ctx.listener;
     const e = camera.matrixWorld.elements;
     // Camera looks down its local -Z; up is local +Y.
@@ -236,17 +221,6 @@ export class GameAudio {
     } else {
       l.setPosition(e[12], e[13], e[14]);
       l.setOrientation(-e[8], -e[9], -e[10], e[4], e[5], e[6]);
-    }
-
-    // Wind only reschedules when the level changes noticeably; the smoothing does the rest.
-    const windAmount = Math.round(Math.min(Math.max((speed - 6) / 30, 0), 1) * 20) / 20;
-    if (windAmount !== this.windLevel) {
-      this.windLevel = windAmount;
-      const t = this.ctx.currentTime;
-      this.wind.gain.gain.cancelScheduledValues(t);
-      this.wind.filter.frequency.cancelScheduledValues(t);
-      this.wind.gain.gain.setTargetAtTime(windAmount * 0.35, t, 0.15);
-      this.wind.filter.frequency.setTargetAtTime(300 + windAmount * 1800, t, 0.15);
     }
 
     this.syncRocketLoops(rockets);

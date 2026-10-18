@@ -264,7 +264,7 @@ async function main() {
     effects.update(rockets, alpha, dt);
     if (me.grapple) rope.follow(me.grapple.anchor, me.grapple.normal);
     rope.update(dt, camera.localToWorld(viewModel.ropeOrigin(fov, hand)), camera);
-    audio.update(camera, speed, rockets);
+    audio.update(camera, rockets);
 
     // Only touch the DOM when something visibly changed; style writes every frame cost layout/paint work.
     flash = Math.max(0, flash - dt * 2.5);
