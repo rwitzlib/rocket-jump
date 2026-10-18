@@ -32,6 +32,7 @@ export const ROCKET = {
   knockback: 15, // velocity change at the center of the blast, falls off linearly to 0 at the edge
   selfKnockback: 1.4, // your own rockets launch you this much harder: bigger rocket jumps
   crateKnockback: 12,
+  hookRadius: 0.6, // how close a grapple ray has to pass to a rocket to hook it: a bit bigger than it looks
 };
 
 export const GRAPPLE = {
@@ -45,6 +46,7 @@ export const GRAPPLE = {
   playerTug: 0.6, // a hooked player is pulled toward you at this fraction of your own pull
   cratePull: 0.35, // fraction of the usual pull you get when hooked to a crate; the rest reels the crate in
   crateReelForce: 45, // newtons-ish pulling a hooked crate toward you: light crates fly, stacked ones resist
+  hookOwnRockets: true, // your own rocket leaves from your eye along your aim, so it is easy to hook: fire, then grapple to ride it
 };
 
 export const CRATE = {

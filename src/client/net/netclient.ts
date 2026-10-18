@@ -81,6 +81,7 @@ export class NetClient {
   private exploded = new Set<number>(); // shots of ours whose explosion has been shown
   private crateCache: number[][] = [];
   private readonly alivePositions = new Map<string, Vector3>(); // what the sim hit-tests hooks and our rockets against
+  private readonly remoteRockets: Rocket[] = []; // everyone else's rockets as drawn: what the sim can hook
 
   constructor(
     readonly sim: GameSim,
@@ -89,6 +90,7 @@ export class NetClient {
   ) {
     this.me = sim.addPlayer(id);
     sim.remotePositions = this.alivePositions;
+    sim.remoteRockets = this.remoteRockets;
     // Crates are simulated by the server. Here they're just obstacles placed from snapshots.
     for (const crate of sim.crates) crate.setBodyType(RAPIER.RigidBodyType.KinematicPositionBased, true);
   }
@@ -259,6 +261,7 @@ export class NetClient {
   }
 
   private interpolateRockets(a: SnapshotMessage, b: SnapshotMessage, t: number) {
+    this.remoteRockets.length = 0;
     for (const rb of b.rockets) {
       if (rb.ownerId === this.id) continue; // drawn from prediction instead
       const ra = a.rockets.find((r) => r.id === rb.id);
@@ -268,6 +271,7 @@ export class NetClient {
       else r.pos.set(...rb.pos).addScaledVector(r.dir, -ROCKET.speed * DT * (b.tick - a.tick) * (1 - t));
       r.prevPos.copy(r.pos);
       this.renderRockets.push(r);
+      this.remoteRockets.push(r);
     }
     for (const id of this.rocketCache.keys()) {
       if (!b.rockets.some((r) => r.id === id)) this.rocketCache.delete(id);

@@ -40,20 +40,21 @@ export type DeathCause = 'rocket' | 'fall';
 
 export type HookState =
   | { kind: 'player'; id: string; offset: Vec3Tuple }
-  | { kind: 'crate'; index: number; local: Vec3Tuple; localNormal: Vec3Tuple };
+  | { kind: 'crate'; index: number; local: Vec3Tuple; localNormal: Vec3Tuple }
+  | { kind: 'rocket'; ownerId: string; shot: number };
 
 function hookToState(h: Hook | null): HookState | null {
   if (!h) return null;
-  return h.kind === 'player'
-    ? { kind: 'player', id: h.id, offset: tuple(h.offset) }
-    : { kind: 'crate', index: h.index, local: tuple(h.local), localNormal: tuple(h.localNormal) };
+  if (h.kind === 'player') return { kind: 'player', id: h.id, offset: tuple(h.offset) };
+  if (h.kind === 'crate') return { kind: 'crate', index: h.index, local: tuple(h.local), localNormal: tuple(h.localNormal) };
+  return { ...h };
 }
 
 function hookFromState(h: HookState | null): Hook | null {
   if (!h) return null;
-  return h.kind === 'player'
-    ? { kind: 'player', id: h.id, offset: new Vector3(...h.offset) }
-    : { kind: 'crate', index: h.index, local: new Vector3(...h.local), localNormal: new Vector3(...h.localNormal) };
+  if (h.kind === 'player') return { kind: 'player', id: h.id, offset: new Vector3(...h.offset) };
+  if (h.kind === 'crate') return { kind: 'crate', index: h.index, local: new Vector3(...h.local), localNormal: new Vector3(...h.localNormal) };
+  return { ...h };
 }
 
 // Players are in their own collision group and ignore each other. Movement stays predictable on
@@ -198,10 +199,24 @@ const _toTarget = new Vector3();
 const _aimOrigin = new Vector3();
 const _aimDir = new Vector3();
 
-type AimKind = 'none' | 'world' | 'player' | 'crate';
+type AimKind = 'none' | 'world' | 'player' | 'crate' | 'rocket';
 
 /** Result of aimHit, reused between calls. */
-const _aim = { kind: 'none' as AimKind, dist: 0, playerId: '', crateIndex: -1, center: new Vector3() };
+const _aim = { kind: 'none' as AimKind, dist: 0, playerId: '', crateIndex: -1, center: new Vector3(), rocket: null as Rocket | null };
+
+/** Distance along a ray (unit `dir`) to where it enters a sphere, or null if it misses or the hit is past `maxDist`. */
+function raySphere(origin: Vector3, dir: Vector3, center: Vector3, radius: number, maxDist: number): number | null {
+  const ox = origin.x - center.x;
+  const oy = origin.y - center.y;
+  const oz = origin.z - center.z;
+  const b = ox * dir.x + oy * dir.y + oz * dir.z;
+  const c = ox * ox + oy * oy + oz * oz - radius * radius;
+  if (c <= 0) return 0; // starting inside it
+  const disc = b * b - c;
+  if (b > 0 || disc < 0) return null;
+  const t = -b - Math.sqrt(disc);
+  return t <= maxDist ? t : null;
+}
 
 // Reused for every ray cast so per-tick queries don't create garbage (GC pauses show up as hitches).
 // Rapier's Ray just holds references to these vectors.
@@ -227,6 +242,8 @@ export class GameSim {
    * sim has no colliders for them, so hooks and predicted rockets test against these instead.
    */
   remotePositions: ReadonlyMap<string, Vector3> | null = null;
+  /** Client only: other players' rockets, where they're being drawn. `rockets` holds just our own there. */
+  remoteRockets: readonly Rocket[] | null = null;
 
   private readonly crateIndex = new Map<number, number>(); // rigid-body handle -> index in `crates`
   private readonly controller: RAPIER.KinematicCharacterController;
@@ -348,8 +365,45 @@ export class GameSim {
   grappleTarget(p: PlayerSim, out: Vector3, outNormal?: Vector3, view?: number): Vector3 | null {
     const origin = p.eye(_aimOrigin);
     const dir = aimDirection(p.yaw, p.pitch, _aimDir);
-    if (this.aimHit(origin, dir, GRAPPLE.range, p.id, view, outNormal) === 'none') return null;
+    const kind = this.aimHit(origin, dir, GRAPPLE.range, p.id, view, outNormal);
+    this.aimRockets(p.id, origin, dir, kind === 'none' ? GRAPPLE.range : _aim.dist, view);
+    if (_aim.rocket) {
+      // The hook sits on the rocket, pointing back along the rope.
+      outNormal?.copy(dir).negate();
+      return out.copy(_aim.rocket.pos);
+    }
+    if (kind === 'none') return null;
     return out.copy(origin).addScaledVector(dir, _aim.dist);
+  }
+
+  /**
+   * Sets `_aim.rocket` (and kind 'rocket') to the nearest rocket a grapple ray passes close enough
+   * to hook within `maxDist`, or null. On the server other players' rockets are backed up along
+   * their flight to where the shooter saw them, so what you hooked on screen is what you hook here.
+   */
+  private aimRockets(playerId: string, origin: Vector3, dir: Vector3, maxDist: number, view: number | undefined) {
+    _aim.rocket = null;
+    const rewind = this.remoteRockets || view === undefined ? 0 : Math.min(Math.max(this.tick - view, 0), REWIND_TICKS);
+    const test = (r: Rocket) => {
+      const own = r.ownerId === playerId;
+      if (own && !GRAPPLE.hookOwnRockets) return;
+      // Our own rockets are seen where they are (predicted), not a lag behind.
+      _center.copy(r.pos);
+      if (!own) _center.addScaledVector(r.dir, -ROCKET.speed * DT * rewind);
+      const t = raySphere(origin, dir, _center, ROCKET.hookRadius, maxDist);
+      if (t === null) return;
+      maxDist = t;
+      _aim.kind = 'rocket';
+      _aim.dist = t;
+      _aim.rocket = r;
+    };
+    this.rockets.forEach(test);
+    this.remoteRockets?.forEach(test);
+  }
+
+  private findRocket(ownerId: string, shot: number): Rocket | undefined {
+    const match = (r: Rocket) => r.ownerId === ownerId && r.shot === shot;
+    return this.rockets.find(match) ?? this.remoteRockets?.find(match);
   }
 
   /**
@@ -418,6 +472,13 @@ export class GameSim {
       g.anchor.copy(pos).add(h.offset);
       return true;
     }
+    if (h.kind === 'rocket') {
+      // Once it explodes (or fizzles) the rope has nothing left to hold.
+      const rocket = this.findRocket(h.ownerId, h.shot);
+      if (!rocket) return false;
+      g.anchor.copy(rocket.pos);
+      return true;
+    }
     const crate = this.crates[h.index];
     const r = crate.rotation();
     _q.set(r.x, r.y, r.z, r.w);
@@ -429,6 +490,7 @@ export class GameSim {
 
   /** The other end of a rope's pull, on whatever it's hooked into. Server only. */
   private pullHooked(p: PlayerSim, h: Hook) {
+    if (h.kind === 'rocket') return; // rockets fly straight no matter what's hanging off them
     if (h.kind === 'player') {
       // Tug of war: they get dragged toward us too.
       const target = this.players.get(h.id);
@@ -532,7 +594,9 @@ export class GameSim {
       }
       if (anchor) {
         let hook: Hook | null = null;
-        if (_aim.kind === 'player') {
+        if (_aim.kind === 'rocket') {
+          hook = { kind: 'rocket', ownerId: _aim.rocket!.ownerId, shot: _aim.rocket!.shot };
+        } else if (_aim.kind === 'player') {
           // Offset from where they were when hit; from now on the anchor follows where they are.
           hook = { kind: 'player', id: _aim.playerId, offset: anchor.clone().sub(_aim.center) };
         } else if (_aim.kind === 'crate') {

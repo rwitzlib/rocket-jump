@@ -64,7 +64,8 @@ export function updateVelocity(vel: Vector3, input: PlayerInput, grounded: boole
 /** What a grapple is hooked into when it isn't static level geometry. The anchor follows it. */
 export type Hook =
   | { kind: 'player'; id: string; offset: Vector3 } // offset from the player's center
-  | { kind: 'crate'; index: number; local: Vector3; localNormal: Vector3 }; // in the crate's own frame
+  | { kind: 'crate'; index: number; local: Vector3; localNormal: Vector3 } // in the crate's own frame
+  | { kind: 'rocket'; ownerId: string; shot: number }; // owner + shot identify a rocket on both server and client
 
 export interface GrappleState {
   anchor: Vector3;
