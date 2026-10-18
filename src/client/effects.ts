@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { DecalGeometry } from 'three/examples/jsm/geometries/DecalGeometry.js';
 import { ROCKET } from '../shared/config';
 import type { Rocket } from '../shared/sim';
 import { ParticleSystem } from './particles';
@@ -8,6 +9,9 @@ const _pos = new THREE.Vector3();
 const _vel = new THREE.Vector3();
 const _rand = new THREE.Vector3();
 const _step = new THREE.Vector3();
+const _euler = new THREE.Euler();
+const _decalSize = new THREE.Vector3();
+const _decalBounds = new THREE.Box3();
 const Z = new THREE.Vector3(0, 0, 1);
 
 const TRAIL_SPACING = 0.3; // meters between smoke puffs, so trails look the same at any frame rate
@@ -17,6 +21,8 @@ const LIGHT_TIME = 0.35;
 const DECAL_TIME = 12;
 const MAX_DECALS = 40;
 const MAX_RINGS = 8;
+const DECAL_DEPTH = 1; // how far in front of and behind the hit point a scorch projects
+const DECAL_MIN_FACING = 0.5; // surfaces angled more than ~60° from the hit surface get no scorch
 
 interface Timed<T> {
   obj: T;
@@ -32,6 +38,48 @@ function oldest<T extends { age: number }>(items: T[]): T {
 function randomInSphere(out: THREE.Vector3): THREE.Vector3 {
   do out.set(Math.random() * 2 - 1, Math.random() * 2 - 1, Math.random() * 2 - 1);
   while (out.lengthSq() > 1);
+  return out;
+}
+
+const _q = new THREE.Quaternion();
+const _spin = new THREE.Quaternion();
+const _n = new THREE.Vector3();
+
+/** The triangles of a projected decal whose surface faces along `normal`, or null if there are none. */
+function facingTriangles(geo: THREE.BufferGeometry, normal: THREE.Vector3): THREE.BufferGeometry | null {
+  const pos = geo.attributes.position as THREE.BufferAttribute;
+  const nor = geo.attributes.normal as THREE.BufferAttribute;
+  const uv = geo.attributes.uv as THREE.BufferAttribute;
+  const outPos: number[] = [];
+  const outUv: number[] = [];
+  for (let i = 0; i < pos.count; i += 3) {
+    _n.set(0, 0, 0);
+    for (let k = 0; k < 3; k++) _n.x += nor.getX(i + k), _n.y += nor.getY(i + k), _n.z += nor.getZ(i + k);
+    if (_n.normalize().dot(normal) < DECAL_MIN_FACING) continue;
+    for (let k = 0; k < 3; k++) {
+      outPos.push(pos.getX(i + k), pos.getY(i + k), pos.getZ(i + k));
+      outUv.push(uv.getX(i + k), uv.getY(i + k));
+    }
+  }
+  if (!outPos.length) return null;
+  const out = new THREE.BufferGeometry();
+  out.setAttribute('position', new THREE.Float32BufferAttribute(outPos, 3));
+  out.setAttribute('uv', new THREE.Float32BufferAttribute(outUv, 2));
+  return out;
+}
+
+/** Concatenates non-indexed position+uv geometries (and disposes the inputs). */
+function mergeTriangles(parts: THREE.BufferGeometry[]): THREE.BufferGeometry {
+  const pos: number[] = [];
+  const uv: number[] = [];
+  for (const p of parts) {
+    pos.push(...(p.attributes.position.array as Float32Array));
+    uv.push(...(p.attributes.uv.array as Float32Array));
+    p.dispose();
+  }
+  const out = new THREE.BufferGeometry();
+  out.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  out.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
   return out;
 }
 
@@ -66,9 +114,14 @@ export class Effects {
   // Rings and decals are pooled and never disposed: disposing the last user of a material makes
   // three.js delete its shader program, so the next explosion would recompile it (a visible hitch).
   private rings: Timed<THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial>>[] = [];
-  private decals: Timed<THREE.Mesh<THREE.CircleGeometry, THREE.MeshBasicMaterial>>[] = [];
+  private decals: Timed<THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>>[] = [];
+  /** Starting shape for pooled scorch marks (and what the startup warm-up draws); replaced on first use. */
+  private readonly decalPlaceholder = new THREE.CircleGeometry(1, 24);
+  private readonly decalSurfaces: { mesh: THREE.Mesh; bounds: THREE.Box3 }[];
 
-  constructor(private readonly scene: THREE.Scene) {
+  /** `surfaces` are the static level meshes scorch marks are projected onto. */
+  constructor(private readonly scene: THREE.Scene, surfaces: THREE.Mesh[]) {
+    this.decalSurfaces = surfaces.map((mesh) => ({ mesh, bounds: new THREE.Box3().setFromObject(mesh) }));
     // Both systems sit at the origin, so force the glow to draw after (on top of) the smoke.
     this.fire.points.renderOrder = 1;
     scene.add(this.smoke.points, this.fire.points);
@@ -92,11 +145,10 @@ export class Effects {
       this.rings.push({ obj: ring, age: RING_TIME });
     }
 
-    const decalGeo = new THREE.CircleGeometry(1, 24);
     const decalTex = scorchTexture();
     for (let i = 0; i < MAX_DECALS; i++) {
-      const decal = new THREE.Mesh(
-        decalGeo,
+      const decal = new THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>(
+        this.decalPlaceholder,
         new THREE.MeshBasicMaterial({
           map: decalTex,
           transparent: true,
@@ -255,16 +307,34 @@ export class Effects {
     }
   }
 
+  /**
+   * Projects a scorch mark onto the level around the hit point. It only exists where there's
+   * surface facing roughly the same way as the one hit, so at an edge or a corner it stops at the
+   * edge instead of hanging out into the air (which a flat disc did).
+   */
   private addDecal(at: THREE.Vector3, normal: THREE.Vector3) {
+    const size = (1.4 + Math.random() * 0.5) * 2;
+    _decalSize.set(size, size, DECAL_DEPTH * 2);
+    _euler.setFromQuaternion(_q.setFromUnitVectors(Z, normal).multiply(_spin.setFromAxisAngle(Z, Math.random() * Math.PI * 2)));
+    _decalBounds.setFromCenterAndSize(at, _pos.setScalar(size * Math.SQRT2));
+
+    const parts: THREE.BufferGeometry[] = [];
+    for (const s of this.decalSurfaces) {
+      if (!s.bounds.intersectsBox(_decalBounds)) continue;
+      const projected = new DecalGeometry(s.mesh, at, _euler, _decalSize);
+      const kept = facingTriangles(projected, normal);
+      projected.dispose();
+      if (kept) parts.push(kept);
+    }
+    if (!parts.length) return; // hit something that isn't level geometry, like a crate that will move away
+
     const entry = oldest(this.decals);
     const decal = entry.obj;
+    if (decal.geometry !== this.decalPlaceholder) decal.geometry.dispose();
+    decal.geometry = parts.length === 1 ? parts[0] : mergeTriangles(parts);
     entry.age = 0;
     decal.visible = true;
     decal.material.opacity = 1;
-    decal.position.copy(at).addScaledVector(normal, 0.12);
-    decal.quaternion.setFromUnitVectors(Z, normal);
-    decal.rotateZ(Math.random() * Math.PI * 2);
-    decal.scale.setScalar(1.4 + Math.random() * 0.5);
   }
 
   private syncRockets(rockets: readonly Rocket[], alpha: number, dt: number) {

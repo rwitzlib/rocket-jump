@@ -66,9 +66,9 @@ async function main() {
   const localId = me.id;
   const playerPos = (id: string) => sim.players.get(id)?.pos ?? client?.remotes.get(id)?.pos;
 
-  buildLevel(scene, ARENA);
+  const levelMeshes = buildLevel(scene, ARENA);
   const crates = new CrateView(scene, sim);
-  const effects = new Effects(scene);
+  const effects = new Effects(scene, levelMeshes);
   const rope = new Rope(scene);
   const remoteView = new RemotePlayersView(scene);
   let fov = FOV;

@@ -39,7 +39,8 @@ function worldScaledBox(w: number, h: number, d: number): THREE.BoxGeometry {
   return geo;
 }
 
-export function buildLevel(scene: THREE.Scene, map: MapDef) {
+/** Builds the static level and returns its meshes (scorch marks get projected onto them). */
+export function buildLevel(scene: THREE.Scene, map: MapDef): THREE.Mesh[] {
   scene.background = new THREE.Color(0x9ec9f0);
   scene.fog = new THREE.Fog(0x9ec9f0, 60, 180);
 
@@ -65,13 +66,15 @@ export function buildLevel(scene: THREE.Scene, map: MapDef) {
     return m;
   };
 
-  for (const box of map.boxes) {
+  return map.boxes.map((box) => {
     const mesh = new THREE.Mesh(worldScaledBox(...box.size), materialFor(box.color));
     mesh.position.set(...box.pos);
     if (box.rot) mesh.rotation.set(...box.rot);
     mesh.castShadow = mesh.receiveShadow = true;
+    mesh.updateMatrixWorld();
     scene.add(mesh);
-  }
+    return mesh;
+  });
 }
 
 /** Dynamic crate meshes that follow their physics bodies. */
