@@ -137,6 +137,7 @@ export function startGame(ctx: GameContext, mapName: string, localId: string, tr
     switch (e.type) {
       case 'explosion': {
         effects.explosion(e.pos, e.normal, e.surface, e.radius);
+        remoteView.blast(e.pos, e.radius);
         audio.play('explosion', { at: e.pos, volume: 1.6 });
         const dist = e.pos.distanceTo(me.pos);
         cameraFx.shake(Math.max(0, 0.7 * (1 - dist / 25)));
@@ -261,6 +262,7 @@ export function startGame(ctx: GameContext, mapName: string, localId: string, tr
         break;
       case 'vehicleDestroyed': {
         effects.explosion(e.pos, e.normal, false, 7);
+        remoteView.blast(e.pos, 7);
         audio.play('explosion', { at: e.pos, volume: 2, rate: 0.7 });
         cameraFx.shake(Math.max(0, 1 - e.pos.distanceTo(me.pos) / 40));
         break;

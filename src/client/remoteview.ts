@@ -24,7 +24,8 @@ const MAX_LEG_TURN = 0.9; // radians the legs turn toward a sideways run
 const RECOIL_TIME = 0.35;
 const CORPSE_TIME = 1.15; // seconds from the hit to the pop
 const CORPSE_SWELL = 0.14; // seconds it puffs up before popping
-const CORPSE_GRAVITY = 16; // a little floatier than real gravity, for the cartoon arc
+const CORPSE_GRAVITY = 16;
+const BLAST_MEMORY = 400; // ms an explosion is remembered for, to blame for a death that shows up a little later // a little floatier than real gravity, for the cartoon arc
 const Y = new THREE.Vector3(0, 1, 0);
 const FORWARD = new THREE.Vector3(0, 0, -1);
 const GAUNTLET_REST = new THREE.Quaternion().setFromEuler(new THREE.Euler(-0.2, -0.1, 0));
@@ -84,6 +85,7 @@ interface Corpse {
   axis: THREE.Vector3;
   spin: number; // radians per second about `axis`
   age: number;
+  launched: boolean; // thrown yet: waits a frame, so the explosion that killed them has been seen
   limbs: THREE.Object3D[]; // thighs, shins, aim, gauntlet, head: each flails on its own beat
 }
 
@@ -113,6 +115,8 @@ export class RemotePlayersView {
   }));
   private readonly proto: THREE.Group;
   private readonly corpses: Corpse[] = [];
+  /** Recent explosions, so a body can be thrown away from the one that killed it. */
+  private readonly blasts: { pos: THREE.Vector3; radius: number; time: number }[] = [];
   /** Called when a corpse pops: where, and in whose color. */
   onPoof: ((at: THREE.Vector3, color: number) => void) | null = null;
   /** Height of the ground under a point, or null if there's none (for corpses to bounce on). */
@@ -144,16 +148,61 @@ export class RemotePlayersView {
     root.position.copy(pos);
     root.rotation.y = yaw;
     this.scene.add(root);
-    const shove = new THREE.Vector3(Math.random() * 2 - 1, 0, Math.random() * 2 - 1).multiplyScalar(3);
     this.corpses.push({
       id,
       root,
-      vel: vel.clone().multiplyScalar(0.7).add(shove).setY(Math.max(vel.y * 0.7, 0) + 6 + Math.random() * 3),
+      vel: vel.clone(),
       axis: new THREE.Vector3(Math.random() * 2 - 1, 0.3, Math.random() * 2 - 1).normalize(),
       spin: (7 + Math.random() * 5) * (Math.random() < 0.5 ? -1 : 1),
       age: 0,
+      launched: false,
       limbs: ['thighL', 'thighR', 'shinL', 'shinR', 'aim', 'gauntlet', 'head'].map((name) => root.getObjectByName(name)!),
     });
+  }
+
+  /** An explosion went off: bodies near it get thrown away from it. */
+  blast(at: THREE.Vector3, radius: number) {
+    const now = performance.now();
+    while (this.blasts.length && now - this.blasts[0].time > BLAST_MEMORY) this.blasts.shift();
+    this.blasts.push({ pos: at.clone(), radius, time: now });
+  }
+
+  /**
+   * Sends a corpse flying: away from the nearest recent explosion that could have reached it,
+   * harder the closer it was and tumbling head over heels that way. With no blast about (a fall, a
+   * buggy) it just pops up off the ground.
+   */
+  private launch(c: Corpse) {
+    c.launched = true;
+    const now = performance.now();
+    _a.copy(c.root.position).y += 0.3; // aim from the chest, so a blast at the feet throws them up
+    let best: (typeof this.blasts)[number] | null = null;
+    let bestDist = Infinity;
+    for (const b of this.blasts) {
+      const dist = b.pos.distanceTo(_a);
+      if (now - b.time < BLAST_MEMORY && dist < b.radius + 1.5 && dist < bestDist) {
+        best = b;
+        bestDist = dist;
+      }
+    }
+    if (!best) {
+      const shove = _b.set(Math.random() * 2 - 1, 0, Math.random() * 2 - 1).multiplyScalar(3);
+      c.vel.multiplyScalar(0.7).add(shove).setY(Math.max(c.vel.y * 0.7, 0) + 6 + Math.random() * 3);
+      return;
+    }
+    const near = 1 - Math.min(bestDist / (best.radius + 1.5), 1);
+    const dir = _b.subVectors(_a, best.pos);
+    if (dir.lengthSq() < 1e-4) dir.set(0, 1, 0);
+    dir.normalize();
+    // Never straight into the ground: a blast from above still bounces them along it.
+    if (dir.y < 0.25) dir.y = 0.25 + dir.y * 0.3;
+    dir.normalize();
+    c.vel.multiplyScalar(0.3).addScaledVector(dir, 11 + near * 9).y += 2.5;
+    // Tumble about the axis across the throw: feet over head, away from the blast.
+    c.axis.crossVectors(Y, dir);
+    if (c.axis.lengthSq() < 1e-4) c.axis.set(1, 0, 0);
+    c.axis.normalize();
+    c.spin = 8 + near * 6;
   }
 
   /** Where someone's corpse is right now, if they have one in the air. */
@@ -165,6 +214,7 @@ export class RemotePlayersView {
   private updateCorpses(dt: number) {
     for (let i = this.corpses.length - 1; i >= 0; i--) {
       const c = this.corpses[i];
+      if (!c.launched) this.launch(c);
       c.age += dt;
       c.vel.y -= CORPSE_GRAVITY * dt;
       c.root.position.addScaledVector(c.vel, dt);
