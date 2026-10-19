@@ -14,9 +14,9 @@ import { GameServer } from '../shared/server';
 //
 //   PORT=8080             HTTP + WebSocket port
 //   HOST=0.0.0.0          interface to listen on
-//   MAPS=arena,citadel    map rotation
+//   MAPS=dockyard,temple,skyreach,arena,citadel   map rotation
 //   TIME_LIMIT=480        seconds per match
-//   FRAG_LIMIT=25         kills to win (default: 25 on Arena, 15 on Citadel)
+//   FRAG_LIMIT=25         kills to win (default: per map, 15 to 25)
 //   INTERMISSION=15       seconds on the results screen
 //   MIN_PLAYERS=4         bots fill in up to this many players (0: no bots)
 //   MAX_PLAYERS=12        people allowed in at once
@@ -47,7 +47,7 @@ const MIME: Record<string, string> = {
 
 await RAPIER.init();
 
-const maps = (process.env.MAPS ?? 'arena,citadel').split(',').map((m) => m.trim()).filter((m) => m in MAPS);
+const maps = (process.env.MAPS ?? 'dockyard,temple,skyreach,arena,citadel').split(',').map((m) => m.trim()).filter((m) => m in MAPS);
 const sockets = new Map<string, WebSocket>();
 const game = new GameServer(
   (id, msg) => {

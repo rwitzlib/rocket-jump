@@ -26,6 +26,10 @@ export const BOT_SKILLS = {
 export type BotSkill = keyof typeof BOT_SKILLS;
 
 const _eye = new Vector3();
+const _probe = new Vector3();
+const DOWN = new Vector3(0, -1, 0);
+// Headings tried, nearest first, when the way ahead drops off.
+const SAFE_TURNS = [0.5, -0.5, 1, -1, 1.6, -1.6, 2.3, -2.3, Math.PI];
 const _aim = new Vector3();
 const _targetEye = new Vector3();
 
@@ -44,6 +48,73 @@ export class Bot {
   private errPitch = 0;
 
   think(p: PlayerSim, sim: GameSim): PlayerInput {
+    const input = this.decide(p, sim);
+    this.keepFooting(p, sim, input);
+    return input;
+  }
+
+  /**
+   * Maps with edges (a quay, floating islands): if there's no floor where the bot is heading, it
+   * swings round to the nearest heading that has some (along the edge, or onto the bridge) instead of
+   * strafing or jumping off, and if it's already falling it grapples for something above the middle.
+   */
+  private keepFooting(p: PlayerSim, sim: GameSim, input: PlayerInput) {
+    const depth = p.pos.y - sim.map.killY;
+    const below = sim.clearDistance(p.pos, DOWN, depth) < depth;
+    if (!below && !p.grounded) {
+      // Falling: grapple for a point well above the middle of the map, if nothing's in the way (from
+      // underneath an island it would only catch the underside and hang there).
+      p.eye(_eye);
+      _probe.set(0, Math.max(p.pos.y + 12, 16), 0);
+      // Hooked into a ceiling (the island's underside) it would only hang there: let go.
+      const reachable = p.grapple ? p.grapple.normal.y > -0.5 : sim.canSee(_eye, _probe);
+      _probe.sub(_eye);
+      input.yaw = Math.atan2(-_probe.x, -_probe.z);
+      input.pitch = Math.atan2(_probe.y, Math.hypot(_probe.x, _probe.z));
+      input.forward = 1;
+      input.right = 0;
+      input.grapple = reachable;
+      input.fire = false;
+      return;
+    }
+    const speed = Math.hypot(p.vel.x, p.vel.z);
+    const want = speed > 1 ? Math.atan2(-p.vel.x, -p.vel.z) : input.yaw;
+    // On a narrow bridge or ledge: no strafing or hopping, just walk.
+    if (!this.floorAhead(p, sim, input.yaw + Math.PI / 2, 3, depth) || !this.floorAhead(p, sim, input.yaw - Math.PI / 2, 3, depth)) {
+      input.right = 0;
+      input.jump = false;
+      if (input.pitch < -1) input.fire = false;
+    }
+    // A hop carries it about this far: only hop where it will come down on something.
+    if (input.jump && !this.floorAhead(p, sim, want, speed * 0.75 + 1.5, depth)) input.jump = false;
+    if (this.floorAhead(p, sim, want, Math.max(2.5, speed * 0.6), depth)) return;
+    if (!p.grounded) {
+      // Already in the air and drifting over the edge: brake with air control.
+      input.yaw = want + Math.PI;
+      input.forward = 1;
+      input.right = 0;
+      return;
+    }
+    for (const turn of SAFE_TURNS) {
+      const yaw = want + turn;
+      if (this.floorAhead(p, sim, yaw, 3, depth) && this.floorAhead(p, sim, yaw, 7, depth)) {
+        input.yaw = yaw;
+        input.forward = 1;
+        input.right = 0;
+        input.jump = false;
+        if (input.pitch < -1) input.fire = false; // no rocket jumps out over the drop
+        if (input.pitch < -0.3) input.pitch = 0;
+        return;
+      }
+    }
+  }
+
+  private floorAhead(p: PlayerSim, sim: GameSim, yaw: number, dist: number, depth: number): boolean {
+    _probe.set(p.pos.x - Math.sin(yaw) * dist, p.pos.y + 1, p.pos.z - Math.cos(yaw) * dist);
+    return sim.clearDistance(_probe, DOWN, depth + 1) < depth + 1;
+  }
+
+  private decide(p: PlayerSim, sim: GameSim): PlayerInput {
     this.t += DT;
 
     // Head for a point that slides around a circle, strafing side to side like an air-strafer.
@@ -78,15 +149,17 @@ export class Bot {
       return input;
     }
 
+    const depth = p.pos.y - sim.map.killY;
     this.nextRocketJump -= DT;
-    if (this.nextRocketJump <= 0 && p.grounded) {
+    // Only where there's somewhere to come down.
+    if (this.nextRocketJump <= 0 && p.grounded && this.floorAhead(p, sim, input.yaw, 8, depth) && this.floorAhead(p, sim, input.yaw, 14, depth)) {
       input.pitch = -1.35; // at the feet
       input.fire = true;
       this.nextRocketJump = 3 + Math.random() * 3;
     }
 
     this.nextGrapple -= DT;
-    if (this.nextGrapple <= 0) {
+    if (this.nextGrapple <= 0 && this.floorAhead(p, sim, input.yaw, 16, depth)) {
       this.grappleFor = 1 + Math.random();
       this.nextGrapple = 6 + Math.random() * 4;
     }

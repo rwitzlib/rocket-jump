@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import { PLAYER } from '../shared/config';
 import type { WeaponId } from '../shared/types';
 import type { RemotePlayer } from './net/netclient';
@@ -10,7 +11,7 @@ import { buildGauntlet, buildHookHead, LAUNCHER, PRIMARY_MODELS } from './weapon
 // so you can read their aim and see shots leave the barrel. Legs walk, strafe and tuck mid-air
 // from the interpolated movement; the gauntlet swings to point along the rope while grappling.
 
-const COLORS = [0x4fa3e0, 0xe0b04f, 0xb86fe0, 0x5fd08a, 0xe06f8a, 0x6fd6d6];
+const COLORS = [0x3d9cf0, 0xf0a830, 0xa860f0, 0x40c878, 0xf05a80, 0x30c8d0];
 
 const TAG_HEIGHT = 0.045; // with no size attenuation: about 2% of the screen height at a 90° FOV
 const HIP_Y = -0.05; // relative to the capsule center
@@ -70,30 +71,28 @@ interface Entry {
 
 export class RemotePlayersView {
   private readonly entries = new Map<string, Entry>();
-  private readonly suit = new THREE.MeshStandardMaterial({ color: 0x2b3038, roughness: 0.8 });
-  private readonly metal = new THREE.MeshStandardMaterial({ color: 0x6a7484, metalness: 0.5, roughness: 0.4 });
-  private readonly darkMetal = new THREE.MeshStandardMaterial({ color: 0x3a4250, metalness: 0.6, roughness: 0.35 });
-  private readonly visorMat = new THREE.MeshStandardMaterial({ color: 0x0e1218, emissive: 0x2a6f8f, emissiveIntensity: 0.6, roughness: 0.1, metalness: 0.8 });
+  private readonly suit = withRim(new THREE.MeshStandardMaterial({ color: 0x39404e, roughness: 0.8 }));
+  private readonly armor = withRim(new THREE.MeshStandardMaterial({ color: 0xeef0f3, roughness: 0.42 }));
+  private readonly darkMetal = withRim(new THREE.MeshStandardMaterial({ color: 0x2c323c, metalness: 0.5, roughness: 0.4 }));
+  private readonly visorMat = new THREE.MeshStandardMaterial({ color: 0x0a1a24, emissive: 0x3fd6ff, emissiveIntensity: 1.7, roughness: 0.15, metalness: 0.6 });
   private readonly ropeMat = new THREE.LineBasicMaterial({ color: 0x2a2a2a });
   private readonly hookProto = buildHookHead();
-  private readonly shellGeo = new THREE.CapsuleGeometry(PLAYER.radius + 0.15, PLAYER.halfHeight * 2, 4, 16);
-  private readonly shellMat = new THREE.MeshBasicMaterial({
-    color: 0x7ce0ff,
-    transparent: true,
-    opacity: 0.3,
-    depthWrite: false,
-    blending: THREE.AdditiveBlending,
-  });
+  private readonly shellGeo = new THREE.CapsuleGeometry(PLAYER.radius + 0.18, PLAYER.halfHeight * 2, 6, 20);
+  private readonly shellMat = shieldMaterial();
   private readonly flashMat = new THREE.MeshBasicMaterial({
-    color: 0xffc070,
+    color: new THREE.Color(2.4, 1.6, 0.7),
     transparent: true,
     opacity: 0,
     depthWrite: false,
     blending: THREE.AdditiveBlending,
   });
-  /** Stand-in for the player's color; swapped for one of `teamMats` on each clone. */
+  /** Stand-ins for the player's color and its glowing strips; swapped for the team's own on each clone. */
   private readonly teamProto = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.5, metalness: 0.2 });
-  private readonly teamMats = COLORS.map((color) => new THREE.MeshStandardMaterial({ color, roughness: 0.5, metalness: 0.2 }));
+  private readonly glowProto = new THREE.MeshStandardMaterial({ color: 0x000000, emissive: 0xffffff });
+  private readonly teamMats = COLORS.map((color) => ({
+    team: withRim(new THREE.MeshStandardMaterial({ color, roughness: 0.45, metalness: 0.15 })),
+    glow: new THREE.MeshStandardMaterial({ color: 0x000000, emissive: color, emissiveIntensity: 2.4 }),
+  }));
   private readonly proto: THREE.Group;
   /** Display names by player id, for the tags over their heads. */
   names: ReadonlyMap<string, string> = new Map();
@@ -115,6 +114,11 @@ export class RemotePlayersView {
       e.flash.visible = true;
       e.flash.material.opacity = 1;
     } else this.remove('__warmup');
+  }
+
+  /** A player's team color (the same for everyone, worked out from their id). */
+  colorOf(id: string): number {
+    return COLORS[teamIndex(id)];
   }
 
   /** A remote player fired: kick the launcher back and flash its muzzle. */
@@ -248,13 +252,13 @@ export class RemotePlayersView {
   private entryFor(id: string): Entry {
     let e = this.entries.get(id);
     if (e) return e;
-    let hash = 0;
-    for (const ch of id) hash = (hash * 31 + ch.charCodeAt(0)) | 0;
-    const team = this.teamMats[Math.abs(hash) % COLORS.length];
+    const team = this.teamMats[teamIndex(id)];
 
     const root = this.proto.clone();
     root.traverse((o) => {
-      if (o instanceof THREE.Mesh && o.material === this.teamProto) o.material = team;
+      if (!(o instanceof THREE.Mesh)) return;
+      if (o.material === this.teamProto) o.material = team.team;
+      else if (o.material === this.glowProto) o.material = team.glow;
     });
     const get = (name: string) => root.getObjectByName(name)!;
     // Each model gets its own flash material so one player's shot doesn't light up everyone's barrel.
@@ -352,17 +356,20 @@ export class RemotePlayersView {
 
   /** The rig every remote player is cloned from. Named nodes are the joints `animate` drives. */
   private buildModel(): THREE.Group {
-    const { suit, metal, darkMetal, teamProto: team } = this;
+    const { suit, armor, darkMetal, teamProto: team, glowProto: glow } = this;
     const mesh = (geo: THREE.BufferGeometry, mat: THREE.Material, x = 0, y = 0, z = 0) => {
       const m = new THREE.Mesh(geo, mat);
       m.position.set(x, y, z);
       m.castShadow = true;
       return m;
     };
+    /** A soft-cornered box: the cartoon armor plates. */
+    const rounded = (w: number, h: number, d: number, r: number, mat: THREE.Material, x = 0, y = 0, z = 0) =>
+      mesh(new RoundedBoxGeometry(w, h, d, 2, r), mat, x, y, z);
     /** A rounded rod from a to b. */
     const limb = (a: THREE.Vector3, b: THREE.Vector3, radius: number, mat: THREE.Material) => {
       const len = a.distanceTo(b);
-      const m = mesh(new THREE.CapsuleGeometry(radius, Math.max(len - radius * 2, 0.01), 3, 8), mat);
+      const m = mesh(new THREE.CapsuleGeometry(radius, Math.max(len - radius * 2, 0.01), 4, 10), mat);
       m.position.addVectors(a, b).multiplyScalar(0.5);
       m.quaternion.setFromUnitVectors(Y, _a.subVectors(b, a).normalize());
       return m;
@@ -374,37 +381,62 @@ export class RemotePlayersView {
       return g;
     };
     const v = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z);
+    /** A rounded pauldron: the top half of a squashed sphere. */
+    const pad = (x: number, y: number, z: number) => {
+      const m = mesh(new THREE.SphereGeometry(0.13, 16, 8, 0, Math.PI * 2, 0, Math.PI * 0.55), team, x, y, z);
+      m.scale.set(1.05, 0.85, 1.1);
+      return m;
+    };
 
-    // Legs: thigh pivots at the hip, shin at the knee, both pointing down -Y.
+    // Legs: thigh pivots at the hip, shin at the knee, both pointing down -Y. Chunky boots with
+    // team-colored toe caps, white shin guards and thigh plates, team knee pads.
     const leg = (side: 'L' | 'R', x: number) => {
-      const boot = mesh(new THREE.BoxGeometry(0.15, 0.1, 0.27), darkMetal, 0, -SHIN - 0.02, -0.04);
-      const shin = named(`shin${side}`, limb(v(0, 0, 0), v(0, -SHIN + 0.04, 0), 0.075, suit), mesh(new THREE.BoxGeometry(0.13, 0.2, 0.06), team, 0, -0.14, -0.07), boot);
+      const boot = rounded(0.17, 0.13, 0.31, 0.05, darkMetal, 0, -SHIN - 0.01, -0.05);
+      const toe = rounded(0.165, 0.07, 0.09, 0.03, team, 0, -SHIN - 0.03, -0.18);
+      const guard = rounded(0.14, 0.24, 0.08, 0.035, armor, 0, -0.17, -0.06);
+      const shin = named(`shin${side}`, limb(v(0, 0, 0), v(0, -SHIN + 0.04, 0), 0.07, suit), guard, boot, toe);
       shin.position.y = -THIGH;
-      const knee = mesh(new THREE.SphereGeometry(0.075, 10, 8), darkMetal, 0, -THIGH, -0.03);
-      const thigh = named(`thigh${side}`, limb(v(0, 0.03, 0), v(0, -THIGH, 0), 0.09, suit), knee, shin);
+      const knee = rounded(0.13, 0.12, 0.09, 0.04, team, 0, -THIGH + 0.01, -0.06);
+      const plate = rounded(0.16, 0.2, 0.07, 0.03, armor, 0, -0.17, -0.07);
+      const thigh = named(`thigh${side}`, limb(v(0, 0.03, 0), v(0, -THIGH, 0), 0.09, suit), plate, knee, shin);
       thigh.position.x = x;
       return thigh;
     };
     const legs = named('legs', leg('L', -0.12), leg('R', 0.12));
     legs.position.y = HIP_Y;
 
-    // Torso, pivoting at the waist.
-    const pelvis = mesh(new THREE.BoxGeometry(0.36, 0.16, 0.22), darkMetal, 0, 0.02, 0);
-    const belly = mesh(new THREE.CylinderGeometry(0.15, 0.17, 0.2, 10), suit, 0, 0.16, 0);
-    const chest = mesh(new THREE.BoxGeometry(0.48, 0.28, 0.27), suit, 0, 0.34, 0);
-    const plate = mesh(new THREE.BoxGeometry(0.42, 0.24, 0.06), team, 0, 0.35, -0.14);
+    // Torso, pivoting at the waist: white chest armor with a team plate and a glowing emblem, a belt
+    // with a lit buckle, and a jetpack with two team-colored tanks and glowing nozzles.
+    const pelvis = rounded(0.38, 0.17, 0.24, 0.06, darkMetal, 0, 0.02, 0);
+    const belt = rounded(0.4, 0.06, 0.27, 0.025, suit, 0, 0.11, 0);
+    const buckle = rounded(0.09, 0.06, 0.03, 0.012, glow, 0, 0.11, -0.14);
+    const belly = mesh(new THREE.CylinderGeometry(0.15, 0.17, 0.2, 12), suit, 0, 0.18, 0);
+    const chest = rounded(0.5, 0.31, 0.29, 0.09, armor, 0, 0.34, 0);
+    const plate = rounded(0.34, 0.2, 0.07, 0.035, team, 0, 0.35, -0.14);
     plate.rotation.x = -0.08;
-    const pack = mesh(new THREE.BoxGeometry(0.34, 0.36, 0.14), metal, 0, 0.3, 0.19);
-    const tubes = [-0.09, 0.09].map((x) => mesh(new THREE.CylinderGeometry(0.045, 0.045, 0.3, 8), team, x, 0.32, 0.27));
+    const emblem = mesh(new THREE.CircleGeometry(0.045, 16), glow, 0, 0.36, -0.182);
+    emblem.rotation.y = Math.PI;
+    emblem.castShadow = false;
+    const collar = mesh(new THREE.TorusGeometry(0.1, 0.035, 8, 16).rotateX(Math.PI / 2), darkMetal, 0, NECK_Y - 0.01, 0);
+    const pack = rounded(0.36, 0.38, 0.16, 0.06, darkMetal, 0, 0.3, 0.2);
+    const tanks = [-0.1, 0.1].map((x) => mesh(new THREE.CapsuleGeometry(0.06, 0.24, 4, 12), team, x, 0.32, 0.29));
+    const nozzles = [-0.1, 0.1].map((x) => mesh(new THREE.CylinderGeometry(0.04, 0.06, 0.07, 12), darkMetal, x, 0.12, 0.29));
+    const jets = [-0.1, 0.1].map((x) => mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.012, 12), glow, x, 0.083, 0.29));
     const neck = mesh(new THREE.CylinderGeometry(0.07, 0.08, 0.1, 8), suit, 0, NECK_Y, 0);
 
-    // Head: helmet, team-colored crest and a glowing visor at eye height (0.6 above center).
-    const helmet = mesh(new THREE.SphereGeometry(0.17, 16, 12), metal, 0, 0.13, 0);
-    helmet.scale.set(1, 1.05, 1.1);
-    const crest = mesh(new THREE.BoxGeometry(0.05, 0.08, 0.3), team, 0, 0.29, 0.02);
-    const visor = mesh(new THREE.BoxGeometry(0.28, 0.08, 0.1), this.visorMat, 0, 0.12, -0.15);
-    const jaw = mesh(new THREE.BoxGeometry(0.2, 0.07, 0.1), darkMetal, 0, 0.03, -0.12);
-    const head = named('head', helmet, crest, visor, jaw);
+    // Head: a round white helmet, a wraparound glowing visor at eye height (0.6 above center), a
+    // team crest and ear pieces, and a little antenna with a lit tip.
+    const helmet = mesh(new THREE.SphereGeometry(0.19, 20, 14), armor, 0, 0.13, 0);
+    helmet.scale.set(1, 1.02, 1.08);
+    const visor = mesh(new THREE.SphereGeometry(0.197, 24, 6, Math.PI * 1.5 - 0.85, 1.7, 1.32, 0.48), this.visorMat, 0, 0.13, 0);
+    visor.scale.set(1, 1.02, 1.08);
+    visor.castShadow = false;
+    const crest = rounded(0.055, 0.1, 0.3, 0.025, team, 0, 0.31, 0.02);
+    const ears = [-1, 1].map((side) => mesh(new THREE.CylinderGeometry(0.065, 0.065, 0.06, 14).rotateZ(Math.PI / 2), team, side * 0.19, 0.12, 0.01));
+    const antenna = mesh(new THREE.CylinderGeometry(0.008, 0.008, 0.2, 6), darkMetal, 0.2, 0.25, 0.04);
+    const antennaTip = mesh(new THREE.SphereGeometry(0.022, 8, 6), glow, 0.2, 0.35, 0.04);
+    const jaw = rounded(0.2, 0.08, 0.1, 0.035, darkMetal, 0, 0.0, -0.13);
+    const head = named('head', helmet, visor, crest, ...ears, antenna, antennaTip, jaw);
     head.position.y = NECK_Y;
 
     // Weapons and arms, pivoting with the aim at shoulder height. Forward is -Z.
@@ -431,10 +463,11 @@ export class RemotePlayersView {
     const elbowR = v(0.37, -0.2, -0.13);
     const handR = v(0.31, 0.13, 0).add(LAUNCHER.foreGrip);
     const armR = [
-      mesh(new THREE.SphereGeometry(0.11, 10, 8), team, shoulderR.x, shoulderR.y + 0.03, shoulderR.z),
+      mesh(new THREE.SphereGeometry(0.09, 10, 8), suit, shoulderR.x, shoulderR.y, shoulderR.z),
+      pad(shoulderR.x + 0.01, shoulderR.y + 0.02, shoulderR.z),
       limb(shoulderR, elbowR, 0.065, suit),
-      limb(elbowR, handR, 0.06, suit),
-      mesh(new THREE.BoxGeometry(0.08, 0.09, 0.09), darkMetal, handR.x, handR.y, handR.z),
+      limb(elbowR, handR, 0.072, armor),
+      rounded(0.1, 0.1, 0.11, 0.035, darkMetal, handR.x, handR.y, handR.z),
     ];
 
     // Left arm is straight along -Z from the shoulder so it can be pointed down the rope.
@@ -442,7 +475,8 @@ export class RemotePlayersView {
     gauntletModel.root.position.z = -0.2;
     const gauntlet = named(
       'gauntlet',
-      mesh(new THREE.SphereGeometry(0.11, 10, 8), team, 0, 0.03, 0),
+      mesh(new THREE.SphereGeometry(0.09, 10, 8), suit, 0, 0, 0),
+      pad(-0.01, 0.02, 0),
       limb(v(0, 0, 0), v(0, 0, -0.24), 0.065, suit),
       gauntletModel.root,
     );
@@ -453,9 +487,65 @@ export class RemotePlayersView {
     const aim = named('aim', launcherMount, ...armR, shoulderL);
     aim.position.y = SHOULDER_Y;
 
-    const torso = named('torso', pelvis, belly, chest, plate, pack, ...tubes, neck, head, aim);
+    const torso = named('torso', pelvis, belt, buckle, belly, chest, plate, emblem, collar, pack, ...tanks, ...nozzles, ...jets, neck, head, aim);
     torso.position.y = HIP_Y;
     const body = named('body', legs, torso);
     return named('player', body);
   }
+}
+
+function teamIndex(id: string): number {
+  let hash = 0;
+  for (const ch of id) hash = (hash * 31 + ch.charCodeAt(0)) | 0;
+  return Math.abs(hash) % COLORS.length;
+}
+
+/**
+ * A soft light around a material's silhouette, as if lit from behind: keeps characters readable
+ * against any background, the way cartoon renderers do.
+ */
+export function withRim<T extends THREE.MeshStandardMaterial>(material: T, strength = 0.35): T {
+  material.onBeforeCompile = (shader) => {
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <opaque_fragment>',
+      `float rimLight = pow(1.0 - saturate(dot(normal, normalize(vViewPosition))), 3.0);
+      outgoingLight += rimLight * ${strength.toFixed(2)} * (diffuseColor.rgb * 0.5 + 0.5);
+      #include <opaque_fragment>`,
+    );
+  };
+  material.customProgramCacheKey = () => `rim${strength}`;
+  return material;
+}
+
+/** Spawn protection: a bubble that glows at its edges, with soft bands of light around it. */
+function shieldMaterial(): THREE.ShaderMaterial {
+  return new THREE.ShaderMaterial({
+    uniforms: { color: { value: new THREE.Color(0x7ce0ff) } },
+    vertexShader: /* glsl */ `
+      varying vec3 vNormal;
+      varying vec3 vView;
+      varying float vY;
+      void main() {
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        vNormal = normalize(normalMatrix * normal);
+        vView = normalize(-mv.xyz);
+        vY = position.y;
+        gl_Position = projectionMatrix * mv;
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      uniform vec3 color;
+      varying vec3 vNormal;
+      varying vec3 vView;
+      varying float vY;
+      void main() {
+        float edge = pow(max(1.0 - abs(dot(vNormal, vView)), 0.0), 2.5); // (pow of a hair below zero is NaN, and bloom spreads it)
+        float bands = smoothstep(0.8, 1.0, sin(vY * 14.0) * 0.5 + 0.5) * 0.12;
+        gl_FragColor = vec4(color * 1.8, edge * 0.9 + 0.05 + bands);
+      }
+    `,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
 }

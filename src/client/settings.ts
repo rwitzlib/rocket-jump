@@ -10,6 +10,7 @@ export interface Settings {
   volume: number; // 0..1
   invertY: boolean;
   showFps: boolean;
+  graphics: 'high' | 'low'; // post-processing (outlines, bloom, antialiasing) on or off
 }
 
 const KEY = 'rocket-jump:settings';
@@ -21,6 +22,7 @@ export const DEFAULTS: Settings = {
   volume: 0.8,
   invertY: false,
   showFps: false,
+  graphics: 'high',
 };
 
 export const LIMITS = {
@@ -40,6 +42,7 @@ export function loadSettings(): Settings {
     }
     s.invertY = !!s.invertY;
     s.showFps = !!s.showFps;
+    s.graphics = s.graphics === 'low' ? 'low' : 'high';
     return s;
   } catch {
     return { ...DEFAULTS };

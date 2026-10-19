@@ -915,6 +915,13 @@ body {
     var(--bg);
 }
 
+/* With a map drifting by behind it: just a vignette, darkest behind the panel. */
+#menu.backdrop {
+  background:
+    radial-gradient(ellipse 55% 75% at 50% 50%, rgba(8, 11, 18, 0.55), transparent 75%),
+    linear-gradient(rgba(8, 11, 18, 0.25), rgba(8, 11, 18, 0.45));
+}
+
 #pause,
 #connecting {
   background: rgba(8, 11, 18, 0.62);
@@ -1133,6 +1140,12 @@ button.ghost {
   accent-color: var(--accent);
 }
 
+.slider.choice select {
+  grid-column: 2 / -1;
+  font-size: 14px;
+  padding: 8px 10px;
+}
+
 .slider output {
   color: var(--muted);
   font-variant-numeric: tabular-nums;
@@ -1224,4 +1237,9 @@ button.ghost {
   #match-leader {
     display: none;
   }
+}
+
+#menu.backdrop .menu-panel {
+  background: rgba(14, 18, 27, 0.8);
+  backdrop-filter: blur(6px);
 }

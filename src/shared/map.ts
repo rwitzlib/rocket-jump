@@ -1,16 +1,97 @@
 // Maps are plain data so the client (meshes) and a future server (colliders only) build from the same source.
 
-import { Euler, Quaternion, Vector3 } from 'three';
+import { DOCKYARD } from './maps/dockyard';
+import { facingCenter, quad, turnBox, turnPos } from './maps/helpers';
+import { SKYREACH } from './maps/skyreach';
+import { TEMPLE } from './maps/temple';
 import type { VehicleKind } from './types';
 
 export type Vec3Tuple = [number, number, number];
+
+/** How a box's faces are painted (see client/surfaces.ts). Only the client cares. */
+export type SurfaceKind =
+  | 'grid'
+  | 'tile'
+  | 'stone'
+  | 'brick'
+  | 'plank'
+  | 'metal'
+  | 'grass'
+  | 'dirt'
+  | 'sand'
+  | 'concrete'
+  | 'rock'
+  | 'container'
+  | 'hazard'
+  | 'roof'
+  | 'snow'
+  | 'carved'
+  | 'steps'
+  | 'doors';
 
 export interface BoxDef {
   pos: Vec3Tuple; // center
   size: Vec3Tuple; // full extents
   rot?: Vec3Tuple; // euler radians (XYZ)
   color: number;
+  mat?: SurfaceKind; // default 'grid'
+  /** A different surface on the top face, like grass over a dirt bank. */
+  top?: { mat: SurfaceKind; color: number };
+  hidden?: boolean; // collides but isn't drawn: the solid core of a piece of scenery
 }
+
+/**
+ * Scenery with no collision: trees, lamps, water, distant mountains. Drawn by the client only, so it
+ * must never stand where players expect something solid (or it gets a box of its own in `boxes`).
+ */
+export interface DecorDef {
+  kind: DecorKind;
+  pos: Vec3Tuple;
+  yaw?: number;
+  scale?: number;
+  color?: number;
+  size?: Vec3Tuple; // for things with an extent: water, grass patches, backdrops
+}
+
+export type DecorKind =
+  | 'palm'
+  | 'tree'
+  | 'pine'
+  | 'bush'
+  | 'rock'
+  | 'grass'
+  | 'flowers'
+  | 'lamp'
+  | 'torch'
+  | 'crystal'
+  | 'flag'
+  | 'banner'
+  | 'barrel'
+  | 'bollard'
+  | 'water'
+  | 'mountains'
+  | 'islands'
+  | 'floatingRock'
+  | 'cloudSea'
+  | 'hook'
+  | 'ship'
+  | 'lighthouse'
+  | 'vines'
+  | 'statue'
+  | 'lifebuoy'
+  | 'gull'
+  | 'stripe'
+  | 'balloon'
+  | 'skyIslands'
+  | 'windows'
+  | 'fender'
+  | 'cone'
+  | 'pallets'
+  | 'reel'
+  | 'rail'
+  | 'piling'
+  | 'waterfall'
+  | 'halo';
 
 export interface SpawnDef {
   pos: Vec3Tuple;
@@ -35,6 +116,8 @@ export interface MapDef {
   killY: number;
   botOrbit?: number; // radius of the circle wandering bots follow around the center
   vehicles?: VehicleDef[];
+  theme?: string; // sky, light and fog, by name in client/themes.ts (default 'classic')
+  decor?: DecorDef[];
 }
 
 const FLOOR = 0x8a94a6;
@@ -117,39 +200,6 @@ export const ARENA: MapDef = {
 
 // Four-way symmetric maps: describe one quadrant (+X, +Z) and `quad` turns it into all four, each a
 // quarter turn about the vertical axis from the last, so no side has an advantage.
-
-const _q = new Quaternion();
-const _yaw = new Quaternion();
-const _euler = new Euler();
-const UP = new Vector3(0, 1, 0);
-
-/** Turns a point `k` quarter turns about Y (the same direction as a +90° yaw in three.js). */
-function turnPos([x, y, z]: Vec3Tuple, k: number): Vec3Tuple {
-  for (let i = 0; i < k; i++) [x, z] = [z, -x];
-  return [x, y, z];
-}
-
-function turnBox(box: BoxDef, k: number): BoxDef {
-  const pos = turnPos(box.pos, k);
-  if (!box.rot) {
-    // Axis-aligned boxes stay axis-aligned: an odd number of quarter turns just swaps width and depth.
-    const [w, h, d] = box.size;
-    return { ...box, pos, size: k % 2 ? [d, h, w] : [w, h, d] };
-  }
-  _q.setFromEuler(_euler.set(...box.rot));
-  _q.premultiply(_yaw.setFromAxisAngle(UP, (k * Math.PI) / 2));
-  _euler.setFromQuaternion(_q);
-  return { ...box, pos, rot: [_euler.x, _euler.y, _euler.z] };
-}
-
-function quad<T>(items: T[], turn: (item: T, k: number) => T): T[] {
-  return [0, 1, 2, 3].flatMap((k) => items.map((item) => turn(item, k)));
-}
-
-/** A spawn looking at the middle of the map. */
-function facingCenter(pos: Vec3Tuple): SpawnDef {
-  return { pos, yaw: Math.atan2(pos[0], pos[2]) };
-}
 
 // Citadel: a 240 m square in three layers. The ground has cover and crates; a ring deck around the
 // central spire (14 m) connects by long bridges to balconies on four corner towers; above that,
@@ -267,4 +317,4 @@ export const CITADEL: MapDef = {
   botOrbit: 50,
 };
 
-export const MAPS: Record<string, MapDef> = { arena: ARENA, citadel: CITADEL };
+export const MAPS: Record<string, MapDef> = { arena: ARENA, citadel: CITADEL, dockyard: DOCKYARD, temple: TEMPLE, skyreach: SKYREACH };

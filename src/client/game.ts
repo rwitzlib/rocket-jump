@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { DT, GRAPPLE, GRENADE, HELI, HYPERSONIC, ROCKET, SEEKERS, WEAPONS } from '../shared/config';
+import { DT, GRAPPLE, GRENADE, HELI, HYPERSONIC, PLAYER, ROCKET, SEEKERS, WEAPONS } from '../shared/config';
 import { MAPS } from '../shared/map';
 import { aimDirection } from '../shared/movement';
 import type { ServerMessage } from '../shared/protocol';
@@ -11,10 +11,12 @@ import { Effects } from './effects';
 import type { Hud } from './hud';
 import type { Input } from './input';
 import { buildLevel, CrateView } from './level';
+import { resetLevelMaterials } from './surfaces';
 import { NetClient, type RemotePlayer } from './net/netclient';
 import type { NetOverlay } from './net/netoverlay';
 import type { Transport } from './net/transport';
 import type { PerfOverlay } from './perf';
+import type { PostFX } from './postfx';
 import { PickupView } from './pickups';
 import { RemotePlayersView } from './remoteview';
 import { Rope } from './rope';
@@ -35,6 +37,7 @@ export interface GameContext {
   hud: Hud;
   announcer: Announcer;
   perf: PerfOverlay;
+  post: PostFX;
   settings: Settings;
   netOverlay: NetOverlay | null;
 }
@@ -66,10 +69,18 @@ export function startGame(ctx: GameContext, mapName: string, localId: string, tr
   const me = client.me;
   if (ctx.netOverlay) ctx.netOverlay.client = client;
   const playerPos = (id: string) => sim.players.get(id)?.pos ?? client.remotes.get(id)?.pos;
+  const fxAt = new THREE.Vector3();
+  const DOWN = new THREE.Vector3(0, -1, 0);
 
-  const levelMeshes = buildLevel(scene, map);
+  const level = buildLevel(scene, map);
+  renderer.toneMappingExposure = level.theme.exposure;
+  ctx.post.outlineFade = [Math.max(35, level.extent * 0.45), Math.max(90, level.extent * 1.3)];
   const crates = new CrateView(scene, sim);
-  const effects = new Effects(scene, levelMeshes);
+  const effects = new Effects(scene, level.meshes);
+  effects.groundAt = (at) => {
+    const d = sim.clearDistance(at, DOWN, 40);
+    return d < 40 ? at.y - d - 0.3 : null;
+  };
   const rope = new Rope(scene);
   const remoteView = new RemotePlayersView(scene);
   const pickupView = new PickupView(scene, sim.pickups);
@@ -107,8 +118,7 @@ export function startGame(ctx: GameContext, mapName: string, localId: string, tr
   effects.setWarmup(true);
   rope.setWarmup(true);
   remoteView.setWarmup(true);
-  renderer.render(scene, camera);
-  renderer.render(viewModel.scene, viewModel.camera);
+  ctx.post.render(scene, camera, viewModel);
   effects.setWarmup(false);
   rope.setWarmup(false);
   remoteView.setWarmup(false);
@@ -136,6 +146,7 @@ export function startGame(ctx: GameContext, mapName: string, localId: string, tr
           remoteView.fired(e.playerId);
           const at = playerPos(e.playerId);
           if (at) audio.play(sound, { at, rate });
+          if (at && remoteView.muzzleOffset(e.playerId, fxAt)) effects.muzzleSmoke(fxAt.add(at).setY(fxAt.y + PLAYER.eyeOffset));
         }
         break;
       }
@@ -181,7 +192,10 @@ export function startGame(ctx: GameContext, mapName: string, localId: string, tr
       case 'jumped':
         if (mine) audio.play('jump', { volume: 0.25 });
         break;
-      case 'landed':
+      case 'landed': {
+        // Dust round the feet of anyone coming down hard.
+        const at = playerPos(e.playerId);
+        if (at && e.impactSpeed > 11) effects.dust(fxAt.copy(at).setY(at.y - PLAYER.halfHeight - PLAYER.radius), Math.min((e.impactSpeed - 11) / 20, 1));
         if (mine) {
           const hard = Math.min(e.impactSpeed / 25, 1);
           audio.play('land', { volume: 0.2 + hard * 0.8, rate: 1.1 - hard * 0.3 });
@@ -189,7 +203,10 @@ export function startGame(ctx: GameContext, mapName: string, localId: string, tr
           if (hard > 0.5) cameraFx.shake(hard * 0.25);
         }
         break;
-      case 'respawn':
+      }
+      case 'respawn': {
+        const at = playerPos(e.playerId);
+        if (at) effects.beam(fxAt.copy(at).setY(at.y - PLAYER.halfHeight - PLAYER.radius));
         if (mine) {
           input.yaw = e.yaw;
           input.pitch = 0;
@@ -197,7 +214,12 @@ export function startGame(ctx: GameContext, mapName: string, localId: string, tr
           death = null;
         }
         break;
+      }
       case 'damaged':
+        if (!mine) {
+          const at = playerPos(e.playerId);
+          if (at) effects.hit(fxAt.copy(at).setY(at.y + 0.3));
+        }
         if (mine) {
           flash = Math.max(flash, 0.3 + e.amount / 60);
           // Point at whoever did it, relative to where we're looking.
@@ -241,7 +263,9 @@ export function startGame(ctx: GameContext, mapName: string, localId: string, tr
         }
         audio.play('land', { at: playerPos(e.playerId), volume: 1.2, rate: 0.7 });
         break;
-      case 'killed':
+      case 'killed': {
+        const at = playerPos(e.playerId);
+        if (at) effects.burst(fxAt.copy(at).setY(at.y + 0.2), remoteView.colorOf(e.playerId));
         hud.killed(e.playerId, e.killerId, e.cause);
         announcer.killed(e.playerId, e.killerId, e.cause, e.midair, (id) => hud.name(id));
         if (mine) {
@@ -252,6 +276,7 @@ export function startGame(ctx: GameContext, mapName: string, localId: string, tr
           audio.play('kill', { volume: 0.7 });
         }
         break;
+      }
     }
   };
 
@@ -436,16 +461,12 @@ export function startGame(ctx: GameContext, mapName: string, localId: string, tr
     hud.setResults(client.match, client.scores);
     announcer.update(dt, client.match, client.scores);
 
-    renderer.clear();
-    renderer.render(scene, camera);
-    if (me.alive && !ride && !intermission) {
-      renderer.clearDepth();
-      renderer.render(viewModel.scene, viewModel.camera);
-    }
+    level.update(dt, camera);
+    ctx.post.render(scene, camera, me.alive && !ride && !intermission ? viewModel : null);
   };
 
   // Handy for tweaking from the browser console during development: `game.me.vel`, `game.sim`, etc.
-  if (import.meta.env.DEV) Object.assign(window, { game: { sim, me, client, transport, hud, input, camera, scene, renderer, effects, audio, handleEvent, frame, vehicleView } });
+  if (import.meta.env.DEV) Object.assign(window, { game: { sim, me, client, transport, hud, input, camera, scene, renderer, effects, audio, handleEvent, frame, vehicleView, level, post: ctx.post, viewModel, remoteView } });
 
   return {
     map: mapName,
@@ -472,6 +493,7 @@ export function startGame(ctx: GameContext, mapName: string, localId: string, tr
         s.clear();
       }
       sim.world.free();
+      resetLevelMaterials();
     },
   };
 }

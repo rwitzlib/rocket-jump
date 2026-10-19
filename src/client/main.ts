@@ -16,6 +16,8 @@ import { NetOverlay } from './net/netoverlay';
 import type { Transport } from './net/transport';
 import { WsTransport } from './net/wsclient';
 import { PerfOverlay } from './perf';
+import { MenuBackdrop } from './menubackdrop';
+import { PostFX } from './postfx';
 import { LIMITS, loadSettings, saveSettings } from './settings';
 
 // The page: menus, settings, and the connection to a game. A session is one transport (a
@@ -69,8 +71,9 @@ async function main() {
   }
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFShadowMap;
-  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  // Neutral keeps the cartoon colors saturated where ACES would wash them toward grey.
+  renderer.toneMapping = THREE.NeutralToneMapping;
   renderer.autoClear = false;
   renderer.setSize(window.innerWidth, window.innerHeight, false);
   window.addEventListener('resize', () => renderer.setSize(window.innerWidth, window.innerHeight, false));
@@ -85,9 +88,10 @@ async function main() {
   const chat = new Chat(input);
   chat.onLine = () => audio.play('blip', { volume: 0.4 });
   const perf = new PerfOverlay(gpuName(renderer));
+  const post = new PostFX(renderer);
   let screen: Screen = 'menu';
   let session: Session | null = null;
-  const ctx: GameContext = { renderer, audio, input, hud, announcer, perf, settings, netOverlay: null };
+  const ctx: GameContext = { renderer, audio, input, hud, announcer, perf, post, settings, netOverlay: null };
 
   // --- settings -------------------------------------------------------------------------------
 
@@ -95,6 +99,7 @@ async function main() {
     input.sensitivity = settings.sensitivity;
     input.invertY = settings.invertY;
     audio.setVolume(settings.volume);
+    post.quality = settings.graphics;
     session?.game?.applySettings();
     saveSettings(settings);
   };
@@ -113,6 +118,12 @@ async function main() {
   slider('sensitivity', (v) => v.toFixed(2));
   slider('fov', (v) => `${v}°`);
   slider('volume', (v) => `${Math.round(v * 100)}%`);
+  const graphics = $<HTMLSelectElement>('set-graphics');
+  graphics.value = settings.graphics;
+  graphics.addEventListener('change', () => {
+    settings.graphics = graphics.value === 'low' ? 'low' : 'high';
+    applySettings();
+  });
   const invert = $<HTMLInputElement>('set-invert');
   invert.checked = settings.invertY;
   invert.addEventListener('change', () => {
@@ -151,8 +162,15 @@ async function main() {
 
   // --- screens ---------------------------------------------------------------------------------
 
+  // A map drifting by behind the menu; thrown away while a game is on.
+  let backdrop: MenuBackdrop | null = null;
   const show = (s: Screen) => {
     screen = s;
+    if (s !== 'menu' && backdrop) {
+      backdrop.dispose();
+      backdrop = null;
+      menu.classList.remove('backdrop');
+    }
     menu.hidden = s !== 'menu';
     connecting.hidden = s !== 'connecting';
     hudRoot.hidden = s !== 'game';
@@ -316,11 +334,21 @@ async function main() {
 
   // --- frame loop -----------------------------------------------------------------------------
 
+  let lastFrame = performance.now();
   const frame = (now: number) => {
+    const dt = Math.min(Math.max((now - lastFrame) / 1000, 0), 0.1);
+    lastFrame = now;
     const s = session;
     if (s) {
       s.transport.update(now);
       s.game?.frame(now);
+    } else if (screen === 'menu') {
+      // Built here rather than in show(), so starting a game doesn't make one only to drop it.
+      if (!backdrop) {
+        backdrop = new MenuBackdrop(renderer, post);
+        menu.classList.add('backdrop');
+      }
+      backdrop.frame(dt);
     }
     requestAnimationFrame(frame);
   };

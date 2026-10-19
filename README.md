@@ -7,12 +7,22 @@ Built with **Three.js** (rendering), **Rapier** (physics, WASM), **TypeScript** 
 ## Playing
 
 Rocket Jump is a free-for-all deathmatch for up to 12 people per server. Bots fill in so there's always someone to
-fight, and they step aside as people join. A match is first to 25 kills (15 on the bigger Citadel), or the most kills after 8 minutes. Then come
-15 seconds of results (a podium, plus awards for the most airshots, the longest streak and the best K/D), and the
-next map in the rotation (Arena, then Citadel, a 240 m fortress with vehicles).
+fight, and they step aside as people join. A match is first to 20 kills (25 on Arena, 15 on the bigger Citadel), or
+the most kills after 8 minutes. Then come 15 seconds of results (a podium, plus awards for the most airshots, the
+longest streak and the best K/D), and the next map in the rotation:
+
+- **Dockyard**: a sunny 160 m harbor. Container stacks, two giant cranes to swing from (the big one's boom runs out
+  over the sea), warehouse roofs, buggies, and a long drop into the water off three sides.
+- **Sunken Temple**: a stepped pyramid in a jungle basin at golden hour, with grand stairs, a ring of columns, ruined
+  gatehouses in the corners, waterfalls and giant stone heads in the cliffs.
+- **Skyreach**: floating islands above the clouds at sunset, linked by plank bridges, with crystal perches up high.
+  Fall off and it's a long way down, but the rock under every island can be grappled to climb back.
+- **Arena** and **Citadel**: the original two maps, kept as they were.
+
+The menu shows one of the new maps drifting by behind it.
 
 From the menu, pick a name, then **Play online** (the server this page came from) or **Practice vs bots** (runs a
-server inside the page, no network needed). **Settings** has mouse sensitivity, field of view, volume and invert Y,
+server inside the page, no network needed). **Settings** has mouse sensitivity, field of view, volume, graphics (Low turns off outlines and glow for slower machines) and invert Y,
 all remembered in the browser.
 
 The announcer rewards what the game is about: an **AIRSHOT** medal and bell for hitting someone in midair, multi kills
@@ -37,9 +47,9 @@ Settings are environment variables:
 |---|---|---|
 | `PORT` | 8080 | HTTP and WebSocket port |
 | `HOST` | 0.0.0.0 | interface to listen on |
-| `MAPS` | arena,citadel | map rotation |
+| `MAPS` | dockyard,temple,skyreach,arena,citadel | map rotation |
 | `TIME_LIMIT` | 480 | seconds per match |
-| `FRAG_LIMIT` | per map | kills to win (25 on Arena, 15 on Citadel) |
+| `FRAG_LIMIT` | per map | kills to win (20 on the new maps, 25 on Arena, 15 on Citadel) |
 | `INTERMISSION` | 15 | seconds on the results screen |
 | `MIN_PLAYERS` | 4 | bots fill the game up to this many players (0 for no bots) |
 | `MAX_PLAYERS` | 12 | people allowed in at once |
@@ -143,7 +153,7 @@ rewinds them by your latency (up to 500 ms).
 
 ### Vehicles
 
-Citadel has a **buggy** in each quadrant and two **helicopters** on the ramparts. Walk up to one and press **E** to
+Citadel has a **buggy** in each quadrant and two **helicopters** on the ramparts, and Dockyard has two buggies. Walk up to one and press **E** to
 get in: the first person takes the driver's seat, the second rides as gunner. Press E again to jump out, keeping the
 vehicle's speed. Inside a vehicle the camera switches to third person, and shots fly to whatever the crosshair is on.
 - **Buggy**: W/S throttle, brake and reverse, A/D steer, up to 26 m/s. Its gunner stands on the rear deck and fires
@@ -169,7 +179,8 @@ src/
     config.ts      # all gameplay tuning numbers, match rules (MATCH), protocol version
     types.ts       # PlayerInput, what a client sends each tick
     movement.ts    # Quake-style movement + grapple physics (pure functions)
-    map.ts         # maps as plain data (boxes, crates, spawns, vehicles)
+    map.ts         # maps as plain data (boxes, crates, spawns, vehicles, scenery); Arena and Citadel
+    maps/          # the newer maps (dockyard, temple, skyreach) and helpers for laying maps out
     sim.ts         # GameSim: fixed 60 Hz authoritative simulation (players, vehicles, projectiles, pickups, explosions)
     vehicle.ts     # VehicleSim and buggy / helicopter handling (velocity and heading, like movement.ts)
     server.ts      # GameServer: joins, bots, matches, map rotation, snapshots (transport-agnostic)
@@ -185,8 +196,15 @@ src/
     settings.ts    # saved player preferences
     hud.ts         # health, weapons, match bar, kill feed, scoreboard, results
     input.ts       # keyboard + pointer lock
-    level.ts       # meshes for the map and crates
-    effects.ts     # rockets, grenades, trails, explosions (fireball, sparks, smoke, shockwave, scorch marks)
+    level.ts       # meshes for the map and crates, the sky, sun and fog
+    surfaces.ts    # painted level textures (stone, brick, planks, containers...) drawn on canvases at startup
+    decor.ts       # scenery: trees, water, mountains, lamps, ships, waterfalls, clouds (merged into few draw calls)
+    themes.ts      # each map's sky, light and fog
+    sky.ts         # gradient sky with sun and drifting clouds
+    postfx.ts      # cartoon outlines, bloom and tone mapping (the Graphics setting turns them off)
+    menubackdrop.ts # a map drifting by behind the main menu
+    effects.ts     # rockets, grenades, trails, explosions, hit sparks, death bursts, landing dust, respawn beams
+    debris.ts      # tumbling chunks thrown by explosions and kills
     particles.ts   # GPU point-sprite particle system
     rope.ts        # grapple rope + hook visuals
     audio.ts       # procedurally synthesized 3D sound (no audio files)

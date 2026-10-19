@@ -10,7 +10,7 @@ const dark = new THREE.MeshStandardMaterial({ color: 0x3c434e, metalness: 0.2, r
 const steel = new THREE.MeshStandardMaterial({ color: 0xa8b2c0, metalness: 0.45, roughness: 0.3 });
 const bore = new THREE.MeshBasicMaterial({ color: 0x050505 });
 const ropeMat = new THREE.MeshStandardMaterial({ color: 0x2a2d31, roughness: 0.9 });
-export const GLOW = new THREE.MeshStandardMaterial({ color: 0x7cf0a0, emissive: 0x3cbf6a });
+export const GLOW = new THREE.MeshStandardMaterial({ color: 0x7cf0a0, emissive: 0x3cdf7a, emissiveIntensity: 1.8 });
 export const DEFAULT_ACCENT = new THREE.MeshStandardMaterial({ color: 0xd96c4a, roughness: 0.5 });
 
 /** Launcher landmarks, in the launcher's own space: where hands hold it and where rockets leave. */
@@ -82,7 +82,7 @@ export interface LauncherModel {
 export function buildLauncher(accent: THREE.Material = DEFAULT_ACCENT): LauncherModel {
   const g = launcherGeo;
   const root = new THREE.Group();
-  const light = new THREE.MeshStandardMaterial({ color: 0x7cf0a0, emissive: 0x3cbf6a });
+  const light = new THREE.MeshStandardMaterial({ color: 0x7cf0a0, emissive: 0x3cdf7a, emissiveIntensity: 2 });
 
   root.add(part(g.tube, gunmetal));
   root.add(part(g.housing, dark, 0, 0, 0.02));
@@ -158,7 +158,7 @@ const grenadeLauncherGeo = {
 export function buildGrenadeLauncher(accent: THREE.Material = DEFAULT_ACCENT): LauncherModel {
   const g = grenadeLauncherGeo;
   const root = new THREE.Group();
-  const light = new THREE.MeshStandardMaterial({ color: 0x7cf0a0, emissive: 0x3cbf6a });
+  const light = new THREE.MeshStandardMaterial({ color: 0x7cf0a0, emissive: 0x3cdf7a, emissiveIntensity: 2 });
 
   root.add(part(g.barrel, gunmetal));
   root.add(part(g.band, accent, 0, 0, -0.2), part(g.band, accent, 0, 0, -0.5));
@@ -299,6 +299,7 @@ export function buildGrenade(): THREE.Group {
   );
   const band = part(new THREE.CylinderGeometry(0.093, 0.093, 0.03, 16).rotateX(Math.PI / 2), steel, 0, 0, 0.0);
   const light = part(new THREE.SphereGeometry(0.03, 10, 8), new THREE.MeshBasicMaterial({ color: 0x7cf0a0 }), 0, 0, -0.11);
+  light.scale.setScalar(1.3);
   light.name = GRENADE_LIGHT;
   light.castShadow = false;
   root.add(body, band, light);
@@ -340,12 +341,13 @@ export function buildRocket(): THREE.Group {
     root.add(arm);
   }
   // Exhaust: a hot core inside a softer additive plume.
-  const core = new THREE.Mesh(new THREE.SphereGeometry(0.06, 10, 8), new THREE.MeshBasicMaterial({ color: 0xfff0c0 }));
+  // Colors above 1 are brighter than white: they glow through the bloom.
+  const core = new THREE.Mesh(new THREE.SphereGeometry(0.06, 10, 8), new THREE.MeshBasicMaterial({ color: new THREE.Color(4, 3.4, 2.2) }));
   core.position.z = 0.32;
   core.scale.set(1, 1, 1.6);
   const plume = new THREE.Mesh(
     new THREE.ConeGeometry(0.075, 0.45, 10, 1, true).rotateX(-Math.PI / 2),
-    new THREE.MeshBasicMaterial({ color: 0xff9a40, transparent: true, opacity: 0.8, blending: THREE.AdditiveBlending, depthWrite: false }),
+    new THREE.MeshBasicMaterial({ color: new THREE.Color(2.6, 1.2, 0.35), transparent: true, opacity: 0.8, blending: THREE.AdditiveBlending, depthWrite: false }),
   );
   plume.position.z = 0.5;
   plume.rotation.y = Math.PI; // wide end at the nozzle
@@ -364,7 +366,7 @@ export const SEEKER_MUZZLE_Z = { javelin: -0.64, stinger: -0.72 };
 
 /** Shared by both seekers: grips, trigger guard, status light, bore and muzzle. */
 function finishLauncher(root: THREE.Group, muzzleZ: number, boreRadius: number, lightAt: THREE.Vector3): LauncherModel {
-  const light = new THREE.MeshStandardMaterial({ color: 0x7cf0a0, emissive: 0x3cbf6a });
+  const light = new THREE.MeshStandardMaterial({ color: 0x7cf0a0, emissive: 0x3cdf7a, emissiveIntensity: 2 });
   root.add(part(launcherGeo.light, light, lightAt.x, lightAt.y, lightAt.z));
   const fore = part(launcherGeo.grip, dark, LAUNCHER.foreGrip.x, LAUNCHER.foreGrip.y + 0.04, LAUNCHER.foreGrip.z);
   fore.rotation.x = -0.15;
@@ -450,7 +452,7 @@ export function buildStinger(accent: THREE.Material = DEFAULT_ACCENT): LauncherM
 
 // --- Hypersonic launcher ---------------------------------------------------------------------
 
-const coilGlow = new THREE.MeshStandardMaterial({ color: 0x9ff4ff, emissive: 0x2ad0ff, emissiveIntensity: 1.2 });
+const coilGlow = new THREE.MeshStandardMaterial({ color: 0x9ff4ff, emissive: 0x2ad0ff, emissiveIntensity: 2.4 });
 
 const hypersonicGeo = {
   body: new THREE.BoxGeometry(0.13, 0.15, 0.46),
@@ -480,7 +482,7 @@ export function buildDart(): THREE.Group {
   root.add(part(new THREE.ConeGeometry(0.025, 0.14, 8).rotateX(-Math.PI / 2), DEFAULT_ACCENT, 0, 0, -0.32));
   const tail = new THREE.Mesh(
     new THREE.SphereGeometry(0.05, 8, 6),
-    new THREE.MeshBasicMaterial({ color: 0xbff8ff, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false }),
+    new THREE.MeshBasicMaterial({ color: new THREE.Color(1.6, 3, 3.4), transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false }),
   );
   tail.position.z = 0.32;
   tail.scale.set(1, 1, 4);

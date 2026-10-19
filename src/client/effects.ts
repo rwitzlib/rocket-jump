@@ -2,7 +2,8 @@ import * as THREE from 'three';
 import { DecalGeometry } from 'three/examples/jsm/geometries/DecalGeometry.js';
 import { GRENADE, HYPERSONIC, ROCKET, SEEKERS } from '../shared/config';
 import { isArmed, type Projectile, type ProjectileKind } from '../shared/sim';
-import { ParticleSystem } from './particles';
+import { Debris } from './debris';
+import { ParticleSystem, puffTexture } from './particles';
 import { buildDart, buildGrenade, buildMissile, buildRocket, GRENADE_LIGHT } from './weapons';
 
 const _pos = new THREE.Vector3();
@@ -13,13 +14,14 @@ const _euler = new THREE.Euler();
 const _decalSize = new THREE.Vector3();
 const _decalBounds = new THREE.Box3();
 const Z = new THREE.Vector3(0, 0, 1);
+const DEBRIS_COLORS = [0x8a8478, 0x6a6458, 0x3a3630, 0xa89c88];
 
 const TRAIL_SPACING = 0.3; // meters between smoke puffs, so trails look the same at any frame rate
 const GRENADE_TRAIL_SPACING = 0.45;
 const STREAK_SPACING = 0.6; // a hypersonic dart covers ~2 m a tick: a sparse, quick-fading streak keeps the particle count sane
 const GRENADE_SPIN = 14; // radians per second of tumble
-const GRENADE_UNARMED = new THREE.Color(0x7cf0a0);
-const GRENADE_ARMED = new THREE.Color(0xff3c28);
+const GRENADE_UNARMED = new THREE.Color(0x7cf0a0).multiplyScalar(2.2);
+const GRENADE_ARMED = new THREE.Color(0xff3c28).multiplyScalar(3);
 const LIFETIME: Record<ProjectileKind, number> = {
   rocket: ROCKET.lifetime,
   grenade: GRENADE.lifetime,
@@ -29,6 +31,9 @@ const LIFETIME: Record<ProjectileKind, number> = {
 };
 const MUZZLE_BLEND_TIME = 0.2; // seconds for a rocket drawn from a barrel to merge onto its simulated path
 const RING_TIME = 0.3;
+const FLASH_TIME = 0.1;
+const BEAM_TIME = 0.7;
+const FLASH_COLOR = new THREE.Color(1.8, 1.4, 0.8);
 const LIGHT_TIME = 0.35;
 const DECAL_TIME = 12;
 const MAX_DECALS = 40;
@@ -95,6 +100,20 @@ function mergeTriangles(parts: THREE.BufferGeometry[]): THREE.BufferGeometry {
   return out;
 }
 
+/** Opaque at the bottom, clear at the top (V runs up a cylinder's side). */
+function verticalFade(): THREE.Texture {
+  const canvas = document.createElement('canvas');
+  canvas.width = 4;
+  canvas.height = 64;
+  const ctx = canvas.getContext('2d')!;
+  const g = ctx.createLinearGradient(0, 64, 0, 0);
+  g.addColorStop(0, '#ffffff');
+  g.addColorStop(1, '#000000');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 4, 64);
+  return new THREE.CanvasTexture(canvas);
+}
+
 function scorchTexture(): THREE.Texture {
   const size = 128;
   const canvas = document.createElement('canvas');
@@ -121,8 +140,15 @@ interface ProjectileMesh {
 
 /** Rockets, grenades, trails and explosions. Purely visual: reads game state, never writes it. */
 export class Effects {
-  readonly fire = new ParticleSystem(3000, THREE.AdditiveBlending);
-  readonly smoke = new ParticleSystem(3000, THREE.NormalBlending);
+  readonly fire = new ParticleSystem(3000, THREE.AdditiveBlending, undefined, 1.25);
+  readonly smoke = new ParticleSystem(3000, THREE.NormalBlending, puffTexture());
+  /** Cartoon fireballs: solid billowing puffs, drawn a little brighter than lit so they glow. */
+  readonly blast = new ParticleSystem(1200, THREE.NormalBlending, puffTexture(), 1.7);
+  readonly debris: Debris;
+  /** Height of the ground under a point (for debris to bounce on), or null if there's none. */
+  groundAt: ((at: THREE.Vector3) => number | null) | null = null;
+  private flashes: Timed<THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>>[] = [];
+  private beams: Timed<THREE.Mesh<THREE.CylinderGeometry, THREE.MeshBasicMaterial>>[] = [];
 
   private projectileMeshes = new Map<number, ProjectileMesh>();
   /**
@@ -151,8 +177,25 @@ export class Effects {
   constructor(private readonly scene: THREE.Scene, surfaces: THREE.Mesh[]) {
     this.decalSurfaces = surfaces.map((mesh) => ({ mesh, bounds: new THREE.Box3().setFromObject(mesh) }));
     // Both systems sit at the origin, so force the glow to draw after (on top of) the smoke.
-    this.fire.points.renderOrder = 1;
-    scene.add(this.smoke.points, this.fire.points);
+    this.blast.points.renderOrder = 1;
+    this.fire.points.renderOrder = 2;
+    scene.add(this.smoke.points, this.blast.points, this.fire.points);
+    this.debris = new Debris(scene);
+
+    // Pooled like the rings: a white-hot ball at the heart of each blast, and a column of light where someone respawns.
+    const flashGeo = new THREE.SphereGeometry(1, 16, 12);
+    const beamGeo = new THREE.CylinderGeometry(0.5, 0.5, 1, 20, 1, true).translate(0, 0.5, 0);
+    const fadeUp = verticalFade();
+    for (let i = 0; i < 4; i++) {
+      const additive = { transparent: true, blending: THREE.AdditiveBlending, depthWrite: false };
+      const flash = new THREE.Mesh(flashGeo, new THREE.MeshBasicMaterial({ color: FLASH_COLOR, ...additive }));
+      const beam = new THREE.Mesh(beamGeo, new THREE.MeshBasicMaterial({ color: new THREE.Color(0.6, 2.2, 2.8), side: THREE.DoubleSide, alphaMap: fadeUp, ...additive }));
+      flash.visible = beam.visible = false;
+      flash.userData.radius = 1;
+      scene.add(flash, beam);
+      this.flashes.push({ obj: flash, age: FLASH_TIME });
+      this.beams.push({ obj: beam, age: BEAM_TIME });
+    }
 
     const ringGeo = new THREE.RingGeometry(0.85, 1, 48);
     for (let i = 0; i < MAX_RINGS; i++) {
@@ -204,7 +247,7 @@ export class Effects {
    * for ~200 ms while the GPU compiles mid-play.
    */
   setWarmup(on: boolean) {
-    const showcase: THREE.Object3D[] = [this.rings[0].obj, this.decals[0].obj];
+    const showcase: THREE.Object3D[] = [this.rings[0].obj, this.decals[0].obj, this.flashes[0].obj, this.beams[0].obj, this.debris.mesh];
     if (on) {
       this.warmProjectiles = Object.values(this.protos).map((proto) => proto.clone());
       this.scene.add(...this.warmProjectiles);
@@ -214,11 +257,14 @@ export class Effects {
       this.smoke.emit({ pos: _pos, life: 1, size: [1, 1], color: [0xffffff, 0xffffff] });
       this.fire.update(0);
       this.smoke.update(0);
+      this.blast.emit({ pos: _pos, life: 1, size: [1, 1], color: [0xffffff, 0xffffff] });
+      this.blast.update(0);
     } else {
       for (const obj of this.warmProjectiles) this.scene.remove(obj);
       this.warmProjectiles = [];
       this.fire.update(1e6); // ages out the warm-up particles
       this.smoke.update(1e6);
+      this.blast.update(1e6);
     }
     for (const obj of showcase) {
       obj.visible = on;
@@ -230,6 +276,7 @@ export class Effects {
   setViewport(heightPx: number, fov: number) {
     this.fire.setViewport(heightPx, fov);
     this.smoke.setViewport(heightPx, fov);
+    this.blast.setViewport(heightPx, fov);
   }
 
   /** `radius`: the blast's real reach, which the fireball and shockwave are sized to. */
@@ -240,21 +287,28 @@ export class Effects {
     // 1. Flash: a single huge, very short-lived glow.
     this.fire.emit({ pos: at, life: 0.09, size: [r * 2.2, r * 2.6], color: [0xfff4d0, 0xffb060], alpha: 1 });
 
-    // 2. Fireball: puffs pushed outward (biased away from the surface) that slow down quickly.
-    for (let i = 0; i < 24; i++) {
+    // 2. Fireball: solid cartoon puffs pushed outward (biased away from the surface) that slow down
+    // quickly, yellow at the heart and red at the edge, over a few glowing ones for heat.
+    for (let i = 0; i < 18; i++) {
       randomInSphere(_rand);
-      _vel.copy(_rand).multiplyScalar(10 * k).addScaledVector(normal, 5 * k);
-      _pos.copy(at).addScaledVector(_rand, 0.6 * k);
-      this.fire.emit({
+      const heart = 1 - _rand.length();
+      _vel.copy(_rand).multiplyScalar(9 * k).addScaledVector(normal, 4 * k);
+      _pos.copy(at).addScaledVector(_rand, 0.7 * k);
+      this.blast.emit({
         pos: _pos,
         vel: _vel,
-        life: 0.4 + Math.random() * 0.35,
-        size: [2 * k, (3.5 + Math.random() * 2) * k],
-        color: [0xfff0c0, 0xff4a10],
+        life: 0.35 + Math.random() * 0.25,
+        size: [1.6 * k, (2.6 + Math.random() * 1.4) * k],
+        color: [heart > 0.4 ? 0xfff6c0 : 0xffd040, 0xe8401a],
         alpha: 1,
         drag: 6,
-        gravity: -2,
+        gravity: -3,
       });
+    }
+    for (let i = 0; i < 8; i++) {
+      randomInSphere(_rand);
+      _vel.copy(_rand).multiplyScalar(6 * k).addScaledVector(normal, 3 * k);
+      this.fire.emit({ pos: at, vel: _vel, life: 0.3 + Math.random() * 0.2, size: [1.5 * k, 2.6 * k], color: [0xfff0c0, 0xff6020], alpha: 0.8, drag: 6, gravity: -2 });
     }
 
     // 3. Sparks: small, fast, affected by gravity.
@@ -275,7 +329,7 @@ export class Effects {
     }
 
     // 4. Smoke: lingers and drifts up after the fire is gone.
-    for (let i = 0; i < 14; i++) {
+    for (let i = 0; i < 16; i++) {
       randomInSphere(_rand);
       _vel.copy(_rand).multiplyScalar(3).addScaledVector(normal, 1.5);
       _pos.copy(at).addScaledVector(_rand, 1.2);
@@ -307,6 +361,89 @@ export class Effects {
     const light = oldest(this.lights);
     light.age = 0;
     light.obj.position.copy(at).addScaledVector(normal, 0.8);
+
+    // 8. A white-hot core that swells and is gone in a blink.
+    const flash = oldest(this.flashes);
+    flash.age = 0;
+    flash.obj.visible = true;
+    flash.obj.position.copy(at).addScaledVector(normal, 0.3 * k);
+    flash.obj.userData.radius = r * 0.32;
+
+    // 9. Chunks of whatever it hit, and a skirt of dust rolling out along the ground.
+    if (surface) {
+      const floor = this.groundAt?.(_pos.copy(at).addScaledVector(normal, 0.5)) ?? at.y;
+      this.debris.throw(at, Math.round(7 * k), 11 * Math.sqrt(k), DEBRIS_COLORS, 0.16 * k, floor, normal);
+      if (normal.y > 0.6) {
+        for (let i = 0; i < 16; i++) {
+          const a = (i / 16) * Math.PI * 2 + Math.random() * 0.3;
+          _vel.set(Math.cos(a), 0, Math.sin(a)).multiplyScalar((6 + Math.random() * 4) * k);
+          _pos.set(at.x + Math.cos(a) * 0.6, at.y + 0.3, at.z + Math.sin(a) * 0.6);
+          this.smoke.emit({ pos: _pos, vel: _vel, life: 0.8 + Math.random() * 0.5, size: [0.8 * k, 2.4 * k], color: [0xd8cdb8, 0xb8b0a4], alpha: 0.55, drag: 3.5, gravity: -0.6 });
+        }
+      }
+    }
+  }
+
+  /** Someone blown apart: armor chunks in their color, a puff of smoke and a spray of sparks. */
+  burst(at: THREE.Vector3, color: number) {
+    const floor = this.groundAt?.(at) ?? at.y - 0.9;
+    this.debris.throw(at, 14, 9, [color, 0xeef0f3, 0x39404e, color], 0.2, floor);
+    this.fire.emit({ pos: at, life: 0.12, size: [2.2, 3], color: [0xffffff, color], alpha: 0.9 });
+    for (let i = 0; i < 10; i++) {
+      randomInSphere(_rand);
+      _vel.copy(_rand).multiplyScalar(3).setY(_rand.y * 2 + 1.5);
+      _pos.copy(at).addScaledVector(_rand, 0.5);
+      this.smoke.emit({ pos: _pos, vel: _vel, life: 0.9 + Math.random() * 0.6, size: [0.9, 2.2], color: [0xf0f0f0, 0xb8b8c0], alpha: 0.75, drag: 3, gravity: -0.8 });
+    }
+    for (let i = 0; i < 18; i++) {
+      randomInSphere(_rand).normalize();
+      _vel.copy(_rand).multiplyScalar(6 + Math.random() * 8);
+      this.fire.emit({ pos: at, vel: _vel, life: 0.3 + Math.random() * 0.4, size: [0.14, 0.04], color: [0xffffff, color], alpha: 1, gravity: 16, drag: 2 });
+    }
+  }
+
+  /** A hit landing on a player: a quick star of sparks. */
+  hit(at: THREE.Vector3) {
+    this.fire.emit({ pos: at, life: 0.08, size: [0.9, 1.3], color: [0xffffff, 0xffc070], alpha: 0.9 });
+    for (let i = 0; i < 8; i++) {
+      randomInSphere(_rand).normalize();
+      _vel.copy(_rand).multiplyScalar(5 + Math.random() * 6);
+      this.fire.emit({ pos: at, vel: _vel, life: 0.15 + Math.random() * 0.2, size: [0.12, 0.03], color: [0xfff6d0, 0xff9a40], alpha: 1, gravity: 10, drag: 3 });
+    }
+  }
+
+  /** Dust kicked up round a player's feet as they land hard. `amount` 0..1. */
+  dust(feet: THREE.Vector3, amount: number) {
+    const n = Math.round(4 + amount * 8);
+    for (let i = 0; i < n; i++) {
+      const a = (i / n) * Math.PI * 2 + Math.random() * 0.5;
+      _vel.set(Math.cos(a), 0.15, Math.sin(a)).multiplyScalar(2 + amount * 3);
+      _pos.set(feet.x + Math.cos(a) * 0.3, feet.y + 0.15, feet.z + Math.sin(a) * 0.3);
+      this.smoke.emit({ pos: _pos, vel: _vel, life: 0.5 + Math.random() * 0.3, size: [0.3, 0.9 + amount * 0.6], color: [0xe8e0d0, 0xc8c0b4], alpha: 0.5, drag: 4, gravity: -0.3 });
+    }
+  }
+
+  /** A column of light where a player has just respawned. */
+  beam(feet: THREE.Vector3) {
+    const beam = oldest(this.beams);
+    beam.age = 0;
+    beam.obj.visible = true;
+    beam.obj.position.copy(feet);
+    for (let i = 0; i < 16; i++) {
+      randomInSphere(_rand);
+      _pos.copy(feet).add(_rand.setY(Math.abs(_rand.y) * 2));
+      _vel.set(0, 2 + Math.random() * 3, 0);
+      this.fire.emit({ pos: _pos, vel: _vel, life: 0.5 + Math.random() * 0.4, size: [0.12, 0.03], color: [0xe0ffff, 0x40c0ff], alpha: 1, drag: 1 });
+    }
+  }
+
+  /** A little smoke left at a muzzle as it fires. */
+  muzzleSmoke(at: THREE.Vector3) {
+    for (let i = 0; i < 3; i++) {
+      randomInSphere(_rand).multiplyScalar(0.5);
+      _vel.copy(_rand).setY(_rand.y + 0.6);
+      this.smoke.emit({ pos: at, vel: _vel, life: 0.6 + Math.random() * 0.3, size: [0.2, 0.8], color: [0xe8e4e0, 0xb0aca8], alpha: 0.45, drag: 2.5, gravity: -0.5 });
+    }
   }
 
   /** A grenade bouncing off something before it's armed: a few sparks, more the harder it hit. */
@@ -346,6 +483,25 @@ export class Effects {
     this.syncProjectiles(projectiles, alpha, dt);
     this.fire.update(dt);
     this.smoke.update(dt);
+    this.blast.update(dt);
+
+    this.debris.update(dt);
+    for (const f of this.flashes) {
+      if (!f.obj.visible) continue;
+      f.age += dt;
+      const t = f.age / FLASH_TIME;
+      f.obj.visible = t < 1;
+      f.obj.scale.setScalar((f.obj.userData.radius as number) * (0.4 + 0.6 * Math.sqrt(t)));
+      f.obj.material.opacity = 1 - t * t;
+    }
+    for (const b of this.beams) {
+      if (!b.obj.visible) continue;
+      b.age += dt;
+      const t = b.age / BEAM_TIME;
+      b.obj.visible = t < 1;
+      b.obj.scale.set(1 - t * 0.6, 3 + t * 9, 1 - t * 0.6);
+      b.obj.material.opacity = (1 - t) * 0.25;
+    }
 
     for (const l of this.lights) {
       l.age += dt;

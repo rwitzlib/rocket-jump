@@ -29,11 +29,15 @@ const VERT = /* glsl */ `
 
 const FRAG = /* glsl */ `
   uniform sampler2D map;
+  uniform float intensity;
   varying vec4 vColor;
   void main() {
-    float a = texture2D(map, gl_PointCoord).a * vColor.a;
+    vec4 tex = texture2D(map, gl_PointCoord);
+    float a = tex.a * vColor.a;
     if (a < 0.003) discard;
-    gl_FragColor = vec4(vColor.rgb, a);
+    // The texture's own shading (a puff lit from above) times the particle's color; intensity above 1
+    // pushes glowing particles past white so the bloom picks them up.
+    gl_FragColor = vec4(vColor.rgb * tex.rgb * intensity, a);
     // Same output transform as built-in materials, so particle colors match the rest of the scene.
     #include <tonemapping_fragment>
     #include <colorspace_fragment>
@@ -50,6 +54,42 @@ function softDot(): THREE.Texture {
   g.addColorStop(0.4, 'rgba(255,255,255,0.6)');
   g.addColorStop(1, 'rgba(255,255,255,0)');
   ctx.fillStyle = g;
+  ctx.fillRect(0, 0, size, size);
+  return new THREE.CanvasTexture(canvas);
+}
+
+/**
+ * A cartoon smoke puff: a cluster of overlapping round lobes, lit from the top so each puff has a
+ * bright crown and a shaded underside.
+ */
+export function puffTexture(): THREE.Texture {
+  const size = 128;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d')!;
+  const lobes: [number, number, number][] = [
+    [0.5, 0.56, 0.3],
+    [0.32, 0.6, 0.2],
+    [0.68, 0.6, 0.21],
+    [0.42, 0.4, 0.22],
+    [0.6, 0.38, 0.2],
+    [0.5, 0.7, 0.2],
+  ];
+  // Alpha: soft-edged lobes.
+  for (const [x, y, r] of lobes) {
+    const g = ctx.createRadialGradient(x * size, y * size, 0, x * size, y * size, r * size);
+    g.addColorStop(0, 'rgba(255,255,255,1)');
+    g.addColorStop(0.7, 'rgba(255,255,255,0.85)');
+    g.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, size, size);
+  }
+  // Shade: darker toward the bottom, kept to where the lobes are.
+  ctx.globalCompositeOperation = 'source-atop';
+  const shade = ctx.createLinearGradient(0, size * 0.2, 0, size * 0.9);
+  shade.addColorStop(0, 'rgba(255,255,255,1)');
+  shade.addColorStop(1, 'rgba(150,150,160,1)');
+  ctx.fillStyle = shade;
   ctx.fillRect(0, 0, size, size);
   return new THREE.CanvasTexture(canvas);
 }
@@ -81,6 +121,8 @@ export class ParticleSystem {
   constructor(
     private readonly max: number,
     blending: THREE.Blending,
+    texture?: THREE.Texture,
+    intensity = 1,
   ) {
     this.position = new Float32Array(max * 3);
     this.velocity = new Float32Array(max * 3);
@@ -103,7 +145,7 @@ export class ParticleSystem {
 
     sharedTexture.tex ??= softDot();
     this.material = new THREE.ShaderMaterial({
-      uniforms: { map: { value: sharedTexture.tex }, scale: { value: 500 } },
+      uniforms: { map: { value: texture ?? sharedTexture.tex }, scale: { value: 500 }, intensity: { value: intensity } },
       vertexShader: VERT,
       fragmentShader: FRAG,
       blending,
