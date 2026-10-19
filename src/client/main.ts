@@ -1,9 +1,10 @@
 import RAPIER from '@dimforge/rapier3d-compat';
 import * as THREE from 'three';
-import { PROTOCOL_VERSION } from '../shared/config';
+import { MODES, PROTOCOL_VERSION, type GameMode } from '../shared/config';
 import { MAPS } from '../shared/map';
 import { cleanText, MAX_NAME, type ServerMessage } from '../shared/protocol';
 import type { BotSkill } from '../shared/bot';
+import { MAIN_ROOM, type RoomInfo } from '../shared/rooms';
 import type { ServerOptions } from '../shared/server';
 import { Announcer } from './announcer';
 import { GameAudio } from './audio';
@@ -26,8 +27,9 @@ import { LIMITS, loadSettings, saveSettings } from './settings';
 //
 // URL options, mostly for development:
 //   ?net=loopback&ping=100&jitter=10&loss=0.02&bots=2   practice behind a fake network, with the N overlay
-//   ?map=citadel                                        preselects the practice map
+//   ?map=citadel&mode=ctf                               preselects the practice map and mode
 //   ?server=ws://host:8080/ws                           plays online against another server
+//   ?room=ABCDE                                         joins that room straight away (an invite link)
 
 const params = new URLSearchParams(location.search);
 const numParam = (name: string, fallback: number) => Number(params.get(name) ?? fallback) || 0;
@@ -41,6 +43,22 @@ interface Session {
   id: string | null;
   joinTimer: number;
   practice: boolean;
+  watch: boolean; // joined to spectate
+  room: string; // MAIN_ROOM, or a room's code
+}
+
+/** The game server's WebSocket address, for a room. */
+function roomUrl(room: string): string {
+  const base = new URLSearchParams(location.search).get('server') ?? WsTransport.defaultUrl();
+  return room === MAIN_ROOM ? base : `${base}${base.includes('?') ? '&' : '?'}room=${encodeURIComponent(room)}`;
+}
+
+/** Where the game server's HTTP endpoints (/rooms) are: this page's origin, or the ?server one's. */
+function apiBase(): string {
+  const server = new URLSearchParams(location.search).get('server');
+  if (!server) return '';
+  const url = new URL(server);
+  return `${url.protocol === 'wss:' ? 'https:' : 'http:'}//${url.host}`;
 }
 
 async function main() {
@@ -54,7 +72,17 @@ async function main() {
   const onlineButton = $<HTMLButtonElement>('play-online');
   const onlineStatus = $('online-status');
   const practiceButton = $<HTMLButtonElement>('play-practice');
+  const watchButton = $<HTMLButtonElement>('watch-online');
+  const practiceMode = $<HTMLSelectElement>('practice-mode');
   const practiceMap = $<HTMLSelectElement>('practice-map');
+  const spectateButton = $<HTMLButtonElement>('pause-spectate');
+  const roomsPanel = $('rooms');
+  const roomList = $('room-list');
+  const roomsError = $('rooms-error');
+  const roomCode = $<HTMLInputElement>('room-code');
+  const roomName = $<HTMLInputElement>('room-name');
+  const roomMode = $<HTMLSelectElement>('room-mode');
+  const roomMap = $<HTMLSelectElement>('room-map');
   const practiceBots = $<HTMLSelectElement>('practice-bots');
   const practiceSkill = $<HTMLSelectElement>('practice-skill');
 
@@ -84,6 +112,7 @@ async function main() {
   const audio = new GameAudio();
   const input = new Input(canvas);
   const hud = new Hud('');
+  hud.isPlaying = () => input.active;
   const announcer = new Announcer(hud, audio, '');
   const chat = new Chat(input);
   chat.onLine = () => audio.play('blip', { volume: 0.4 });
@@ -130,6 +159,12 @@ async function main() {
     settings.invertY = invert.checked;
     applySettings();
   });
+  const killcam = $<HTMLInputElement>('set-killcam');
+  killcam.checked = settings.killcam;
+  killcam.addEventListener('change', () => {
+    settings.killcam = killcam.checked;
+    applySettings();
+  });
   applySettings();
 
   nameInput.value = settings.name;
@@ -148,6 +183,7 @@ async function main() {
   };
   modal('settings', ['open-settings', 'pause-settings'], 'settings-done');
   modal('controls', ['open-controls', 'pause-controls'], 'controls-done');
+  modal('rooms', ['open-rooms'], 'rooms-done');
 
   // --- maps for practice ------------------------------------------------------------------------
 
@@ -159,6 +195,18 @@ async function main() {
     practiceMap.append(opt);
   }
   practiceMap.value = params.get('map') && MAPS[params.get('map')!] ? params.get('map')! : 'arena';
+  for (const [mode, def] of Object.entries(MODES)) {
+    const opt = document.createElement('option');
+    opt.value = mode;
+    opt.textContent = def.name;
+    opt.title = def.blurb;
+    practiceMode.append(opt);
+  }
+  practiceMode.value = params.get('mode') && params.get('mode')! in MODES ? params.get('mode')! : 'ffa';
+  // Bots sit out races: the bot count means nothing there.
+  const syncPracticeBots = () => (practiceBots.disabled = practiceMode.value === 'race');
+  practiceMode.addEventListener('change', syncPracticeBots);
+  syncPracticeBots();
 
   // --- screens ---------------------------------------------------------------------------------
 
@@ -174,7 +222,7 @@ async function main() {
     menu.hidden = s !== 'menu';
     connecting.hidden = s !== 'connecting';
     hudRoot.hidden = s !== 'game';
-    pause.hidden = s !== 'game' || input.locked;
+    pause.hidden = s !== 'game' || input.active;
     if (s === 'menu') refreshServerStatus();
   };
 
@@ -183,15 +231,22 @@ async function main() {
     menuError.hidden = !text;
   }
 
-  input.onLockChange = (locked) => {
-    if (screen === 'game') pause.hidden = locked;
-    if (!locked) chat.close();
+  let toldFree = false;
+  input.onActiveChange = (active, free) => {
+    if (screen === 'game') pause.hidden = active;
+    if (!active) chat.close();
+    // The browser wouldn't capture the mouse (an automated or embedded one): say how to play without it.
+    if (active && free && !toldFree) {
+      toldFree = true;
+      chat.add(null, "This browser won't capture the mouse, so: arrow keys look around, click or F fires, right click or Q grapples, Esc pauses.");
+    }
   };
-  const play = () => {
+  /** Starts play. `clicked`: the player asked for it, so play even if the mouse can't be captured. */
+  const play = (clicked = true) => {
     audio.resume();
-    void input.lock();
+    void input.start(clicked);
   };
-  $('resume').addEventListener('click', play);
+  $('resume').addEventListener('click', () => play());
   pause.addEventListener('click', (e) => {
     if (e.target === pause) play();
   });
@@ -201,19 +256,28 @@ async function main() {
   document.addEventListener('keydown', (e) => {
     if (isTyping(e.target)) return;
     if (e.code === 'KeyM' && screen === 'game') $('mute').textContent = audio.toggleMute() ? 'Sound off (M)' : '';
+    // Watching: J joins the game.
+    if (e.code === 'KeyJ' && screen === 'game' && session?.game?.spectator) session.transport.send({ type: 'spectate', on: false });
+  });
+  spectateButton.addEventListener('click', () => {
+    const s = session;
+    if (!s?.game) return;
+    s.transport.send({ type: 'spectate', on: !s.game.spectator });
+    play();
   });
 
   // --- sessions --------------------------------------------------------------------------------
 
-  const joinMessage = () => ({ type: 'join' as const, name: settings.name, version: PROTOCOL_VERSION });
+  const joinMessage = (watch: boolean) => ({ type: 'join' as const, name: settings.name, version: PROTOCOL_VERSION, spectate: watch });
 
-  function begin(transport: Transport, practice: boolean) {
+  function begin(transport: Transport, practice: boolean, watch = false, room = MAIN_ROOM) {
     leave('');
     audio.resume();
     showError('');
     hud.reset();
     chat.clear();
-    const s: Session = { transport, game: null, id: null, joinTimer: 0, practice };
+    const s: Session = { transport, game: null, id: null, joinTimer: 0, practice, watch, room };
+    roomsPanel.hidden = true;
     session = s;
     $('connecting-title').textContent = practice ? 'Starting…' : 'Connecting…';
     show('connecting');
@@ -231,7 +295,7 @@ async function main() {
         leave("The server didn't answer. Try again in a moment.");
         return;
       }
-      transport.send(joinMessage());
+      transport.send(joinMessage(watch));
       s.joinTimer = window.setTimeout(sendJoin, 1000);
     };
     sendJoin();
@@ -243,18 +307,26 @@ async function main() {
         const first = !s.id;
         s.id = msg.id;
         clearTimeout(s.joinTimer);
-        if (!s.game || s.game.map !== msg.map) {
-          const seq = s.game?.client.lastSeq ?? 0;
-          s.game?.dispose();
-          s.game = startGame(ctx, msg.map, msg.id, s.transport, seq);
+        // A new map, a new mode, or starting or stopping spectating: a fresh game.
+        const g = s.game;
+        if (!g || g.map !== msg.map || g.mode !== msg.mode || g.spectator !== msg.spectator) {
+          const seq = g?.client.lastSeq ?? 0;
+          g?.dispose();
+          hud.reset();
+          s.game = startGame(ctx, { map: msg.map, mode: msg.mode, localId: msg.id, transport: s.transport, startSeq: seq, spectator: msg.spectator });
           s.game.client.match = msg.match;
         }
+        spectateButton.textContent = msg.spectator ? 'Join the game' : 'Spectate';
         chat.send = (text) => s.transport.send({ type: 'chat', text });
         if (first) {
           show('game');
-          play();
+          play(false); // joining isn't a click: without the lock, the pause screen asks for one
           $('pause-hint').textContent = s.practice ? 'Practice keeps going while you are away.' : "You're still in the match while you're away.";
-          if (!s.practice) chat.add(null, `Welcome to Rocket Jump on ${mapTitle(msg.map)}. First to ${msg.match.fragLimit} wins. T to chat.`);
+          // In an opened room: its code, and a link to send people.
+          $('pause-room').hidden = s.practice || s.room === MAIN_ROOM;
+          $('pause-room-name').textContent = `Room ${s.room}`;
+          if (!s.practice && s.room !== MAIN_ROOM) chat.add(null, `You're in room ${s.room}. Friends join with that code, or the invite link in the Esc menu.`);
+          if (!s.practice) chat.add(null, `Welcome to Rocket Jump: ${MODES[msg.mode].name} on ${mapTitle(msg.map)}. ${goalText(msg.mode, msg.match.scoreLimit)} T to chat.`);
         }
         break;
       }
@@ -285,19 +357,124 @@ async function main() {
       s.game?.dispose();
       renderer.clear();
     }
-    if (document.pointerLockElement) document.exitPointerLock();
+    input.stop();
     hud.reset();
     chat.clear();
     show('menu');
     showError(error);
   }
 
-  onlineButton.addEventListener('click', () => {
-    begin(new WsTransport(params.get('server') ?? WsTransport.defaultUrl()), false);
+  const joinRoom = (room: string, watch = false) => begin(new WsTransport(roomUrl(room)), false, watch, room);
+  onlineButton.addEventListener('click', () => joinRoom(MAIN_ROOM));
+  watchButton.addEventListener('click', () => joinRoom(MAIN_ROOM, true));
+
+  // --- servers and rooms -----------------------------------------------------------------------
+
+  for (const [mode, def] of Object.entries(MODES)) roomMode.append(new Option(def.name, mode));
+  roomMap.append(new Option('Every map in turn', 'rotation'));
+  for (const [name, def] of Object.entries(MAPS)) roomMap.append(new Option(def.title, name));
+  roomMap.value = 'rotation';
+  const roomsProblem = (text: string) => {
+    roomsError.textContent = text;
+    roomsError.hidden = !text;
+  };
+
+  /** The public rooms, refreshed every few seconds while the window is open. */
+  let roomsTimer = 0;
+  async function refreshRooms() {
+    clearTimeout(roomsTimer);
+    if (roomsPanel.hidden) return;
+    try {
+      const res = await fetch(`${apiBase()}/rooms`, { cache: 'no-store' });
+      if (!res.ok) throw new Error(String(res.status));
+      const list = (await res.json()) as RoomInfo[];
+      roomList.replaceChildren(
+        ...list.map((r) => {
+          const row = document.createElement('div');
+          row.className = 'room';
+          const what = document.createElement('div');
+          what.className = 'what';
+          const name = document.createElement('div');
+          name.className = 'name';
+          name.textContent = r.main ? `${r.name} (this server's rotation)` : r.name;
+          const detail = document.createElement('div');
+          detail.className = 'detail';
+          const extra = [r.bots ? `${r.bots} bots` : '', r.spectators ? `${r.spectators} watching` : ''].filter(Boolean).join(' · ');
+          detail.textContent = `${MODES[r.mode]?.name ?? r.mode} on ${mapTitle(r.map)} · ${r.players}/${r.maxPlayers} playing${extra ? ` · ${extra}` : ''}`;
+          what.append(name, detail);
+          const join = document.createElement('button');
+          join.textContent = r.players >= r.maxPlayers ? 'Queue' : 'Join';
+          join.addEventListener('click', () => joinRoom(r.code));
+          const watch = document.createElement('button');
+          watch.className = 'ghost';
+          watch.textContent = 'Watch';
+          watch.addEventListener('click', () => joinRoom(r.code, true));
+          row.append(what, join, watch);
+          return row;
+        }),
+      );
+      roomsProblem('');
+    } catch {
+      roomList.replaceChildren();
+      roomsProblem("Couldn't reach the server for its rooms. Practice is still available.");
+    }
+    roomsTimer = window.setTimeout(refreshRooms, 3000);
+  }
+  $('open-rooms').addEventListener('click', () => {
+    roomName.value ||= settings.name ? `${settings.name}'s room` : '';
+    void refreshRooms();
+  });
+
+  const joinByCode = (watch: boolean) => {
+    const code = roomCode.value.trim().toUpperCase();
+    if (!/^[A-Z0-9]{5}$/.test(code)) return roomsProblem('A room code is five letters and numbers.');
+    joinRoom(code, watch);
+  };
+  $('room-join').addEventListener('click', () => joinByCode(false));
+  $('room-watch').addEventListener('click', () => joinByCode(true));
+  roomCode.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') joinByCode(false);
+  });
+
+  $('room-create').addEventListener('click', async () => {
+    const request = {
+      name: roomName.value,
+      mode: roomMode.value,
+      map: roomMap.value,
+      bots: Number($<HTMLSelectElement>('room-bots').value),
+      skill: $<HTMLSelectElement>('room-skill').value,
+      private: $<HTMLInputElement>('room-private').checked,
+    };
+    try {
+      const res = await fetch(`${apiBase()}/rooms`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(request) });
+      const answer = (await res.json()) as { code?: string; error?: string };
+      if (!res.ok || !answer.code) return roomsProblem(answer.error ?? "The server couldn't open a room.");
+      joinRoom(answer.code);
+    } catch {
+      roomsProblem("Couldn't reach the server to open a room.");
+    }
+  });
+
+  $('copy-invite').addEventListener('click', async () => {
+    const s = session;
+    if (!s) return;
+    const link = new URL(location.href);
+    link.search = '';
+    if (params.get('server')) link.searchParams.set('server', params.get('server')!);
+    link.searchParams.set('room', s.room);
+    const button = $('copy-invite');
+    try {
+      await navigator.clipboard.writeText(link.toString());
+      button.textContent = 'Copied!';
+    } catch {
+      button.textContent = link.toString(); // no clipboard (an insecure origin): show it to copy by hand
+    }
+    setTimeout(() => (button.textContent = 'Copy invite link'), 2500);
   });
 
   const startPractice = (conditions: NetConditions, bots: number) => {
-    const options: Partial<ServerOptions> = { maps: [practiceMap.value], minPlayers: bots + 1, maxPlayers: 1, botSkill: practiceSkill.value as BotSkill };
+    const mode = practiceMode.value as GameMode;
+    const options: Partial<ServerOptions> = { maps: [practiceMap.value], mode, minPlayers: bots + 1, maxPlayers: 1, botSkill: practiceSkill.value as BotSkill };
     const loopback = new Loopback(conditions, 'player', options);
     if (params.get('net') === 'loopback') ctx.netOverlay ??= new NetOverlay(loopback, null!);
     begin(loopback, true);
@@ -310,20 +487,23 @@ async function main() {
     clearTimeout(statusTimer);
     if (screen !== 'menu') return;
     if (params.get('server')) {
-      onlineButton.disabled = false;
+      onlineButton.disabled = watchButton.disabled = false;
       onlineStatus.textContent = params.get('server')!;
       return;
     }
     try {
       const res = await fetch('/status', { cache: 'no-store' });
       if (!res.ok) throw new Error(String(res.status));
-      const status = (await res.json()) as { map: string; players: string[]; maxPlayers: number; match: { phase: string } };
+      const status = (await res.json()) as { map: string; mode?: GameMode; players: string[]; maxPlayers: number; match: { phase: string } };
       const n = status.players.length;
-      onlineButton.disabled = n >= status.maxPlayers;
+      const where = `${status.mode && status.mode in MODES ? `${MODES[status.mode].name} on ` : ''}${mapTitle(status.map)}`;
+      // A full server still lets you in: you watch until a place comes free.
+      onlineButton.disabled = false;
+      watchButton.disabled = false;
       onlineStatus.textContent =
-        n === 0 ? `${mapTitle(status.map)} · nobody on yet, bots will fill in` : `${mapTitle(status.map)} · ${n}/${status.maxPlayers} playing${n >= status.maxPlayers ? ' (full)' : ''}`;
+        n === 0 ? `${where} · nobody on yet, bots will fill in` : `${where} · ${n}/${status.maxPlayers} playing${n >= status.maxPlayers ? ' (full: you can watch)' : ''}`;
     } catch {
-      onlineButton.disabled = true;
+      onlineButton.disabled = watchButton.disabled = true;
       onlineStatus.textContent = 'Server offline. Practice is still available.';
     }
     statusTimer = window.setTimeout(refreshServerStatus, 5000);
@@ -356,9 +536,20 @@ async function main() {
 
   if (params.get('net') === 'loopback') {
     startPractice({ ping: numParam('ping', 100), jitter: numParam('jitter', 10), loss: numParam('loss', 0) }, numParam('bots', 2));
+  } else if (params.get('room')) {
+    // An invite link: straight into the room (the pause screen asks for a click to grab the mouse).
+    joinRoom(params.get('room')!.trim().toUpperCase());
   }
 
   if (import.meta.env.DEV) Object.assign(window, { rj: { get session() { return session; }, frame, settings, hud, input } });
+}
+
+/** "First to 20 wins." and the like, for the welcome line. */
+function goalText(mode: GameMode, limit: number): string {
+  if (mode === 'race') return 'Best lap wins: fly through the rings in order, E to restart.';
+  if (mode === 'ctf') return `First team to ${limit} captures wins.`;
+  if (mode === 'tdm') return `First team to ${limit} kills wins.`;
+  return `First to ${limit} wins.`;
 }
 
 function gpuName(renderer: THREE.WebGLRenderer): string {

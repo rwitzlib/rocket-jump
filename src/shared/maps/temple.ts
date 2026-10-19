@@ -195,6 +195,19 @@ export const TEMPLE: MapDef = {
   crates,
   spawns: quad([facingCenter([24, 1, 60]), facingCenter([-24, 1, 60])], (s, k) => facingCenter(turnPos(s.pos, k))),
   pickups: [[0, T3 + 2.1, 0], ...quad<Vec3Tuple>([[48, 12.3, 48]], turnPos)],
+  items: [
+    ...quad<Vec3Tuple>([[15, T1, 15]], turnPos).map((pos) => ({ kind: 'health' as const, pos })),
+    { kind: 'armor', pos: [51, 11, 45] },
+    { kind: 'armor', pos: [-51, 11, -45] },
+    { kind: 'overdrive', pos: [5, T3 + 7.4, 5] }, // on the shrine's lower roof
+  ],
+  // In front of the two stone heads.
+  flags: [[0, 0, 52], [0, 0, -52]],
+  // Over a lintel, through the shrine, a gatehouse roof, then the top of a cliff.
+  race: {
+    start: [24, 1, 60],
+    rings: [[22, 2.5, 50], [18.4, 11.5, 31.8], [0, 14, 0], [48, 12.5, -48], [72, 35, -27]],
+  },
   killY: -30,
   botOrbit: 46,
   decor: [

@@ -1,29 +1,36 @@
 import type { ClientMessage, ServerMessage } from '../../shared/protocol';
+import { encodeClientMessage, WireDecoder, type Bytes } from '../../shared/wire';
 import type { Transport } from './transport';
 
-/** The real thing: JSON over a WebSocket to the server at /ws on the page's own host. */
+/** The real thing: a WebSocket to the server at /ws on the page's own host (binary snapshots and inputs, JSON for the rest). */
 export class WsTransport implements Transport {
   onMessage: (msg: ServerMessage) => void = () => {};
   onClose: (reason: string) => void = () => {};
   received = 0;
   private readonly ws: WebSocket;
+  private readonly decoder = new WireDecoder();
   private closed = false;
-  private outbox: string[] = [];
+  private outbox: (string | Bytes)[] = [];
 
   constructor(url = WsTransport.defaultUrl()) {
     this.ws = new WebSocket(url);
+    this.ws.binaryType = 'arraybuffer';
     this.ws.onopen = () => {
       for (const data of this.outbox) this.ws.send(data);
       this.outbox = [];
     };
     this.ws.onmessage = (e) => {
-      if (typeof e.data !== 'string') return;
-      this.received += e.data.length;
+      const data = typeof e.data === 'string' ? e.data : new Uint8Array(e.data as ArrayBuffer);
+      this.received += data.length;
+      let msg: ServerMessage;
       try {
-        this.onMessage(JSON.parse(e.data));
+        msg = this.decoder.decode(data);
       } catch (err) {
-        console.error('Bad message from server', err);
+        // A snapshot whose baseline we no longer have: the next one will do.
+        console.warn('Unreadable message from server', err);
+        return;
       }
+      this.onMessage(msg);
     };
     this.ws.onclose = (e) => {
       if (this.closed) return;
@@ -38,7 +45,7 @@ export class WsTransport implements Transport {
   }
 
   send(msg: ClientMessage) {
-    const data = JSON.stringify(msg);
+    const data = encodeClientMessage(msg);
     if (this.ws.readyState === WebSocket.OPEN) this.ws.send(data);
     else if (this.ws.readyState === WebSocket.CONNECTING) this.outbox.push(data);
   }

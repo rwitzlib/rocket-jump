@@ -4,23 +4,34 @@ import { createServer } from 'node:http';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { DT, MATCH } from '../shared/config';
+import { DT, MATCH, MODES, type GameMode } from '../shared/config';
 import { MAPS } from '../shared/map';
 import { parseClientMessage } from '../shared/protocol';
-import { GameServer } from '../shared/server';
+import { MAIN_ROOM, parseRoomRequest, Rooms, type Room } from '../shared/rooms';
+import { decodeClientMessage, WireEncoder } from '../shared/wire';
 
-// The dedicated server: serves the built game (dist/) over HTTP and runs one GameServer, with
-// players connected over WebSockets at /ws. Everything is configured with environment variables:
+// The dedicated server: serves the built game (dist/) over HTTP and runs the game's rooms, with
+// players connected over WebSockets at /ws (?room=CODE for any room but the main one).
+//
+//   GET  /rooms    the public rooms, for the server browser
+//   POST /rooms    opens a room: { name, mode, map, bots, skill, private } -> { code }
+//   GET  /status   the main room, plus the number of rooms and the tick time
+//
+// Everything is configured with environment variables (the rotation and match settings are the
+// main room's; opened rooms pick their own mode and map):
 //
 //   PORT=8080             HTTP + WebSocket port
 //   HOST=0.0.0.0          interface to listen on
-//   MAPS=dockyard,temple,skyreach,arena,citadel   map rotation
-//   TIME_LIMIT=480        seconds per match
-//   FRAG_LIMIT=25         kills to win (default: per map, 15 to 25)
+//   MAPS=dockyard,temple:ctf,skyreach:tdm,arena,citadel:ctf   rotation: maps, each with an optional :mode
+//   MODE=ffa              mode for rotation entries without one: ffa, tdm, ctf or race
+//   TIME_LIMIT=480        seconds per match (default: per mode, 8 min; CTF 10, races 5)
+//   FRAG_LIMIT=25         kills to win (default: per map, 15 to 25; team deathmatch 1.6x)
 //   INTERMISSION=15       seconds on the results screen
 //   MIN_PLAYERS=4         bots fill in up to this many players (0: no bots)
 //   MAX_PLAYERS=12        people allowed in at once
+//   MAX_SPECTATORS=8      people allowed to watch on top of that
 //   BOT_SKILL=auto        easy, normal or hard; auto follows how the people on the server are doing
+//   MAX_ROOMS=8           rooms at once, the main one included (each costs a match's CPU)
 //   STATIC_DIR=dist       where the built client is
 
 const env = (name: string, fallback: number) => {
@@ -47,26 +58,70 @@ const MIME: Record<string, string> = {
 
 await RAPIER.init();
 
-const maps = (process.env.MAPS ?? 'dockyard,temple,skyreach,arena,citadel').split(',').map((m) => m.trim()).filter((m) => m in MAPS);
-const sockets = new Map<string, WebSocket>();
-const game = new GameServer(
+const maps = (process.env.MAPS ?? 'dockyard,temple:ctf,skyreach:tdm,arena,citadel:ctf').split(',').map((m) => m.trim()).filter((m) => m.split(':')[0] in MAPS);
+const mode = (Object.keys(MODES) as GameMode[]).find((m) => m === process.env.MODE) ?? MATCH.mode;
+const sockets = new Map<string, { ws: WebSocket; wire: WireEncoder; room: Room }>();
+let bytesOut = 0; // for the status log
+const rooms = new Rooms(
   (id, msg) => {
-    const ws = sockets.get(id);
+    const socket = sockets.get(id);
     // A client that can't keep up (a huge send buffer) gets skipped snapshots rather than a growing backlog.
-    if (!ws || ws.readyState !== ws.OPEN) return;
-    if (msg.type === 'snapshot' && ws.bufferedAmount > 256 * 1024) return;
-    ws.send(JSON.stringify(msg));
+    if (!socket || socket.ws.readyState !== socket.ws.OPEN) return;
+    if (msg.type === 'snapshot' && socket.ws.bufferedAmount > 256 * 1024) return;
+    const data = socket.wire.encode(msg);
+    bytesOut += data.length;
+    socket.ws.send(data);
   },
   {
     maps,
-    timeLimit: env('TIME_LIMIT', MATCH.timeLimit),
+    mode,
+    timeLimit: process.env.TIME_LIMIT ? env('TIME_LIMIT', MATCH.timeLimit) : null, // default: per mode
     fragLimit: process.env.FRAG_LIMIT ? env('FRAG_LIMIT', MATCH.fragLimit) : null, // default: per map
     intermission: env('INTERMISSION', MATCH.intermission),
     minPlayers: env('MIN_PLAYERS', MATCH.minPlayers),
     maxPlayers: env('MAX_PLAYERS', MATCH.maxPlayers),
+    maxSpectators: env('MAX_SPECTATORS', 8),
     botSkill: (['easy', 'normal', 'hard'] as const).find((s) => s === process.env.BOT_SKILL) ?? 'auto',
   },
+  { maxRooms: Math.max(1, env('MAX_ROOMS', 8)), idleTimeout: 120 },
 );
+const game = rooms.main.server;
+
+/** Opening rooms is limited per address: a few a minute. */
+const ROOM_CREATE_LIMIT = 3;
+const roomsOpened = new Map<string, number[]>();
+
+const json = (res: import('node:http').ServerResponse, status: number, body: unknown) =>
+  res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', 'access-control-allow-origin': '*' }).end(JSON.stringify(body));
+
+/** POST /rooms: checks the request and the address's recent rooms, then opens one. */
+function openRoom(req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) {
+  const addr = String(req.headers['x-forwarded-for'] ?? req.socket.remoteAddress ?? '');
+  let body = '';
+  req.setEncoding('utf8');
+  req.on('data', (chunk: string) => {
+    body += chunk;
+    if (body.length > 2048) req.destroy();
+  });
+  req.on('end', () => {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      parsed = null;
+    }
+    const request = parseRoomRequest(parsed);
+    if (!request) return json(res, 400, { error: 'That room request makes no sense.' });
+    const now = Date.now();
+    const recent = (roomsOpened.get(addr) ?? []).filter((t) => now - t < 60000);
+    if (recent.length >= ROOM_CREATE_LIMIT) return json(res, 429, { error: "You've opened a few rooms just now. Try again in a minute." });
+    const room = rooms.create(request);
+    if ('error' in room) return json(res, 503, room);
+    roomsOpened.set(addr, [...recent, now]);
+    log('room', { code: room.code, name: room.name, mode: request.mode, map: request.map, private: request.private, addr });
+    json(res, 201, { code: room.code });
+  });
+}
 
 // The built client is small enough to keep in memory, compressed once: the game bundle (with
 // Rapier's WASM inlined) goes from about 5 MB to under 2 MB on the wire.
@@ -90,8 +145,17 @@ const http = createServer((req, res) => {
     return;
   }
   if (url.pathname === '/status') {
-    res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'access-control-allow-origin': '*' });
-    res.end(JSON.stringify({ ...game.status(), tickMs: Math.round(tickMs * 100) / 100, uptime: Math.round(process.uptime()) }));
+    json(res, 200, { ...game.status(), rooms: rooms.count, tickMs: Math.round(tickMs * 100) / 100, uptime: Math.round(process.uptime()) });
+    return;
+  }
+  if (url.pathname === '/rooms') {
+    // (A page from elsewhere, like the dev server with ?server=, asks before it posts.)
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET, POST', 'access-control-allow-headers': 'content-type' }).end();
+      return;
+    }
+    if (req.method === 'POST') openRoom(req, res);
+    else json(res, 200, rooms.list());
     return;
   }
   if (req.method !== 'GET' && req.method !== 'HEAD') {
@@ -136,38 +200,44 @@ const wss = new WebSocketServer({
   server: http,
   path: '/ws',
   maxPayload: MAX_MESSAGE,
-  // Snapshots are repetitive JSON: compression cuts them to about a quarter for very little CPU.
-  perMessageDeflate: { threshold: 512, zlibDeflateOptions: { level: 1 }, serverNoContextTakeover: false, clientNoContextTakeover: true },
+  // Even delta-coded binary snapshots still shrink by about half (names, repeated ids, quiet
+  // records), and they're mostly a few hundred bytes, so the threshold is low.
+  perMessageDeflate: { threshold: 64, zlibDeflateOptions: { level: 1 }, serverNoContextTakeover: false, clientNoContextTakeover: true },
 });
 let nextId = 1;
 
 wss.on('connection', (ws, req) => {
+  const code = new URL(req.url ?? '/', 'http://localhost').searchParams.get('room') ?? MAIN_ROOM;
+  const room = rooms.get(code);
+  if (!room) {
+    ws.close(4404, 'There is no room with that code. It may have closed.');
+    return;
+  }
+  const game = room.server;
   const id = `p${nextId++}`;
-  sockets.set(id, ws);
+  const wire = new WireEncoder();
+  sockets.set(id, { ws, wire, room });
   ws.binaryType = 'nodebuffer';
   const addr = req.headers['x-forwarded-for'] ?? req.socket.remoteAddress;
   let joined = false;
 
   ws.on('message', (data, isBinary) => {
-    if (isBinary) return;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(data.toString());
-    } catch {
-      return;
-    }
-    const msg = parseClientMessage(parsed);
+    const raw = data as Buffer;
+    const msg = parseClientMessage(decodeClientMessage(isBinary ? new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength) : raw.toString()));
     if (!msg) return;
+    // Snapshots are delta-coded against the newest one the client says it has.
+    if (msg.type === 'input' && msg.snap) wire.ack(msg.snap);
+    if (msg.type === 'ack') wire.ack(msg.tick);
     if (msg.type === 'join') {
       if (joined) return;
       joined = true;
-      log('join', { id, name: msg.name, addr });
+      log('join', { id, room: room.code, name: msg.name, addr });
     }
     game.receive(id, msg);
   });
   ws.on('close', () => {
     sockets.delete(id);
-    if (joined) log('leave', { id });
+    if (joined) log('leave', { id, room: room.code });
     game.disconnect(id);
   });
   ws.on('error', () => ws.close());
@@ -202,7 +272,7 @@ const loop = () => {
   if (due - ticks > 15) ticks = due - 1;
   while (ticks < due) {
     const t0 = performance.now();
-    game.tick();
+    rooms.tick();
     const spent = performance.now() - t0;
     tickMs += (spent - tickMs) * 0.01;
     if (spent > DT * 1000) slowTicks++;
@@ -213,10 +283,11 @@ const loop = () => {
 loop();
 
 setInterval(() => {
-  if (game.playerCount === 0 && slowTicks === 0) return;
+  if (sockets.size === 0 && slowTicks === 0) return;
   const s = game.status();
-  log('status', { map: s.map, players: s.players.length, bots: s.bots, phase: s.match.phase, slowTicks });
+  log('status', { map: s.map, mode: s.mode, players: s.players.length, spectators: s.spectators.length, bots: s.bots, phase: s.match.phase, rooms: rooms.count, connected: sockets.size, slowTicks, kbPerSecond: Math.round(bytesOut / 60 / 100) / 10 });
   slowTicks = 0;
+  bytesOut = 0;
 }, 60000);
 
 http.listen(PORT, HOST, () => {

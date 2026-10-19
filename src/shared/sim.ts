@@ -1,101 +1,35 @@
 import RAPIER from '@dimforge/rapier3d-compat';
 import { Euler, Quaternion, Vector3 } from 'three';
-import { CAR, COMBAT, CRATE, DT, GRAPPLE, GRAVITY, GRENADE, HELI, HYPERSONIC, LOADOUT, PICKUP, PLAYER, ROCKET, SEEKERS, VEHICLE_DAMAGE, VEHICLES, WEAPONS, type SeekerConfig } from './config';
-import type { MapDef, SpawnDef, Vec3Tuple } from './map';
-import { capsuleNormal, PositionHistory, rayCapsule, REWIND_TICKS } from './hits';
+import { COMBAT, CRATE, CTF, DT, GRAPPLE, GRAVITY, GRENADE, HELI, HYPERSONIC, ITEMS, LOADOUT, PICKUP, PLAYER, RACE, ROCKET, SEEKERS, VEHICLE_DAMAGE, VEHICLES, WEAPONS, type GameMode, type SeekerConfig } from './config';
+import { Driving } from './driving';
+import type { SimEvent, StepMode } from './events';
+import { Flight } from './flight';
+import { capsuleNormal, rayCapsule, REWIND_TICKS } from './hits';
+import type { MapDef, SpawnDef } from './map';
+import { isTeamMode, teamSpawns, type RaceCourse } from './modes';
 import { aimDirection, applyGrapple, updateVelocity, type GrappleState, type Hook } from './movement';
+import { clipVelocity, PLAYER_COLLISION_GROUPS, raySphere, VEHICLE_COLLIDER_GROUPS } from './physics';
+import { PlayerSim } from './player';
+import { BLAST_CAUSE, isSeeker, lockedOn, lockReady, type Blast, type DeathCause, type MissilePhase, type Projectile, type ProjectileKind } from './projectile';
+import { ModeRules, type Flag, type Item } from './rules';
 import { EMPTY_INPUT, type PlayerInput, type SeekerId, type WeaponId } from './types';
-import { updateCar, updateHeli, VehicleSim } from './vehicle';
+import { VehicleSim } from './vehicle';
 
 // The authoritative game simulation. It has no rendering or DOM code, so the same class can run
 // in the browser (single-player / client prediction) or in Node (the multiplayer server).
 // Call `await RAPIER.init()` once before constructing it.
+//
+// GameSim holds the world and runs the tick: players (movement, the grapple, weapons, seeker
+// locks), mystery boxes, and combat (blasts, damage, kills). Its parts live alongside it:
+// projectile flight (flight.ts), vehicles in the world (driving.ts), and the per-mode rules for
+// items, flags and races (rules.ts). The player and projectile types are in player.ts and
+// projectile.ts, and what a tick reports in events.ts; they're re-exported here.
 
-/**
- * How a player step treats side effects.
- * - authority: the real simulation (server, single-player).
- * - predict: a client guessing its own player (and its own rockets) ahead of the server. Feedback
- *   events still fire. Respawns and crates are left to the server.
- * - replay: re-running inputs that were already predicted, after a server correction. Silent.
- */
-export type StepMode = 'authority' | 'predict' | 'replay';
+export type { SimEvent, StepMode, FlagAction } from './events';
+export { PlayerSim, type PlayerState, type HookState } from './player';
+export { isArmed, isSeeker, lockedOn, lockReady, type DeathCause, type MissilePhase, type Projectile, type ProjectileKind } from './projectile';
+export type { Flag, Item } from './rules';
 
-/** Everything about a player that affects how the next input plays out. Plain data, so it can go over the wire. */
-export interface PlayerState {
-  pos: Vec3Tuple;
-  vel: Vec3Tuple;
-  grounded: boolean;
-  grapple: { anchor: Vec3Tuple; normal: Vec3Tuple; length: number; hook: HookState | null } | null;
-  fireCooldown: number;
-  drum: number; // grenades left in the grenade launcher
-  reloading: boolean; // the drum is being refilled; fireCooldown counts it down
-  grappleCooldown: number;
-  grappleUsed: boolean;
-  lockTarget: string | null; // who a seeker launcher is locking onto
-  lockProgress: number; // seconds they've been held in the lock box; locked at the weapon's lockTime
-  yaw: number;
-  pitch: number;
-  health: number;
-  alive: boolean;
-  respawnIn: number; // seconds, while dead
-  protectedFor: number; // seconds of spawn protection left
-  primary: WeaponId;
-  secondary: WeaponId;
-  vehicle: number; // index into GameSim.vehicles, -1 on foot
-  seat: number;
-}
-
-/** 'vehicle': blown up inside one. 'ram': run over. */
-export type DeathCause = ProjectileKind | 'fall' | 'vehicle' | 'ram';
-
-export const isSeeker = (w: WeaponId): w is SeekerId => w in SEEKERS;
-
-/** True once a seeker launcher has held its target long enough to fire. */
-export function lockedOn(p: { primary: WeaponId; lockTarget: string | null; lockProgress: number }): boolean {
-  return lockReady(isSeeker(p.primary) ? p.primary : null, p);
-}
-
-/** True once `weapon` has held its target long enough to fire. */
-export function lockReady(weapon: SeekerId | null, p: { lockTarget: string | null; lockProgress: number }): boolean {
-  return weapon !== null && p.lockTarget !== null && p.lockProgress >= SEEKERS[weapon].lockTime;
-}
-
-export type HookState =
-  | { kind: 'player'; id: string; offset: Vec3Tuple }
-  | { kind: 'crate'; index: number; local: Vec3Tuple; localNormal: Vec3Tuple }
-  | { kind: 'rocket'; ownerId: string; shot: number }
-  | { kind: 'vehicle'; index: number; local: Vec3Tuple };
-
-function hookToState(h: Hook | null): HookState | null {
-  if (!h) return null;
-  if (h.kind === 'player') return { kind: 'player', id: h.id, offset: tuple(h.offset) };
-  if (h.kind === 'crate') return { kind: 'crate', index: h.index, local: tuple(h.local), localNormal: tuple(h.localNormal) };
-  if (h.kind === 'vehicle') return { kind: 'vehicle', index: h.index, local: tuple(h.local) };
-  return { ...h };
-}
-
-function hookFromState(h: HookState | null): Hook | null {
-  if (!h) return null;
-  if (h.kind === 'player') return { kind: 'player', id: h.id, offset: new Vector3(...h.offset) };
-  if (h.kind === 'crate') return { kind: 'crate', index: h.index, local: new Vector3(...h.local), localNormal: new Vector3(...h.localNormal) };
-  if (h.kind === 'vehicle') return { kind: 'vehicle', index: h.index, local: new Vector3(...h.local) };
-  return { ...h };
-}
-
-// Players are in their own collision group and ignore each other. Movement stays predictable on
-// the client, which only knows where other players were ~100ms ago. Rockets still hit players.
-const PLAYER_GROUP = 0x0002;
-const PLAYER_COLLISION_GROUPS = (PLAYER_GROUP << 16) | (0xffff & ~PLAYER_GROUP);
-// Vehicles block players (you can stand on a car), but players don't block vehicles: a car that
-// reaches you runs you over instead (see ramPlayers). So a vehicle collider accepts everything,
-// and a vehicle's own movement query skips players.
-const VEHICLE_GROUP = 0x0004;
-const VEHICLE_COLLIDER_GROUPS = (VEHICLE_GROUP << 16) | 0xffff;
-const VEHICLE_MOVE_GROUPS = (VEHICLE_GROUP << 16) | (0xffff & ~PLAYER_GROUP);
-/** How long after being run over before the same car can hit you again. */
-const RAM_COOLDOWN = 0.5;
-
-const tuple = (v: Vector3): Vec3Tuple => [v.x, v.y, v.z];
 /**
  * The character controller calls you grounded whenever anything touches your capsule from below,
  * including a crate's top edge brushing your rounded bottom as you jump past it. That let a held
@@ -114,211 +48,11 @@ const FOOTING_OFFSETS = [
   [0, -FOOTING_SPREAD],
 ];
 
-export class PlayerSim {
-  readonly pos = new Vector3();
-  readonly prevPos = new Vector3();
-  readonly vel = new Vector3();
-  grounded = false;
-  grapple: GrappleState | null = null;
-  fireCooldown = 0;
-  drum: number = GRENADE.drum;
-  reloading = false;
-  grappleCooldown = 0;
-  grappleUsed = false; // this press of the grapple button already fired; cleared on release
-  lockTarget: string | null = null;
-  lockProgress = 0;
-  yaw = 0;
-  pitch = 0;
-  /** Seq of the input being simulated (0 offline). Tags fired rockets so a client can match its predictions. */
-  seq = 0;
-  primary: WeaponId = LOADOUT.primary;
-  secondary: WeaponId = LOADOUT.secondary;
-  vehicle = -1; // index into GameSim.vehicles while seated in one
-  seat = -1;
-  useHeld = false; // server only: E is down, so holding it doesn't get you in and straight back out
-  rammedFor = 0; // server only: seconds before a car can run you over again
-
-  health: number = COMBAT.maxHealth;
-  alive = true;
-  respawnIn = 0;
-  protectedFor = 0;
-  sinceDamaged = Infinity; // seconds, for regen
-  lastAttacker: string | null = null; // who to credit if this player dies soon after being hit by them
-  sinceAttacked = Infinity; // seconds since lastAttacker's hit
-  kills = 0;
-  deaths = 0;
-  /** Recent positions, server-side, for lag-compensated hit tests. */
-  readonly history = new PositionHistory();
-
-  constructor(
-    readonly id: string,
-    readonly body: RAPIER.RigidBody,
-    readonly collider: RAPIER.Collider,
-  ) {}
-
-  eye(out: Vector3): Vector3 {
-    return out.set(this.pos.x, this.pos.y + PLAYER.eyeOffset, this.pos.z);
-  }
-
-  capture(): PlayerState {
-    const g = this.grapple;
-    return {
-      pos: tuple(this.pos),
-      vel: tuple(this.vel),
-      grounded: this.grounded,
-      grapple: g && { anchor: tuple(g.anchor), normal: tuple(g.normal), length: g.length, hook: hookToState(g.hook) },
-      fireCooldown: this.fireCooldown,
-      drum: this.drum,
-      reloading: this.reloading,
-      grappleCooldown: this.grappleCooldown,
-      grappleUsed: this.grappleUsed,
-      lockTarget: this.lockTarget,
-      lockProgress: this.lockProgress,
-      yaw: this.yaw,
-      pitch: this.pitch,
-      health: this.health,
-      alive: this.alive,
-      respawnIn: this.respawnIn,
-      protectedFor: this.protectedFor,
-      primary: this.primary,
-      secondary: this.secondary,
-      vehicle: this.vehicle,
-      seat: this.seat,
-    };
-  }
-
-  /** Overwrites this player with a captured state and moves its collider there immediately. */
-  restore(s: PlayerState) {
-    this.pos.set(...s.pos);
-    this.prevPos.copy(this.pos);
-    this.vel.set(...s.vel);
-    this.grounded = s.grounded;
-    const g = s.grapple;
-    this.grapple = g && {
-      anchor: new Vector3(...g.anchor),
-      normal: new Vector3(...g.normal),
-      length: g.length,
-      hook: hookFromState(g.hook),
-    };
-    this.fireCooldown = s.fireCooldown;
-    this.drum = s.drum;
-    this.reloading = s.reloading;
-    this.grappleCooldown = s.grappleCooldown;
-    this.grappleUsed = s.grappleUsed;
-    this.lockTarget = s.lockTarget;
-    this.lockProgress = s.lockProgress;
-    this.yaw = s.yaw;
-    this.pitch = s.pitch;
-    this.health = s.health;
-    this.respawnIn = s.respawnIn;
-    this.protectedFor = s.protectedFor;
-    this.primary = s.primary;
-    this.secondary = s.secondary;
-    this.vehicle = s.vehicle;
-    this.seat = s.seat;
-    if (s.alive !== this.alive) {
-      this.alive = s.alive;
-      this.collider.setEnabled(s.alive);
-    }
-    this.collider.setTranslation(this.pos);
-    this.body.setNextKinematicTranslation(this.pos);
-  }
-}
-
-export type MissilePhase = 'climb' | 'turn' | 'terminal';
-
-/** Every primary weapon fires a projectile of the same name. */
-export type ProjectileKind = Exclude<WeaponId, 'grapple'>;
-
-/**
- * Rockets fly straight at a constant speed and explode on anything. Grenades fall and bounce off
- * surfaces; once armed they explode on any player they touch, otherwise when the fuse runs out.
- */
-export interface Projectile {
-  id: number; // server-assigned; predicted ones use -shot until the server's copy replaces them
-  kind: ProjectileKind;
-  ownerId: string;
-  shot: number; // seq of the owner's input that fired it
-  pos: Vector3;
-  prevPos: Vector3;
-  vel: Vector3;
-  life: number;
-  traveled: number; // meters flown: a grenade arms (explodes on players) at GRENADE.armDistance
-  lag: number; // ticks to rewind other players by when testing hits: how far behind the shooter was seeing
-  struck: string | null; // the last player an unarmed grenade bounced off, so one hit only hurts once
-  target: string | null; // the player a seeker missile is steering for
-  /**
-   * A seeker's flight: a javelin climbs, turns over at the top, then makes its terminal dive. Only
-   * in the terminal phase can the target slip out of its seeker cone. Everything else is terminal.
-   */
-  phase: MissilePhase;
-  apex: number; // the height a javelin climbs to before turning over
-  from: number; // the vehicle it was fired from (it flies through that one), -1 on foot
-  power: number; // damage and knockback scale: 1, less for a helicopter's rocket pods
-}
-
-export const isArmed = (p: Projectile) => p.kind !== 'grenade' || p.traveled >= GRENADE.armDistance;
-
 /** A mystery box. Server-side state, mirrored to clients from snapshots. */
 export interface Pickup {
   pos: Vector3;
   respawnIn: number; // 0 while it's there to take
 }
-
-function seekerBlast(s: SeekerConfig): Blast {
-  return { radius: s.blastRadius, knockback: s.knockback, selfKnockback: s.selfKnockback, crateKnockback: s.crateKnockback, damage: s.damage };
-}
-
-interface Blast {
-  radius: number;
-  knockback: number;
-  selfKnockback: number;
-  crateKnockback: number;
-  damage: number;
-  directFull?: boolean; // the player it hits directly takes full damage and knockback, however far from their center
-  lift?: number; // minimum upward component of the knockback direction
-  selfRadius?: number; // how far the blast reaches the player who fired it, if not `radius`
-}
-
-/** What blew up when a vehicle is destroyed: its riders die outright, this is for everyone nearby. */
-const VEHICLE_BLAST: Blast = { radius: 7, knockback: 18, selfKnockback: 1, crateKnockback: 14, damage: 80 };
-
-const BLASTS: Record<ProjectileKind, Blast> = {
-  rocket: { radius: ROCKET.blastRadius, knockback: ROCKET.knockback, selfKnockback: ROCKET.selfKnockback, crateKnockback: ROCKET.crateKnockback, damage: COMBAT.rocketDamage },
-  grenade: { radius: GRENADE.blastRadius, knockback: GRENADE.knockback, selfKnockback: GRENADE.selfKnockback, crateKnockback: GRENADE.crateKnockback, damage: GRENADE.damage },
-  javelin: seekerBlast(SEEKERS.javelin),
-  stinger: seekerBlast(SEEKERS.stinger),
-  hypersonic: {
-    radius: HYPERSONIC.blastRadius,
-    knockback: HYPERSONIC.knockback,
-    selfKnockback: HYPERSONIC.selfKnockback,
-    crateKnockback: HYPERSONIC.crateKnockback,
-    damage: HYPERSONIC.damage,
-    directFull: true,
-    lift: HYPERSONIC.lift,
-    selfRadius: HYPERSONIC.selfRadius,
-  },
-};
-const BLAST_CAUSE = new Map<Blast, DeathCause>(Object.entries(BLASTS).map(([kind, blast]) => [blast, kind as ProjectileKind]));
-
-export type SimEvent =
-  | { type: 'fired'; playerId: string; weapon: WeaponId }
-  | { type: 'explosion'; pos: Vector3; normal: Vector3; surface: boolean; ownerId: string; shot: number; radius: number } // surface = false for mid-air
-  | { type: 'bounce'; pos: Vector3; normal: Vector3; ownerId: string; shot: number; speed: number } // a grenade hitting something before it arms
-  | { type: 'pickup'; playerId: string; weapon: WeaponId; box: number }
-  | { type: 'grapple'; playerId: string; attached: boolean }
-  | { type: 'grappleMiss'; playerId: string }
-  | { type: 'jumped'; playerId: string }
-  | { type: 'landed'; playerId: string; impactSpeed: number }
-  | { type: 'knockback'; playerId: string; strength: number; sourceId: string; shot: number } // strength 0..1
-  | { type: 'respawn'; playerId: string; yaw: number }
-  | { type: 'damaged'; playerId: string; sourceId: string; amount: number; midair: boolean }
-  | { type: 'killed'; playerId: string; killerId: string | null; cause: DeathCause; midair: boolean } // killerId null: suicide; midair: an airshot
-  | { type: 'entered'; playerId: string; vehicle: number; seat: number }
-  | { type: 'exited'; playerId: string; vehicle: number }
-  | { type: 'vehicleHit'; vehicle: number; sourceId: string; amount: number }
-  | { type: 'vehicleDestroyed'; vehicle: number; pos: Vector3; normal: Vector3 }
-  | { type: 'rammed'; playerId: string; vehicle: number; speed: number };
 
 const _desired = new Vector3();
 const _dir = new Vector3();
@@ -329,41 +63,21 @@ const _center = new Vector3();
 const _toTarget = new Vector3();
 const _aimOrigin = new Vector3();
 const _aimDir = new Vector3();
-const _step = new Vector3();
-const _segment = new Vector3();
 const _right = new Vector3();
 const _up = new Vector3();
 const _want = new Vector3();
 const _down = new Vector3();
 /** Meters of clear air under a victim (from its center) for a hit to count as an airshot. */
 const MIDAIR_HEIGHT = 3;
-/** How steeply a javelin aims to come down on its target. */
-const DIVE_ANGLE = 0.95; // about 55°
 
-type AimKind = 'none' | 'world' | 'player' | 'crate' | 'rocket' | 'vehicle';
+export type AimKind = 'none' | 'world' | 'player' | 'crate' | 'rocket' | 'vehicle';
 
-/** Result of aimHit, reused between calls. */
+/** Result of aimHit, reused between calls (GameSim.aim). */
 const _aim = { kind: 'none' as AimKind, dist: 0, playerId: '', crateIndex: -1, vehicleIndex: -1, center: new Vector3(), rocket: null as Projectile | null };
 /** How far the crosshair ray reaches when working out what a shot from a vehicle is aimed at. */
 const AIM_RANGE = 300;
 const _vq = new Quaternion();
-const _muzzle = new Vector3();
 const _target = new Vector3();
-const IDENTITY = { x: 0, y: 0, z: 0, w: 1 };
-
-/** Distance along a ray (unit `dir`) to where it enters a sphere, or null if it misses or the hit is past `maxDist`. */
-function raySphere(origin: Vector3, dir: Vector3, center: Vector3, radius: number, maxDist: number): number | null {
-  const ox = origin.x - center.x;
-  const oy = origin.y - center.y;
-  const oz = origin.z - center.z;
-  const b = ox * dir.x + oy * dir.y + oz * dir.z;
-  const c = ox * ox + oy * oy + oz * oz - radius * radius;
-  if (c <= 0) return 0; // starting inside it
-  const disc = b * b - c;
-  if (b > 0 || disc < 0) return null;
-  const t = -b - Math.sqrt(disc);
-  return t <= maxDist ? t : null;
-}
 
 // Reused for every ray cast so per-tick queries don't create garbage (GC pauses show up as hitches).
 // Rapier's Ray just holds references to these vectors.
@@ -371,14 +85,7 @@ const _rayOrigin = new Vector3();
 const _rayDir = new Vector3();
 const _ray = new RAPIER.Ray(_rayOrigin, _rayDir);
 
-// Removes velocity the collision pass refused to let us travel (walls, floors, ceilings).
 const VEHICLE_EDGE_RADIUS = 0.25;
-
-function clipVelocity(v: number, desired: number, actual: number): number {
-  if (Math.abs(desired) < 1e-6) return v;
-  const ratio = actual / desired;
-  return ratio < 0.99 ? v * Math.max(0, ratio) : v;
-}
 
 export class GameSim {
   readonly world: RAPIER.World;
@@ -386,6 +93,18 @@ export class GameSim {
   readonly projectiles: Projectile[] = [];
   readonly crates: RAPIER.RigidBody[] = [];
   readonly pickups: Pickup[];
+  /** The per-mode rules, and their state: items, flags, the race course, team scores. */
+  readonly rules: ModeRules;
+  readonly items: Item[];
+  /** Red's then blue's, in capture the flag (the same two exist in every mode, unused). */
+  readonly flags: Flag[];
+  readonly course: RaceCourse;
+  /** Captures in capture the flag, kills in team deathmatch. */
+  readonly teamScores: number[];
+  readonly flight = new Flight(this);
+  readonly driving: Driving;
+  /** What the last aimHit found. */
+  readonly aim = _aim;
   /**
    * On a client only the one we're driving is simulated here; the netcode places the rest from
    * snapshots, like crates.
@@ -399,19 +118,28 @@ export class GameSim {
   remotePositions: ReadonlyMap<string, Vector3> | null = null;
   /** Client only: other players' projectiles, where they're being drawn. `projectiles` holds just our own there. */
   remoteProjectiles: readonly Projectile[] | null = null;
+  /** Client only: other players' teams, so seekers don't lock onto teammates. */
+  remoteTeams: ReadonlyMap<string, number> | null = null;
 
   private readonly crateIndex = new Map<number, number>(); // rigid-body handle -> index in `crates`
   private readonly vehicleIndex = new Map<number, number>(); // rigid-body handle -> index in `vehicles`
   private readonly controller: RAPIER.KinematicCharacterController;
-  private readonly vehicleController: RAPIER.KinematicCharacterController;
   private nextRocketId = 1;
   private spawnIndex = 0;
   private pendingEvents: SimEvent[] = [];
 
-  constructor(readonly map: MapDef) {
+  constructor(
+    readonly map: MapDef,
+    public mode: GameMode = 'ffa',
+  ) {
     this.world = new RAPIER.World({ x: 0, y: -GRAVITY, z: 0 });
     this.world.timestep = DT;
     this.pickups = map.pickups.map((pos) => ({ pos: new Vector3(...pos), respawnIn: 0 }));
+    this.rules = new ModeRules(this);
+    this.items = this.rules.items;
+    this.flags = this.rules.flags;
+    this.course = this.rules.course;
+    this.teamScores = this.rules.teamScores;
 
     const q = new Quaternion();
     for (const box of map.boxes) {
@@ -437,11 +165,7 @@ export class GameSim {
     this.controller.disableSnapToGround(); // snapping would glue you to the floor when a rocket launches you
     this.controller.setApplyImpulsesToDynamicBodies(true);
 
-    this.vehicleController = this.world.createCharacterController(0.05);
-    this.vehicleController.enableAutostep(0.5, 0.5, false); // curbs and the lips of ramps
-    this.vehicleController.setMaxSlopeClimbAngle((40 * Math.PI) / 180);
-    this.vehicleController.enableSnapToGround(0.4); // stay on a ramp going down instead of skipping off it
-    this.vehicleController.setApplyImpulsesToDynamicBodies(true); // shove crates aside
+    this.driving = new Driving(this);
 
     (map.vehicles ?? []).forEach((def, index) => {
       const body = this.world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased());
@@ -460,13 +184,14 @@ export class GameSim {
     });
   }
 
-  addPlayer(id: string): PlayerSim {
+  addPlayer(id: string, team = -1): PlayerSim {
     const body = this.world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased());
     const collider = this.world.createCollider(
       RAPIER.ColliderDesc.capsule(PLAYER.halfHeight, PLAYER.radius).setCollisionGroups(PLAYER_COLLISION_GROUPS),
       body,
     );
     const player = new PlayerSim(id, body, collider);
+    player.team = team;
     this.players.set(id, player);
     this.respawn(player);
     return player;
@@ -475,26 +200,57 @@ export class GameSim {
   removePlayer(id: string) {
     const p = this.players.get(id);
     if (!p) return;
+    if (p.flag >= 0) this.rules.dropFlag(p, this.pendingEvents);
     if (p.vehicle >= 0) this.vehicles[p.vehicle].seats[p.seat] = null;
     this.world.removeRigidBody(p.body); // also removes its collider
     this.players.delete(id);
   }
 
   /** A clean slate for a new match on the same map: scores zeroed, everyone respawned, the map as it started. */
-  resetForMatch() {
-    for (const p of this.players.values()) if (p.vehicle >= 0) this.leaveSeat(p);
+  resetForMatch(mode = this.mode) {
+    this.mode = mode;
+    for (const p of this.players.values()) if (p.vehicle >= 0) this.driving.leaveSeat(p);
     this.projectiles.length = 0;
     for (const v of this.vehicles) v.reset();
     for (const box of this.pickups) box.respawnIn = 0;
+    for (const item of this.items) item.respawnIn = 0;
+    for (const f of this.flags) this.rules.returnFlag(f);
+    this.teamScores.fill(0);
     for (const p of this.players.values()) {
       p.kills = 0;
       p.deaths = 0;
+      p.captures = 0;
+      p.bestLap = 0;
+      p.flag = -1;
       this.respawn(p);
     }
   }
 
+  get teams(): boolean {
+    return isTeamMode(this.mode);
+  }
+
+  /** A player's team: -1 outside team modes. On a client, other players' come from the netcode. */
+  teamOf(id: string): number {
+    if (!this.teams) return -1;
+    return this.players.get(id)?.team ?? this.remoteTeams?.get(id) ?? -1;
+  }
+
+  /** On the same team (and not the same player): no damage, no seeker locks. */
+  allies(a: string, b: string): boolean {
+    if (a === b || !this.teams) return false;
+    const t = this.teamOf(a);
+    return t >= 0 && t === this.teamOf(b);
+  }
+
   respawn(p: PlayerSim) {
-    const spawn = this.pickSpawn(p);
+    // (Only a living carrier still has a flag here, moved to the other team, say: it drops where they stood.)
+    if (p.flag >= 0) this.rules.dropFlag(p, this.pendingEvents);
+    const spawn = this.mode === 'race' ? this.course.start : this.pickSpawn(p);
+    p.armor = 0;
+    p.overdrive = 0;
+    p.checkpoint = 0;
+    p.lapTime = -1;
     p.health = COMBAT.maxHealth;
     p.alive = true;
     p.respawnIn = 0;
@@ -521,9 +277,12 @@ export class GameSim {
     this.pendingEvents.push({ type: 'respawn', playerId: p.id, yaw: spawn.yaw });
   }
 
-  /** The spawn point farthest from any living opponent. Ties (e.g. an empty map) rotate through the list. */
+  /**
+   * The spawn point farthest from any living opponent (teammates don't count). Ties (e.g. an empty
+   * map) rotate through the list. In capture the flag you spawn on your own half.
+   */
   private pickSpawn(p: PlayerSim): SpawnDef {
-    const spawns = this.map.spawns;
+    const spawns = this.mode === 'ctf' && p.team >= 0 ? teamSpawns(this.map, p.team) : this.map.spawns;
     const start = this.spawnIndex++;
     let best = spawns[start % spawns.length];
     let bestDist = -1;
@@ -531,7 +290,8 @@ export class GameSim {
       const s = spawns[(start + i) % spawns.length];
       let nearest = Infinity;
       for (const o of this.players.values()) {
-        if (o !== p && o.alive) nearest = Math.min(nearest, Math.hypot(o.pos.x - s.pos[0], o.pos.y - s.pos[1], o.pos.z - s.pos[2]));
+        if (o === p || !o.alive || (this.teams && o.team === p.team)) continue;
+        nearest = Math.min(nearest, Math.hypot(o.pos.x - s.pos[0], o.pos.y - s.pos[1], o.pos.z - s.pos[2]));
       }
       if (nearest > bestDist) {
         best = s;
@@ -635,7 +395,7 @@ export class GameSim {
    * Casts a ray against the level, crates and other players (except `excludeId`), nearest first.
    * The details land in `_aim`.
    */
-  private aimHit(
+  aimHit(
     origin: Vector3,
     dir: Vector3,
     maxDist: number,
@@ -681,6 +441,7 @@ export class GameSim {
    * them; on the server, rewound to `view` (the tick the shooter was seeing), capped at REWIND_TICKS.
    */
   private forEachTarget(excludeId: string, view: number | undefined, excludeVehicle: number, fn: (id: string, center: Vector3) => void) {
+    if (this.mode === 'race') return; // racers are ghosts to each other
     if (this.remotePositions) {
       // (The netcode leaves anyone riding with us out of remotePositions.)
       for (const [id, pos] of this.remotePositions) if (id !== excludeId) fn(id, pos);
@@ -765,7 +526,7 @@ export class GameSim {
     }
     // Driven vehicles moved with their drivers, so a client can predict the one it drives. The
     // rest coast, fall, or wait to respawn.
-    for (const v of this.vehicles) if (!v.alive || !v.driver) this.stepVehicle(v, null, events, 'authority');
+    for (const v of this.vehicles) if (!v.alive || !v.driver) this.driving.stepVehicle(v, null, events, 'authority');
     // Passengers stepped before their driver are a tick behind the vehicle: put everyone back in their seat.
     for (const p of this.players.values()) {
       if (p.vehicle < 0) continue;
@@ -773,8 +534,12 @@ export class GameSim {
       p.collider.setTranslation(p.pos);
       p.body.setNextKinematicTranslation(p.pos);
     }
-    this.stepPickups(events);
-    this.stepProjectiles(events, 'authority');
+    if (this.mode !== 'race') {
+      this.stepPickups(events);
+      this.rules.stepItems(events);
+    }
+    if (this.mode === 'ctf') this.rules.stepFlags(events);
+    this.flight.stepProjectiles(events, 'authority');
     this.world.step();
     this.tick++;
     for (const p of this.players.values()) if (p.alive) p.history.record(this.tick, p.pos);
@@ -788,7 +553,7 @@ export class GameSim {
   predict(p: PlayerSim, input: PlayerInput): SimEvent[] {
     const events = this.takePendingEvents();
     this.stepPlayer(p, input, events, 'predict');
-    this.stepProjectiles(events, 'predict');
+    this.flight.stepProjectiles(events, 'predict');
     this.world.step();
     return events;
   }
@@ -799,7 +564,7 @@ export class GameSim {
    */
   replay(p: PlayerSim, input: PlayerInput) {
     this.stepPlayer(p, input, _discard, 'replay');
-    this.stepProjectiles(_discard, 'replay');
+    this.flight.stepProjectiles(_discard, 'replay');
     _discard.length = 0;
   }
 
@@ -826,16 +591,26 @@ export class GameSim {
       p.sinceDamaged += DT;
       p.sinceAttacked += DT;
       p.protectedFor = Math.max(0, p.protectedFor - DT);
-      if (p.sinceDamaged > COMBAT.regenDelay) p.health = Math.min(COMBAT.maxHealth, p.health + COMBAT.regenRate * DT);
+      // Overhealth from health packs drains back down to full; below full, regeneration.
+      if (p.health > COMBAT.maxHealth) p.health = Math.max(COMBAT.maxHealth, p.health - ITEMS.health.decay * DT);
+      else if (p.sinceDamaged > COMBAT.regenDelay) p.health = Math.min(COMBAT.maxHealth, p.health + COMBAT.regenRate * DT);
       p.rammedFor = Math.max(0, p.rammedFor - DT);
       // E gets you into the nearest vehicle with a free seat, or out of the one you're in. Only the
-      // server decides: a client finds out from its next snapshot.
+      // server decides: a client finds out from its next snapshot. In a race it's the restart key.
       if (input.use && !p.useHeld) {
-        if (p.vehicle >= 0) this.exitVehicle(p, events);
-        else this.enterVehicle(p, events);
+        if (this.mode === 'race') {
+          p.useHeld = true;
+          this.respawn(p);
+          events.push(...this.takePendingEvents());
+          return;
+        }
+        if (p.vehicle >= 0) this.driving.exitVehicle(p, events);
+        else this.driving.enterVehicle(p, events);
       }
       p.useHeld = input.use;
     }
+    p.overdrive = Math.max(0, p.overdrive - DT);
+    if (p.lapTime >= 0) p.lapTime += DT;
     p.yaw = input.yaw;
     p.pitch = input.pitch;
     if (p.vehicle >= 0) {
@@ -909,6 +684,11 @@ export class GameSim {
       applyGrapple(p.pos, p.vel, p.grapple, DT, hook?.kind === 'crate' ? GRAPPLE.cratePull : 1);
       if (hook && mode === 'authority') this.pullHooked(p, hook);
     }
+    // A flag carrier can't go faster than this, so one rocket jump doesn't cross the map.
+    if (p.flag >= 0) {
+      const speed = p.vel.length();
+      if (speed > CTF.carrierSpeedCap) p.vel.multiplyScalar(CTF.carrierSpeedCap / speed);
+    }
 
     // Move through the world with collision, then drop whatever velocity was blocked.
     _desired.copy(p.vel).multiplyScalar(DT);
@@ -931,6 +711,7 @@ export class GameSim {
       this.kill(p, this.recentAttacker(p), 'fall', events);
       return;
     }
+    if (this.mode === 'race' && mode === 'authority') this.rules.stepRace(p, events);
 
     this.stepWeapons(p, input, events, mode);
   }
@@ -940,7 +721,7 @@ export class GameSim {
     const v = this.vehicles[p.vehicle];
     const seat = v.config.seats[p.seat];
     p.grappleUsed = input.grapple; // holding it while getting out doesn't fire it
-    if (seat.role === 'driver') this.stepVehicle(v, input, events, mode);
+    if (seat.role === 'driver') this.driving.stepVehicle(v, input, events, mode);
     if (p.vehicle < 0 || !p.alive) return; // it blew up under them
     v.seatPosition(p.seat, p.pos);
     p.vel.copy(v.vel);
@@ -1149,6 +930,7 @@ export class GameSim {
     let best: string | null = null;
     let bestScore = Infinity;
     this.forEachTarget(p.id, view, p.vehicle, (id, center) => {
+      if (this.allies(p.id, id)) return;
       _toTarget.subVectors(center, eye);
       const z = _toTarget.dot(forward);
       if (z <= 0 || _toTarget.length() > seeker.lockRange) return;
@@ -1165,7 +947,7 @@ export class GameSim {
   }
 
   /** Where a living player is now (on a client, where it's drawing them), or undefined. */
-  private playerPosition(id: string): Vector3 | undefined {
+  playerPosition(id: string): Vector3 | undefined {
     if (this.remotePositions) return this.remotePositions.get(id);
     const p = this.players.get(id);
     return p?.alive ? p.pos : undefined;
@@ -1180,10 +962,7 @@ export class GameSim {
         return;
       }
       for (const p of this.players.values()) {
-        if (!p.alive) continue;
-        // Distance from the box to the core segment of the player's capsule.
-        const dy = Math.min(Math.max(box.pos.y - p.pos.y, -PLAYER.halfHeight), PLAYER.halfHeight);
-        if (_segment.set(p.pos.x, p.pos.y + dy, p.pos.z).distanceTo(box.pos) > reach) continue;
+        if (!p.alive || !this.rules.touches(p, box.pos, reach - PLAYER.radius)) continue;
         const weapon = this.swapWeapon(p);
         if (!weapon) continue;
         box.respawnIn = PICKUP.respawn;
@@ -1212,174 +991,8 @@ export class GameSim {
     return weapon;
   }
 
-  private stepProjectiles(events: SimEvent[], mode: StepMode) {
-    for (let i = this.projectiles.length - 1; i >= 0; i--) {
-      const r = this.projectiles[i];
-      r.prevPos.copy(r.pos);
-      const exploded =
-        r.kind === 'grenade'
-          ? this.stepGrenade(r, events, mode)
-          : r.kind === 'rocket' || r.kind === 'hypersonic'
-            ? this.stepRocket(r, events, mode)
-            : this.stepMissile(r, r.kind, events, mode);
-      if (exploded) this.projectiles.splice(i, 1);
-    }
-  }
-
-  /**
-   * Seeker missiles: the motor brings them up to speed, then they steer for their target at a
-   * limited turn rate. A javelin first climbs steeply toward its target until it reaches its apex
-   * (or gets so close it has to come down now), turns over, then dives. On the final approach a
-   * target that gets outside the seeker cone is lost, and the missile flies straight on, as it does
-   * when its target dies. True once it has exploded.
-   */
-  private stepMissile(m: Projectile, kind: SeekerId, events: SimEvent[], mode: StepMode): boolean {
-    const seeker = SEEKERS[kind];
-    const dir = _step.copy(m.vel).normalize();
-    const speed = Math.min(seeker.speed, m.vel.length() + seeker.boost * DT);
-    const target = m.target ? this.playerPosition(m.target) : undefined;
-    if (target) {
-      if (m.phase === 'climb') {
-        const dx = target.x - m.pos.x;
-        const dz = target.z - m.pos.z;
-        const horizontal = Math.hypot(dx, dz);
-        // Turn over at the apex, or sooner if the target is close: arcing over takes some distance,
-        // and the dive should still come down steeply rather than overshoot.
-        const radius = speed / (seeker.turnOverRate ?? seeker.turnRate);
-        const arc = radius * (Math.sin(seeker.climbAngle ?? 1) + Math.sin(DIVE_ANGLE));
-        const dive = Math.max(0, m.pos.y - target.y) / Math.tan(DIVE_ANGLE);
-        if (m.pos.y >= m.apex || horizontal < arc + dive) m.phase = 'turn';
-        else {
-          // Nose up at the climb angle, heading for the target.
-          const c = Math.cos(seeker.climbAngle ?? 1);
-          if (horizontal > 1e-3) _want.set((dx / horizontal) * c, Math.sin(seeker.climbAngle ?? 1), (dz / horizontal) * c);
-          else _want.set(0, 1, 0);
-        }
-      }
-      if (m.phase !== 'climb') _want.copy(target).sub(m.pos).normalize();
-      const angle = Math.acos(Math.min(1, Math.max(-1, dir.dot(_want))));
-      if (m.phase === 'turn' && angle < seeker.gimbal) m.phase = 'terminal';
-      else if (m.phase === 'terminal' && angle > seeker.gimbal) m.target = null; // shaken off
-      const maxTurn = (m.phase === 'turn' ? (seeker.turnOverRate ?? seeker.turnRate) : seeker.turnRate) * DT;
-      if (m.target && angle > 1e-4) dir.lerp(_want, Math.min(1, maxTurn / angle)).normalize();
-    }
-    m.vel.copy(dir).multiplyScalar(speed);
-    return this.stepRocket(m, events, mode);
-  }
-
-  /** Straight line at its current speed until it hits something. True once it has exploded. */
-  private stepRocket(r: Projectile, events: SimEvent[], mode: StepMode): boolean {
-    const travel = r.vel.length() * DT;
-    const dir = _step.copy(r.vel).normalize();
-    const normal = new Vector3();
-    // Other players are rewound by the shooter's lag, so a rocket that hits someone on the
-    // shooter's screen hits them here too.
-    const kind = this.aimHit(r.pos, dir, travel, r.ownerId, r.lag ? this.tick - r.lag : undefined, normal, r.from);
-    if (kind === 'player') {
-      r.pos.addScaledVector(dir, Math.max(0, _aim.dist - 0.1));
-      this.explode(r, normal, false, events, mode, { id: _aim.playerId, center: _aim.center.clone() });
-      return true;
-    }
-    if (kind === 'vehicle') {
-      r.pos.addScaledVector(dir, _aim.dist - 0.1);
-      this.explode(r, normal, true, events, mode, undefined, _aim.vehicleIndex);
-      return true;
-    }
-    if (kind !== 'none') {
-      r.pos.addScaledVector(dir, _aim.dist - 0.1);
-    } else {
-      r.pos.addScaledVector(dir, travel);
-      r.traveled += travel;
-      r.life -= DT;
-      if (r.life > 0) return false;
-      normal.copy(dir).negate();
-    }
-    this.explode(r, normal, true, events, mode);
-    return true;
-  }
-
-  /**
-   * Gravity, then a sweep along this tick's motion. Grenades bounce off surfaces, so they can be
-   * banked around corners. A player they touch sets them off once they've flown GRENADE.armDistance;
-   * closer than that they bounce off the player too, hurting them. Otherwise the fuse sets them off.
-   * True once it has exploded.
-   */
-  private stepGrenade(g: Projectile, events: SimEvent[], mode: StepMode): boolean {
-    g.vel.y -= GRAVITY * DT;
-    g.life -= DT;
-    const speed = g.vel.length();
-    const travel = speed * DT;
-    if (travel < 1e-6) return this.fuse(g, events, mode);
-    const dir = _step.copy(g.vel).divideScalar(speed);
-    const normal = new Vector3();
-    // The ray reaches a radius past the center's new spot, so the grenade's surface stops at walls.
-    const kind = this.aimHit(g.pos, dir, travel + GRENADE.radius, g.ownerId, g.lag ? this.tick - g.lag : undefined, normal, g.from);
-    if (kind === 'none') {
-      g.pos.addScaledVector(dir, travel);
-      g.traveled += travel;
-      return this.fuse(g, events, mode);
-    }
-
-    const dist = Math.max(0, _aim.dist - GRENADE.radius);
-    g.pos.addScaledVector(dir, dist);
-    g.traveled += dist;
-    const player = kind === 'player' ? { id: _aim.playerId, center: _aim.center.clone() } : undefined;
-    if (player && isArmed(g)) {
-      this.explode(g, normal, false, events, mode, player);
-      return true;
-    }
-    if (kind === 'vehicle' && isArmed(g)) {
-      this.explode(g, normal, true, events, mode, undefined, _aim.vehicleIndex);
-      return true;
-    }
-
-    // Not armed yet: a player hit point blank takes a knock and some damage, once.
-    if (player && player.id !== g.struck) {
-      g.struck = player.id;
-      const target = this.players.get(player.id);
-      if (target) {
-        target.vel.addScaledVector(dir, GRENADE.impactKnockback);
-        target.grounded = false;
-        if (mode === 'authority') this.damage(target, GRENADE.impactDamage, g.ownerId, events, 'grenade');
-      }
-    }
-    // Bounce off the surface or player: lose some of the speed into it, and a little along it.
-    const into = -g.vel.dot(normal);
-    if (into > 0) {
-      g.vel.addScaledVector(normal, into).multiplyScalar(GRENADE.friction).addScaledVector(normal, into * GRENADE.restitution);
-      if (into > 2) events.push({ type: 'bounce', pos: g.pos.clone(), normal, ownerId: g.ownerId, shot: g.shot, speed: into });
-    }
-    g.pos.addScaledVector(normal, 0.01); // off the surface, so next tick's ray doesn't start inside it
-    return this.fuse(g, events, mode);
-  }
-
-  /** A grenade whose fuse has run out explodes where it is. True if it did. */
-  private fuse(g: Projectile, events: SimEvent[], mode: StepMode): boolean {
-    if (g.life > 0) return false;
-    this.explode(g, new Vector3(0, 1, 0), false, events, mode);
-    return true;
-  }
-
-  /**
-   * `direct`: the player the projectile hit, at the (possibly rewound) position it hit them at.
-   * `directVehicle`: the vehicle it hit, which takes the full blast.
-   */
-  private explode(
-    r: Projectile,
-    normal: Vector3,
-    surface: boolean,
-    events: SimEvent[],
-    mode: StepMode,
-    direct?: { id: string; center: Vector3 },
-    directVehicle = -1,
-  ) {
-    const blast = BLASTS[r.kind];
-    this.blast(r.pos, blast, r.ownerId, r.shot, r.power, events, mode, direct, directVehicle);
-    events.push({ type: 'explosion', pos: r.pos.clone(), normal, surface, ownerId: r.ownerId, shot: r.shot, radius: blast.radius });
-  }
-
   /** Knockback and damage for everything in reach of a blast. `ownerId` is '' for one nobody set off. */
-  private blast(
+  blast(
     at: Vector3,
     blast: Blast,
     ownerId: string,
@@ -1391,9 +1004,12 @@ export class GameSim {
     directVehicle = -1,
   ) {
     const radius = blast.radius;
+    // Overdrive: the shooter's blasts hit other players harder.
+    const boosted = (this.players.get(ownerId)?.overdrive ?? 0) > 0;
 
     for (const p of this.players.values()) {
       if (!p.alive) continue;
+      if (this.mode === 'race' && p.id !== ownerId) continue; // racers only blast themselves along
       // Judge a direct hit where it landed, not where the target has moved on to since.
       const center = direct?.id === p.id ? direct.center : p.pos;
       const dist = center.distanceTo(at);
@@ -1408,18 +1024,20 @@ export class GameSim {
         const scale = flat > 1e-6 ? Math.sqrt(1 - blast.lift * blast.lift) / flat : 0;
         _dir.set(_dir.x * scale, blast.lift, _dir.z * scale);
       }
-      const boost = p.id === ownerId ? blast.selfKnockback : 1;
+      const self = p.id === ownerId;
+      const boost = self ? blast.selfKnockback : boosted ? ITEMS.overdrive.knockback : 1;
       p.vel.addScaledVector(_dir, blast.knockback * boost * falloff * power);
       p.grounded = false;
       events.push({ type: 'knockback', playerId: p.id, strength: falloff, sourceId: ownerId, shot });
       // Health is server-only: clients show what the server says, a round trip later.
-      if (mode === 'authority' && (p.id !== ownerId || COMBAT.selfDamage)) {
-        this.damage(p, Math.round(blast.damage * falloff * power), ownerId || p.id, events, BLAST_CAUSE.get(blast) ?? 'vehicle');
+      if (mode === 'authority' && (!self || COMBAT.selfDamage)) {
+        const amount = blast.damage * falloff * power * (boosted && !self ? ITEMS.overdrive.damage : 1);
+        this.damage(p, Math.round(amount), ownerId || p.id, events, BLAST_CAUSE.get(blast) ?? 'vehicle');
       }
     }
 
     for (const v of this.vehicles) {
-      if (!v.alive) continue;
+      if (!v.alive || this.mode === 'race') continue;
       // Distance to its surface, roughly: from its center, less the radius of a ball that fits inside.
       const centerDist = v.pos.distanceTo(at);
       const dist = Math.max(0, centerDist - Math.min(...v.config.size) / 2);
@@ -1431,7 +1049,7 @@ export class GameSim {
       v.vel.addScaledVector(_dir, blast.knockback * falloff * power * v.config.knockback);
       // Shots from its own riders don't damage it.
       if (mode === 'authority' && !v.seats.includes(ownerId)) {
-        this.damageVehicle(v, blast.damage * falloff * power * VEHICLE_DAMAGE, ownerId || null, events);
+        this.driving.damageVehicle(v, blast.damage * falloff * power * VEHICLE_DAMAGE, ownerId || null, events);
       }
     }
 
@@ -1439,10 +1057,19 @@ export class GameSim {
     if (mode === 'authority') this.pushCrates(at, blast, power);
   }
 
-  private damage(p: PlayerSim, amount: number, sourceId: string, events: SimEvent[], cause: DeathCause) {
-    if (amount <= 0 || p.protectedFor > 0) return;
+  damage(p: PlayerSim, amount: number, sourceId: string, events: SimEvent[], cause: DeathCause) {
+    if (amount <= 0 || p.protectedFor > 0 || this.mode === 'race' || this.allies(sourceId, p.id)) return;
     // Finishing yourself off right after someone hit you still counts as their kill.
     const killer = sourceId === p.id ? this.recentAttacker(p) : sourceId;
+    // Armor soaks up part of every hit while it lasts.
+    if (p.armor > 0) {
+      const soaked = Math.min(p.armor, amount * ITEMS.armor.absorb);
+      p.armor -= soaked;
+      amount = Math.round(amount - soaked);
+      if (amount <= 0) return;
+    }
+    // Reported as what was actually taken: a 200 damage hit on someone with 30 health did 30.
+    const taken = Math.min(amount, Math.ceil(Math.max(p.health, 0)));
     p.health -= amount;
     p.sinceDamaged = 0;
     if (sourceId !== p.id) {
@@ -1450,7 +1077,7 @@ export class GameSim {
       p.sinceAttacked = 0;
     }
     const midair = sourceId !== p.id && this.isMidair(p, cause);
-    events.push({ type: 'damaged', playerId: p.id, sourceId, amount, midair });
+    events.push({ type: 'damaged', playerId: p.id, sourceId, amount: taken, midair });
     if (p.health <= 0) this.kill(p, killer, cause, events, midair);
   }
 
@@ -1465,18 +1092,25 @@ export class GameSim {
     return this.clearDistance(p.pos, _down, MIDAIR_HEIGHT + 1) >= MIDAIR_HEIGHT;
   }
 
-  private kill(p: PlayerSim, killerId: string | null, cause: DeathCause, events: SimEvent[], midair = false) {
-    if (p.vehicle >= 0) this.leaveSeat(p);
+  kill(p: PlayerSim, killerId: string | null, cause: DeathCause, events: SimEvent[], midair = false) {
+    if (p.vehicle >= 0) this.driving.leaveSeat(p);
+    if (p.flag >= 0) this.rules.dropFlag(p, events);
+    const killer = killerId ? this.players.get(killerId) : undefined;
+    const distance = killer ? killer.pos.distanceTo(p.pos) : 0;
     p.alive = false;
     p.health = 0;
-    p.respawnIn = COMBAT.respawnDelay;
+    p.armor = 0;
+    p.overdrive = 0;
+    p.respawnIn = this.mode === 'race' ? RACE.respawnDelay : COMBAT.respawnDelay;
     p.vel.set(0, 0, 0);
     p.grapple = null;
     p.collider.setEnabled(false); // rockets fly through the dead
-    p.deaths++;
-    const killer = killerId ? this.players.get(killerId) : undefined;
-    if (killer) killer.kills++;
-    events.push({ type: 'killed', playerId: p.id, killerId, cause, midair });
+    if (this.mode !== 'race') p.deaths++;
+    if (killer) {
+      killer.kills++;
+      if (this.mode === 'tdm' && killer.team >= 0 && killer.team !== p.team) this.teamScores[killer.team]++;
+    }
+    events.push({ type: 'killed', playerId: p.id, killerId, cause, midair, distance, killerHealth: killer ? Math.max(0, Math.ceil(killer.health)) : 0 });
   }
 
   private pushCrates(at: Vector3, blast: Blast, power: number) {
@@ -1494,178 +1128,4 @@ export class GameSim {
     }
   }
 
-  /** One tick of a vehicle: its handling, then a move through the world with collision. */
-  private stepVehicle(v: VehicleSim, input: PlayerInput | null, events: SimEvent[], mode: StepMode) {
-    v.prevPos.copy(v.pos);
-    v.prevYaw = v.yaw;
-    if (!v.alive) {
-      if (mode === 'authority') {
-        v.respawnIn = Math.max(0, v.respawnIn - DT);
-        if (v.respawnIn === 0) v.reset();
-      }
-      return;
-    }
-    const wasGrounded = v.grounded;
-    const fallSpeed = -v.vel.y;
-    if (v.kind === 'car') updateCar(v, input, DT);
-    else updateHeli(v, input, DT);
-
-    // Same as players: `pos` is the truth, and a replay runs without stepping the world.
-    // Two passes: along the ground (with any climb), then down. In one pass, a move that's both
-    // forward and a little downward (gravity, every tick) sometimes comes back from the character
-    // controller with no forward part at all: the floor it's resting on is hit first and the slide
-    // along it is lost, and the buggy stops dead mid-drive.
-    v.place();
-    _desired.copy(v.vel).multiplyScalar(DT);
-    const fall = Math.min(_desired.y, 0);
-    _desired.y = Math.max(_desired.y, 0);
-    this.vehicleController.computeColliderMovement(v.collider, _desired, undefined, VEHICLE_MOVE_GROUPS);
-    const moved = this.vehicleController.computedMovement();
-    v.vel.x = clipVelocity(v.vel.x, _desired.x, moved.x);
-    v.vel.z = clipVelocity(v.vel.z, _desired.z, moved.z);
-    v.pos.x += moved.x;
-    v.pos.y += moved.y;
-    v.pos.z += moved.z;
-    let rose = moved.y;
-    v.place();
-    // (Only when it's actually coming down: an empty second pass would snap a climbing helicopter
-    // straight back to the ground.)
-    if (fall < 0) {
-      _desired.set(0, fall, 0);
-      this.vehicleController.computeColliderMovement(v.collider, _desired, undefined, VEHICLE_MOVE_GROUPS);
-      const dropped = this.vehicleController.computedMovement().y;
-      v.pos.y += dropped;
-      rose += dropped;
-      v.place();
-    }
-    v.vel.y = clipVelocity(v.vel.y, v.vel.y * DT, rose);
-    v.grounded = this.vehicleController.computedGrounded();
-    if (v.kind === 'car') this.tiltCar(v);
-
-    if (mode !== 'authority') return;
-    if (v.grounded && !wasGrounded && fallSpeed > v.config.crashSpeed) {
-      this.damageVehicle(v, (fallSpeed - v.config.crashSpeed) * 15, null, events);
-    }
-    if (v.alive && v.kind === 'car') this.ramPlayers(v, events);
-    if (v.alive && v.pos.y < this.map.killY) this.destroyVehicle(v, events);
-  }
-
-  /** Leans the buggy's body to match the ground under its corners (for looks: the collider stays level). */
-  private tiltCar(v: VehicleSim) {
-    if (!v.grounded) return; // mid-air it keeps the tilt it left the ground with
-    const [w, , l] = v.config.size;
-    const front = this.groundBelow(v, 0, -l / 2 + 0.4);
-    const back = this.groundBelow(v, 0, l / 2 - 0.4);
-    const left = this.groundBelow(v, -w / 2 + 0.3, 0);
-    const right = this.groundBelow(v, w / 2 - 0.3, 0);
-    const pitch = front !== null && back !== null ? Math.atan2(front - back, l - 0.8) : 0;
-    const roll = left !== null && right !== null ? Math.atan2(right - left, w - 0.6) : 0;
-    v.pitch += (pitch - v.pitch) * 0.3;
-    v.roll += (roll - v.roll) * 0.3;
-  }
-
-  /** Height of the ground under a point in the vehicle's frame, or null if there's none close. */
-  private groundBelow(v: VehicleSim, x: number, z: number): number | null {
-    v.toWorld([x, 0, z], _rayOrigin);
-    _rayDir.set(0, -1, 0);
-    const hit = this.world.castRay(_ray, v.config.size[1] / 2 + 1.5, true, undefined, VEHICLE_MOVE_GROUPS, v.collider);
-    return hit ? _rayOrigin.y - hit.timeOfImpact : null;
-  }
-
-  /** A buggy going fast enough runs over anyone it reaches: launched along its path and hurt by its speed. */
-  private ramPlayers(v: VehicleSim, events: SimEvent[]) {
-    const speed = Math.hypot(v.vel.x, v.vel.z);
-    if (speed < CAR.ramSpeed) return;
-    const [w, h, l] = v.config.size;
-    v.rotation(_vq).invert();
-    for (const p of this.players.values()) {
-      if (!p.alive || p.vehicle >= 0 || p.rammedFor > 0) continue;
-      // Into the car's frame. Anyone standing on the roof is riding it, not in its way.
-      _toTarget.subVectors(p.pos, v.pos).applyQuaternion(_vq);
-      if (Math.abs(_toTarget.x) > w / 2 + PLAYER.radius || Math.abs(_toTarget.z) > l / 2 + PLAYER.radius) continue;
-      if (Math.abs(_toTarget.y) > h / 2 + PLAYER.halfHeight) continue;
-      p.rammedFor = RAM_COOLDOWN;
-      p.vel.set(v.vel.x * CAR.ramKnockback, Math.max(p.vel.y, 0) + CAR.ramLift, v.vel.z * CAR.ramKnockback);
-      p.grounded = false;
-      events.push({ type: 'rammed', playerId: p.id, vehicle: v.index, speed });
-      this.damage(p, Math.round((speed - CAR.ramSpeed) * CAR.ramDamage), v.driver ?? p.id, events, 'ram');
-    }
-  }
-
-  /** Gets in the nearest vehicle with a free seat, driving if nobody is. */
-  private enterVehicle(p: PlayerSim, events: SimEvent[]) {
-    let best: VehicleSim | null = null;
-    let bestDist = Infinity;
-    for (const v of this.vehicles) {
-      if (!v.alive || !v.seats.includes(null)) continue;
-      const dist = v.pos.distanceTo(p.pos);
-      if (dist < v.config.enterRange && dist < bestDist) {
-        best = v;
-        bestDist = dist;
-      }
-    }
-    if (!best) return;
-    const seat = best.seats.indexOf(null);
-    best.seats[seat] = p.id;
-    p.vehicle = best.index;
-    p.seat = seat;
-    if (p.grapple) {
-      p.grapple = null;
-      p.grappleCooldown = GRAPPLE.cooldown;
-      events.push({ type: 'grapple', playerId: p.id, attached: false });
-    }
-    p.lockTarget = null;
-    p.lockProgress = 0;
-    events.push({ type: 'entered', playerId: p.id, vehicle: best.index, seat });
-  }
-
-  /** Steps out beside your seat, or by another seat, or onto the roof: wherever there's room. Keeps the vehicle's momentum. */
-  private exitVehicle(p: PlayerSim, events: SimEvent[]) {
-    const v = this.vehicles[p.vehicle];
-    const spots: Vec3Tuple[] = [v.config.seats[p.seat].exit, ...v.config.seats.map((s) => s.exit), [0, v.config.size[1] / 2 + 1.2, 0]];
-    for (const spot of spots) {
-      v.toWorld(spot, _muzzle);
-      if (!this.world.intersectionWithShape(_muzzle, IDENTITY, p.collider.shape, undefined, PLAYER_COLLISION_GROUPS, p.collider)) break;
-    }
-    this.leaveSeat(p);
-    p.pos.copy(_muzzle);
-    p.prevPos.copy(p.pos);
-    p.vel.copy(v.vel);
-    p.grounded = false;
-    p.collider.setTranslation(p.pos);
-    p.body.setNextKinematicTranslation(p.pos);
-    events.push({ type: 'exited', playerId: p.id, vehicle: v.index });
-  }
-
-  private leaveSeat(p: PlayerSim) {
-    this.vehicles[p.vehicle].seats[p.seat] = null;
-    p.vehicle = -1;
-    p.seat = -1;
-  }
-
-  private damageVehicle(v: VehicleSim, amount: number, sourceId: string | null, events: SimEvent[]) {
-    if (!v.alive || amount <= 0) return;
-    v.health -= amount;
-    if (sourceId) {
-      v.lastAttacker = sourceId;
-      events.push({ type: 'vehicleHit', vehicle: v.index, sourceId, amount });
-    }
-    if (v.health <= 0) this.destroyVehicle(v, events);
-  }
-
-  /** Blows a vehicle up: whoever is inside dies, credited to whoever last damaged it, and the blast catches anyone nearby. */
-  private destroyVehicle(v: VehicleSim, events: SimEvent[]) {
-    v.alive = false;
-    v.health = 0;
-    v.respawnIn = v.config.respawn;
-    v.collider.setEnabled(false);
-    const killer = v.lastAttacker;
-    for (const id of v.seats) {
-      const p = id ? this.players.get(id) : undefined;
-      if (p) this.kill(p, killer === p.id ? null : killer, 'vehicle', events);
-    }
-    v.seats.fill(null);
-    this.blast(v.pos, VEHICLE_BLAST, killer ?? '', 0, 1, events, 'authority');
-    events.push({ type: 'vehicleDestroyed', vehicle: v.index, pos: v.pos.clone(), normal: new Vector3(0, 1, 0) });
-  }
 }

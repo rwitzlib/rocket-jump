@@ -4,6 +4,7 @@ import { TICK_RATE, DT, NET } from '../../shared/config';
 import {
   fromWireEvent,
   type ClientMessage,
+  type FlagState,
   type InputFrame,
   type MatchState,
   type ProjectileState,
@@ -43,6 +44,14 @@ export interface RemotePlayer {
   vehicle: number; // -1 on foot
   seat: number;
   hidden: boolean; // inside a vehicle's body, so their model isn't drawn
+  team: number;
+  overdrive: boolean;
+  flag: number; // the team whose flag they carry, -1 for none
+}
+
+/** A RemotePlayer with nothing set: someone just seen for the first time. */
+export function blankRemote(id: string): RemotePlayer {
+  return { id, pos: new Vector3(), yaw: 0, pitch: 0, anchor: null, alive: true, protected: false, grounded: true, primary: 'rocket', vehicle: -1, seat: -1, hidden: false, team: -1, overdrive: false, flag: -1 };
 }
 
 export class NetStats {
@@ -76,6 +85,12 @@ export class NetClient {
   scores: ScoreEntry[] = [];
   /** The match as of the newest snapshot. */
   match: MatchState | null = null;
+  /** Capture the flag: both flags as of the newest snapshot (not interpolated). */
+  flags: FlagState[] = [];
+  /** Other players' teams, for the sim (no locking onto teammates) and the HUD. */
+  readonly teams = new Map<string, number>();
+  /** Watching: nothing of ours to predict, everyone in `remotes`. */
+  readonly spectator: boolean;
 
   private seq: number;
   private pending: InputFrame[] = [];
@@ -84,6 +99,7 @@ export class NetClient {
   private latestAt = 0;
   private renderTick = -1;
   private lastEventTick = -1;
+  private ackedTick = -1; // spectators acknowledge snapshots on their own (players do it with their inputs)
   private timeline: WireEvent[] = []; // remote events waiting for the render clock to reach them
   private immediate: SimEvent[] = []; // events about us, shown as soon as they arrive
   private projectileCache = new Map<number, Projectile>();
@@ -98,11 +114,20 @@ export class NetClient {
     private readonly send: (msg: ClientMessage) => void,
     /** Input numbering carries on across map changes: the server remembers the last one it saw. */
     startSeq = 0,
+    spectator = false,
   ) {
     this.seq = startSeq;
+    this.spectator = spectator;
     this.me = sim.addPlayer(id);
+    if (spectator) {
+      // Parked out of the way: a spectator has no player, but the game reads `me` in places.
+      this.me.alive = false;
+      this.me.collider.setEnabled(false);
+      this.me.respawnIn = Infinity;
+    }
     sim.remotePositions = this.alivePositions;
     sim.remoteProjectiles = this.remoteProjectiles;
+    sim.remoteTeams = this.teams;
     // Crates are simulated by the server. Here they're just obstacles placed from snapshots.
     for (const crate of sim.crates) crate.setBodyType(RAPIER.RigidBodyType.KinematicPositionBased, true);
   }
@@ -117,10 +142,16 @@ export class NetClient {
     if (this.match?.phase === 'intermission') input = freeze(input);
     // Tells the server what we were looking at, so it judges our hooks and rockets against that.
     if (this.renderTick >= 0) input.view = Math.round(this.renderTick * 100) / 100;
+    // Predict with exactly what the server will get: aim goes over the wire as 32-bit floats, and
+    // movement in 127ths (see wire.ts).
+    input.yaw = Math.fround(input.yaw);
+    input.pitch = Math.fround(input.pitch);
+    input.forward = Math.round(input.forward * 127) / 127;
+    input.right = Math.round(input.right * 127) / 127;
     this.pending.push({ seq: ++this.seq, input });
     if (this.pending.length > MAX_PENDING) this.pending.shift();
     this.stats.pending = this.pending.length;
-    this.send({ type: 'input', frames: this.pending.slice(-NET.inputRedundancy) });
+    this.send({ type: 'input', frames: this.pending.slice(-NET.inputRedundancy), snap: Math.max(0, this.latestTick) });
     this.me.seq = this.seq;
     const events = this.sim.predict(this.me, input).filter((e) => this.firstSighting(e));
     if (this.exploded.size > 64) {
@@ -155,9 +186,14 @@ export class NetClient {
     this.stats.serverInput = msg.input;
     this.scores = msg.scores;
     this.match = msg.match;
+    this.flags = msg.flags;
     msg.pickups.forEach((respawnIn, i) => {
       if (this.sim.pickups[i]) this.sim.pickups[i].respawnIn = respawnIn;
     });
+    msg.items.forEach((respawnIn, i) => {
+      if (this.sim.items[i]) this.sim.items[i].respawnIn = respawnIn;
+    });
+    for (const s of msg.scores) if (s.id !== this.id) this.teams.set(s.id, s.team);
     this.reconcile(msg);
 
     for (const e of msg.events) {
@@ -181,7 +217,11 @@ export class NetClient {
         e.type === 'pickup' ||
         e.type === 'entered' ||
         e.type === 'exited' ||
-        e.type === 'rammed';
+        e.type === 'rammed' ||
+        e.type === 'item' ||
+        e.type === 'flag' ||
+        e.type === 'checkpoint' ||
+        e.type === 'lap';
       if (unpredicted && this.firstSighting(sim)) {
         this.immediate.push(sim);
       }
@@ -232,6 +272,10 @@ export class NetClient {
   update(dt: number, now: number): SimEvent[] {
     const events = this.immediate;
     this.immediate = [];
+    if (this.spectator && this.latestTick > this.ackedTick) {
+      this.ackedTick = this.latestTick;
+      this.send({ type: 'ack', tick: this.latestTick });
+    }
     this.visualOffset.multiplyScalar(Math.exp(-dt * CORRECTION_RATE));
     this.renderProjectiles.length = 0;
     this.renderProjectiles.push(...this.sim.projectiles);
@@ -271,7 +315,7 @@ export class NetClient {
       const pa = a.players.find((p) => p.id === pb.id) ?? pb;
       let r = this.remotes.get(pb.id);
       if (!r) {
-        r = { id: pb.id, pos: new Vector3(), yaw: 0, pitch: 0, anchor: null, alive: true, protected: false, grounded: true, primary: pb.primary, vehicle: -1, seat: -1, hidden: false };
+        r = blankRemote(pb.id);
         this.remotes.set(pb.id, r);
       }
       // Dying or respawning is a teleport: show one end or the other, never a slide between them.
@@ -285,6 +329,9 @@ export class NetClient {
       r.primary = t < 0.5 ? pa.primary : pb.primary;
       r.vehicle = t < 0.5 ? pa.vehicle : pb.vehicle;
       r.seat = t < 0.5 ? pa.seat : pb.seat;
+      r.team = pb.team;
+      r.overdrive = t < 0.5 ? pa.overdrive : pb.overdrive;
+      r.flag = t < 0.5 ? pa.flag : pb.flag;
       r.hidden = r.vehicle >= 0 && !!this.sim.vehicles[r.vehicle]?.config.seats[r.seat]?.hidden;
       // Anchors move when hooked into a player or crate, so blend them when both ends have one.
       if (pa.anchor && pb.anchor) (r.anchor ??= new Vector3()).set(...pa.anchor).lerp(_v.set(...pb.anchor), t);

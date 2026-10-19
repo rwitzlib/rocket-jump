@@ -103,6 +103,18 @@ export const SKYREACH: MapDef = {
   crates,
   spawns: quad([facingCenter([-8, O_TOP + 1, 60]), facingCenter([6, O_TOP + 1, 52])], (s, k) => facingCenter(turnPos(s.pos, k))),
   pickups: [[0, 2.5, 0], ...quad<Vec3Tuple>([[52, PERCH_TOP + 1.3, 52]], turnPos)],
+  items: [
+    ...quad<Vec3Tuple>([[8, 0, -8]], turnPos).map((pos) => ({ kind: 'health' as const, pos })),
+    { kind: 'armor', pos: [10, O_TOP + 14.8, 64] },
+    { kind: 'armor', pos: [-10, O_TOP + 14.8, -64] },
+    { kind: 'overdrive', pos: [0, 20, 6] }, // on top of the crossed arches
+  ],
+  flags: [[-1, O_TOP, 62], [1, O_TOP, -62]],
+  // Out to a crystal perch, over the arches, the far perch, a watchtower, and back round the bridges.
+  race: {
+    start: [-8, O_TOP + 1, 60],
+    rings: [[-4, O_TOP + 2.5, 50], [52, PERCH_TOP + 2, 52], [0, 21.5, 0], [-52, PERCH_TOP + 2, -52], [-9, O_TOP + 16.5, -66]],
+  },
   // Deep, so a fall leaves about three seconds to grapple the rocks or a bridge and climb back.
   killY: -100,
   botOrbit: 57,

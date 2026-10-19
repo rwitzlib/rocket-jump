@@ -118,11 +118,23 @@ export class ViewModel {
     this.grappleKick = 1;
   }
 
-  /** The primary weapon to hold. Changing it plays the swap. */
-  setPrimary(weapon: WeaponId) {
-    if (weapon === this.wanted || !this.launchers[weapon]) return;
+  /** The primary weapon to hold. Changing it plays the swap, unless `instant` (a cut to someone else's view). */
+  setPrimary(weapon: WeaponId, instant = false) {
+    if (!this.launchers[weapon]) return;
+    if (instant) {
+      this.wanted = weapon;
+      this.swap = 0;
+      if (this.shown !== weapon) this.show(weapon);
+      return;
+    }
+    if (weapon === this.wanted) return;
     this.wanted = weapon;
     this.swap = 1;
+  }
+
+  /** The weapon in hand (for tests and the console). */
+  get primary(): WeaponId {
+    return this.shown;
   }
 
   private show(weapon: WeaponId) {

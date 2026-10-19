@@ -18,7 +18,7 @@ export class Chat {
   constructor(private readonly input: Input) {
     this.box.maxLength = MAX_CHAT;
     document.addEventListener('keydown', (e) => {
-      if (!this.send || isTyping(e.target) || !document.pointerLockElement) return;
+      if (!this.send || isTyping(e.target) || !this.input.active) return;
       if (e.code === 'KeyT' || e.code === 'Enter') {
         e.preventDefault();
         this.open();

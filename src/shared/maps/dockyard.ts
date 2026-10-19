@@ -230,6 +230,23 @@ export const DOCKYARD: MapDef = {
     [44, 1.3, 20],
     [-44, 1.3, -20],
   ],
+  items: [
+    { kind: 'health', pos: [10, 0, 15] },
+    { kind: 'health', pos: [-10, 0, -15] },
+    { kind: 'health', pos: [-44, 0, 20] },
+    { kind: 'health', pos: [44, 0, -20] },
+    { kind: 'health', pos: [0, 0, 25] },
+    { kind: 'armor', pos: [-30, 16.5, -75] },
+    { kind: 'armor', pos: [47, 12.5, -75] },
+    { kind: 'overdrive', pos: [108, 37.2, 0] }, // the far end of the crane boom, out over the water
+  ],
+  // The north quay against the lookout tower's door.
+  flags: [[0, 0, 62], [0, 0, -58]],
+  // The pile, a crane's cross tie, the end of the boom, the lookout, the warehouse roof, the jetty.
+  race: {
+    start: [-20, 1, 66],
+    rings: [[-16, 2.5, 56], [0, 10.5, 0], [67, 18.5, -20], [95, 39, 0], [0, 26.5, -72], [-47, 18.5, -68], [-40, 2, 106]],
+  },
   vehicles: [
     { kind: 'car', pos: [-50, 0.7, 66], yaw: Math.PI / 2 },
     { kind: 'car', pos: [52, 0.7, 40], yaw: 0 },

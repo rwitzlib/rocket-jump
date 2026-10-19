@@ -12,6 +12,7 @@ export default defineConfig({
     proxy: {
       '/ws': { target: `ws://${GAME_SERVER}`, ws: true },
       '/status': { target: `http://${GAME_SERVER}` },
+      '/rooms': { target: `http://${GAME_SERVER}` },
     },
   },
 });

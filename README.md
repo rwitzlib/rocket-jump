@@ -6,10 +6,27 @@ Built with **Three.js** (rendering), **Rapier** (physics, WASM), **TypeScript** 
 
 ## Playing
 
-Rocket Jump is a free-for-all deathmatch for up to 12 people per server. Bots fill in so there's always someone to
-fight, and they step aside as people join. A match is first to 20 kills (25 on Arena, 15 on the bigger Citadel), or
-the most kills after 8 minutes. Then come 15 seconds of results (a podium, plus awards for the most airshots, the
-longest streak and the best K/D), and the next map in the rotation:
+Rocket Jump is an arena shooter for up to 12 people per server, in four modes:
+
+- **Deathmatch**: everyone for themselves. First to 20 kills (25 on Arena, 15 on the bigger Citadel), or the most
+  kills after 8 minutes.
+- **Team Deathmatch**: red against blue, first team to 1.6x the deathmatch frag limit. No friendly fire, though your
+  rockets still shove teammates (handy for a boost).
+- **Capture the Flag**: take the other team's flag from their base and bring it to yours while your own is home.
+  First to 3 captures, or the most after 10 minutes. Touch your own flag where it lies to send it home; a dropped flag
+  goes home by itself after 20 s. A carrier is held to 26 m/s, so one rocket jump can't cross the map. You spawn on
+  your own half.
+- **Rocket Race**: a time trial. Fly through the checkpoint rings in order; the start gate starts the clock and
+  finishes each lap. Racers are ghosts to each other (no damage, no shoving, no hooking each other), E restarts from
+  the start, and the best lap after 5 minutes wins. Split times at each ring compare with your best lap, and the
+  ghost of that lap flies alongside you (kept in your browser, per map).
+
+In team modes, names over teammates are white and over enemies red.
+
+Bots fill in so there's always someone to fight, and they step aside as people join. They keep teams even, and in
+CTF most of them attack (go for the flag, escort whoever has it, run it home) while the rest defend. They sit out
+races. After a match come 15 seconds of results (a podium, the team score, plus awards for the most airshots, the
+longest streak and the best K/D), and the next map and mode in the rotation:
 
 - **Dockyard**: a sunny 160 m harbor. Container stacks, two giant cranes to swing from (the big one's boom runs out
   over the sea), warehouse roofs, buggies, and a long drop into the water off three sides.
@@ -21,9 +38,33 @@ longest streak and the best K/D), and the next map in the rotation:
 
 The menu shows one of the new maps drifting by behind it.
 
-From the menu, pick a name, then **Play online** (the server this page came from) or **Practice vs bots** (runs a
-server inside the page, no network needed). **Settings** has mouse sensitivity, field of view, volume, graphics (Low turns off outlines and glow for slower machines) and invert Y,
-all remembered in the browser.
+From the menu, pick a name, then **Play online** (the server this page came from), **Watch online**, or
+**Practice** (runs a server inside the page, no network needed) with the mode, map, bots and difficulty of your
+choice.
+
+**Servers and rooms.** One server hosts several games at once. The main room plays the server's rotation; anyone can
+open another from **Servers and rooms** on the menu, picking its mode, map (or every map in turn) and bots. A public
+room is listed there for everyone to join or watch; a private one only by its five-letter code. In a room, Esc shows
+its code and a **Copy invite link** button: the link (`?room=CODE`) drops whoever opens it straight into the room. A
+room closes after two minutes with nobody in it. **Settings** has mouse sensitivity, field of view, volume, graphics (Low turns off outlines and glow for slower
+machines), invert Y and the killcam, all remembered in the browser.
+
+**No mouse capture?** The game normally captures the mouse (pointer lock). Browsers that won't (automated ones, like
+an AI agent driving the page, and some embedded ones) still get to play: clicking to play starts the game without
+it. The arrow keys look around, small mouse movements over the game do too, clicking (or F) fires, right click (or Q)
+grapples, and Esc pauses. Each click on the game tries for the capture again.
+
+**Spectating.** Watch online, or press Esc and Spectate in a game. Click to follow the next player (right click, the
+one before), Space for a free camera you fly where you look with WASD, and J (or Esc, Join the game) to play. Someone
+joining a full server watches until a place comes free, then gets in automatically.
+
+**Items.** Besides the mystery boxes, maps have health packs (+50, up to 150; anything over 100 drains away), armor
+(+50, up to 100; it soaks up two thirds of each hit until it runs out) and one **overdrive** somewhere hard to reach:
+15 seconds of double damage and 1.5x knockback against other players, with a pink glow so everyone can see it coming.
+
+**Dying.** The camera watches your body fly, then the **killcam** replays your last couple of seconds from your
+killer's eyes, their weapon in hand (kicking as they fire) and their grapple rope out when they swung. The death screen says what killed you, from how far, how much health your killer had left, and who
+else hurt you that life. You respawn 3.5 seconds after dying.
 
 The announcer rewards what the game is about: an **AIRSHOT** medal and bell for hitting someone in midair, multi kills
 (kills within 3 s of each other), sprees at 5/10/15/20/25 kills in one life, **SHUTDOWN** for ending someone's streak,
@@ -47,18 +88,23 @@ Settings are environment variables:
 |---|---|---|
 | `PORT` | 8080 | HTTP and WebSocket port |
 | `HOST` | 0.0.0.0 | interface to listen on |
-| `MAPS` | dockyard,temple,skyreach,arena,citadel | map rotation |
-| `TIME_LIMIT` | 480 | seconds per match |
-| `FRAG_LIMIT` | per map | kills to win (20 on the new maps, 25 on Arena, 15 on Citadel) |
+| `MAPS` | dockyard,temple:ctf,skyreach:tdm,arena,citadel:ctf | rotation: maps, each with an optional `:mode` (ffa, tdm, ctf, race) |
+| `MODE` | ffa | the mode for rotation entries that don't name one |
+| `TIME_LIMIT` | per mode | seconds per match (8 minutes; CTF 10, races 5) |
+| `FRAG_LIMIT` | per map | kills to win (20 on the new maps, 25 on Arena, 15 on Citadel; 1.6x that in TDM) |
 | `INTERMISSION` | 15 | seconds on the results screen |
 | `MIN_PLAYERS` | 4 | bots fill the game up to this many players (0 for no bots) |
 | `MAX_PLAYERS` | 12 | people allowed in at once |
+| `MAX_SPECTATORS` | 8 | people allowed to watch on top of that |
+| `MAX_ROOMS` | 8 | rooms at once, the main one included (each runs a match: about 1 ms a tick with 12 players) |
 | `BOT_SKILL` | auto | easy, normal or hard. Auto starts easy and steps up while people are winning, down while they're losing |
 | `STATIC_DIR` | dist | where the built client is |
 
-`GET /status` returns the map, who's playing, the match state and the average tick time as JSON. `GET /health`
-answers `ok` for load balancers. The server logs one JSON line per event: join, leave, and a status line every minute
-while anyone is on.
+The rotation and match settings are the main room's. `GET /rooms` lists the public rooms as JSON, and `POST /rooms`
+opens one (`{ name, mode, map, bots, skill, private }`, at most three a minute from one address).
+`GET /status` returns the main room's map and mode, who's playing and watching, the rotation, the match state, how
+many rooms are open, and the average tick time as JSON. `GET /health` answers `ok` for load balancers. The server logs one JSON line per event: join,
+leave, and a status line every minute while anyone is on (with the average outgoing bandwidth).
 
 **Hosting publicly.** Anything that runs Node 20+ works, and a `Dockerfile` is included:
 
@@ -68,10 +114,11 @@ docker run -p 8080:8080 rocket-jump
 ```
 
 Put it behind a TLS-terminating proxy (Caddy, nginx, or a platform load balancer) that forwards WebSocket upgrades.
-Served over HTTPS, the page uses `wss://` automatically. One process runs one match. The simulation takes about 1 ms
-of CPU per 60 Hz tick with 11 players on Citadel, so a small VM is plenty. Each player costs roughly 30-100 KB/s
-down (deflate-compressed JSON snapshots at 30 Hz). The server is authoritative: clients send only inputs, which are
-validated and clamped, and names and chat are sanitized and rate limited.
+Served over HTTPS, the page uses `wss://` automatically. One process runs all its rooms. A match takes about 1 ms
+of CPU per 60 Hz tick with 11 players on Citadel, so a small VM is plenty. Each player costs roughly 3-9 kB/s down
+(30 delta-compressed binary snapshots a second: see Netcode below) and about 4 kB/s up. The server is
+authoritative: clients send only inputs, which are validated and clamped, and names and chat are sanitized and rate
+limited.
 
 If a change breaks the protocol between client and server, bump `PROTOCOL_VERSION` in `shared/config.ts`, and pages
 still running the old build are told to reload.
@@ -82,35 +129,52 @@ still running the old build are told to reload.
 npm run dev          # the page with hot reload, at http://localhost:5173
 npm run dev:server   # the game server on :8080, restarting on changes; Vite proxies /ws and /status to it
 npm run typecheck
-npx tsx scripts/balance.ts citadel 6 8   # bot-only match at full speed: kill pace, death causes, airshots
+npm test                                        # the test suite: about 50 tests, a few seconds
+npx tsx scripts/balance.ts citadel 6 8          # bot-only match at full speed: kill pace, death causes, airshots
+npx tsx scripts/balance.ts temple 7 10 normal ctf # any mode: team modes also report team scores and flag play
+npx tsx scripts/wire-check.ts citadel 11 60      # round-trips every snapshot of a match through the wire format, and measures it
+npx tsx scripts/probe.ts temple 15,15 0,52       # the surfaces under points on a map, for placing things
 ```
 
-Use the balance script after tuning weapons or maps: if the leader can't reach the frag limit in the time limit,
-matches end on time and the race to the limit is lost.
+`npm test` runs `test/*.test.ts` with Node's own test runner: movement and weapons (jump heights, rocket jumps,
+determinism, the grapple, kill credit), the game modes (flags, team damage, items, race laps), the server's rules
+(full servers, spectators, bots, teams, the rotation), rooms, every map's data (spawns, items and flags on floors,
+race rings in open air), the wire format, and client prediction against the real server through the real wire
+format with latency, which has to agree to the millimeter.
 
-Practice needs only `npm run dev`. `?map=citadel` preselects the big map: 240 m square with a ring deck around a
-central spire, bridges out to four corner towers and beams up top to swing from. `?server=ws://host:port/ws` points
-Play online at a different server.
+Use the balance script after tuning weapons or maps: if the leader can't reach the frag limit in the time limit,
+matches end on time and the race to the limit is lost. Run the wire check after changing anything in a snapshot.
+
+Practice needs only `npm run dev`. `?map=citadel&mode=ctf` preselects the practice map and mode. Citadel is the big
+map: 240 m square with a ring deck around a central spire, bridges out to four corner towers and beams up top to swing
+from. `?server=ws://host:port/ws` points Play online at a different server.
+
+Each map says where its flag bases, race rings and items go (`flags`, `race` and `items` in its `MapDef`). A map
+without them still works: flags go on the two spawns farthest apart and the race visits every mystery box.
+`shared/modes.ts` has those defaults, which spawns belong to which team, and each mode's limits.
 
 | Control | Action |
 |---|---|
 | WASD | Move |
 | Mouse | Look |
 | Space | Jump (hold to bunny-hop) |
-| Left click | Fire primary weapon (seekers: hold a target in the lock box first) |
-| Right click / Shift | Grapple (hold) |
-| E | Get in / out of a vehicle |
+| Left click / F | Fire primary weapon (seekers: hold a target in the lock box first) |
+| Right click / Shift / Q | Grapple (hold) |
+| Arrow keys | Look around |
+| E | Get in / out of a vehicle; in a race, restart the lap |
 | Space / Shift | Helicopter: climb / descend (C works too) |
 | Tab (hold) | Scoreboard |
 | T / Enter | Chat |
 | M | Mute / unmute |
 | P | Frame-time overlay (long frames are also logged to the console) |
-| Esc | Pause menu |
+| Esc | Pause menu (Spectate is there) |
+| Spectating: click / right click | Follow the next / previous player |
+| Spectating: Space, J | Free camera; join the game |
 
 Aim at your feet and fire while jumping to rocket jump. Your own rockets never hurt you and launch you harder than
 they push others, so rocket jumping is free. WASD steers you in the air. The arcs around the crosshair show weapon
 cooldowns: rocket (1 s) on the right, grapple (0.6 s after letting go) on the left.
-Everyone has 100 health, which regenerates after 5 seconds without damage. You respawn 3 seconds after dying, with
+Everyone has 100 health, which regenerates after 5 seconds without damage. You respawn 3.5 seconds after dying, with
 3 seconds of spawn protection. Knocking someone off the map counts as your kill. All of this is tuned in `COMBAT` in
 `shared/config.ts`. The crosshair turns green when the grapple can reach.
 
@@ -144,7 +208,8 @@ straight on, and your warning goes away. Grapple sideways about a third of a sec
 that's a clean dodge, and against a Javelin it turns a kill into a wound. Too early and the missile turns back onto you;
 too late and it hits.
 
-Tuning is in `GRENADE`, `HYPERSONIC`, `SEEKERS`, `WEAPONS` and `PICKUP` in `shared/config.ts`.
+Tuning is in `GRENADE`, `HYPERSONIC`, `SEEKERS`, `WEAPONS`, `PICKUP` and `ITEMS` in `shared/config.ts`, and the
+modes in `MODES`, `TEAMS`, `TDM`, `CTF` and `RACE`.
 
 The grapple hooks players and crates as well as walls. Hooking a player is a tug of war: you're pulled in and they get
 dragged toward you. A hooked crate is reeled in with a fixed force, so loose crates fly at you while stacked or wedged
@@ -176,25 +241,39 @@ corrections, and everyone else sees it interpolated.
 ```
 src/
   shared/          # no DOM / rendering: runs in the browser and on the Node server
-    config.ts      # all gameplay tuning numbers, match rules (MATCH), protocol version
+    config.ts      # all gameplay tuning numbers, match rules (MATCH), modes, items, protocol version
+    modes.ts       # what each mode needs from a map: flag bases, team spawns, the race course; score and time limits
     types.ts       # PlayerInput, what a client sends each tick
     movement.ts    # Quake-style movement + grapple physics (pure functions)
     map.ts         # maps as plain data (boxes, crates, spawns, vehicles, scenery); Arena and Citadel
     maps/          # the newer maps (dockyard, temple, skyreach) and helpers for laying maps out
-    sim.ts         # GameSim: fixed 60 Hz authoritative simulation (players, vehicles, projectiles, pickups, explosions)
+    sim.ts         # GameSim: fixed 60 Hz authoritative simulation: the tick, players, weapons, combat
+    player.ts      # PlayerSim, and the PlayerState copy of it that goes to its own client
+    projectile.ts  # projectile types, blasts, seeker lock rules
+    flight.ts      # projectiles in flight: rockets, grenades, seeker missiles
+    driving.ts     # vehicles in the world: moving, running people over, getting in and out, blowing up
+    rules.ts       # per-mode rules: items, capture-the-flag flags, race checkpoints
+    events.ts      # SimEvent: what a tick reports
+    physics.ts     # collision groups and geometry helpers
     vehicle.ts     # VehicleSim and buggy / helicopter handling (velocity and heading, like movement.ts)
-    server.ts      # GameServer: joins, bots, matches, map rotation, snapshots (transport-agnostic)
+    server.ts      # GameServer: joins, spectators, teams, bots, matches, rotation, snapshots (transport-agnostic)
     protocol.ts    # messages, and validation of everything a client sends
+    wire.ts        # the binary, delta-compressed wire format for snapshots and inputs
+    rooms.ts       # several games per server: room codes, the public list, closing empty rooms
     bot.ts         # server-side bots
   server/
-    main.ts        # the dedicated server: HTTP for the built client, WebSockets at /ws, the tick loop
+    main.ts        # the dedicated server: HTTP for the built client and /rooms, WebSockets at /ws, the tick loop
+test/              # npm test (node:test, run with tsx)
   client/
     main.ts        # menus, settings, sessions (online or practice), the frame loop
     game.ts        # one map's game: scene, prediction, event handling, HUD updates
-    announcer.ts   # medals, sprees, lead changes
+    announcer.ts   # medals, sprees, lead changes, flag news
     chat.ts        # text chat
     settings.ts    # saved player preferences
-    hud.ts         # health, weapons, match bar, kill feed, scoreboard, results
+    hud.ts         # health and armor, weapons, match bar, flag status, race clock, markers, kill feed, death
+                   #   recap, scoreboard, results
+    killcam.ts     # records the last few seconds, to replay a death from the killer's eyes
+    objectives.ts  # flags and their bases, items, race rings, the best-lap ghost
     input.ts       # keyboard + pointer lock
     level.ts       # meshes for the map and crates, the sky, sun and fog
     surfaces.ts    # painted level textures (stone, brick, planks, containers...) drawn on canvases at startup
@@ -233,8 +312,19 @@ Your player is predicted locally and corrected against the server. Bots, rockets
 100ms in the past. The overlay in the bottom left (N toggles it) shows prediction errors, the server's input queue
 and bandwidth. `[` `]` change ping, `;` `'` change jitter and `L` cycles packet loss, all while you play.
 
-Code: `shared/server.ts` (transport-agnostic `GameServer`), `shared/protocol.ts` (messages), `client/net/`
-(loopback transport, `NetClient` prediction + interpolation, overlay).
+Code: `shared/server.ts` (transport-agnostic `GameServer`), `shared/protocol.ts` (messages), `shared/wire.ts` (the
+wire format), `client/net/` (loopback transport, `NetClient` prediction + interpolation, overlay).
+
+**The wire format.** Snapshots and inputs are binary; joins, chat, pings and welcomes stay JSON. Every input packet
+carries the newest snapshot tick the client has (spectators send a small `ack` instead), and the server codes each
+snapshot against that one: every record (a player, a crate, a score line, a vehicle) starts with a bitmask of the
+fields that changed since, positions go as millimeter offsets, and events the baseline carried aren't repeated. With
+no usable baseline (just joined, a new map) a snapshot goes out in full. What's only drawn is quantized (millimeters,
+milliradians); what a client predicts from (its own player, its own projectiles, a vehicle it drives) goes at full
+64-bit precision, and inputs are rounded to what the wire carries before the client predicts with them, so client
+and server simulate exactly the same numbers (a hair's difference in a cooldown or a position grows into a visible
+correction). On Citadel with 12 players that's about 670 bytes a snapshot against 9.5 kB of JSON, and 8 kB/s per
+player after the WebSocket's compression against 31 (`scripts/wire-check.ts` measures it).
 
 ## Roadmap
 
@@ -244,4 +334,6 @@ Code: `shared/server.ts` (transport-agnostic `GameServer`), `shared/protocol.ts`
 4. ~~Server-authoritative sim with client-side prediction and interpolation~~
 5. ~~Combat loop: health, damage, kills, respawns, scoreboard~~
 6. ~~Matches, menus, announcer, deployment~~
-7. Next: team modes (CTF suits the grapple), more maps, a server browser, binary snapshots
+7. ~~Team deathmatch, capture the flag, rocket races, spectating, killcam, items, binary snapshots~~
+8. ~~Rooms and a server browser, automated tests, the simulation split into parts~~
+9. Next: more maps, rebindable keys and gamepads, a list of servers across hosts

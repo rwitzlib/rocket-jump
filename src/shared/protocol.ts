@@ -1,11 +1,13 @@
 import { Vector3 } from 'three';
+import type { GameMode } from './config';
 import type { Vec3Tuple } from './map';
 import type { MissilePhase, PlayerState, ProjectileKind, SimEvent } from './sim';
 import type { PlayerInput, WeaponId } from './types';
 import type { VehicleState } from './vehicle';
 
-// Messages between client and server. Plain JSON-able data for now; a compact binary encoding can
-// replace this later without touching the code on either side of it.
+// Messages between client and server, as plain data. On the wire, snapshots and inputs are a
+// compact delta-coded binary format and the rest JSON (see wire.ts); the code on either side only
+// ever sees these shapes.
 
 /** One tick of input, numbered by the client so the server can acknowledge it. */
 export interface InputFrame {
@@ -16,6 +18,13 @@ export interface InputFrame {
 export interface InputMessage {
   type: 'input';
   frames: InputFrame[]; // the newest few inputs, oldest first
+  snap?: number; // the newest snapshot tick the client has: the server codes the next ones against it
+}
+
+/** A spectator sends no inputs, so it acknowledges snapshots with these instead. */
+export interface AckMessage {
+  type: 'ack';
+  tick: number;
 }
 
 /** The first thing a client sends. The server answers with `welcome`, or `rejected`. */
@@ -23,6 +32,13 @@ export interface JoinMessage {
   type: 'join';
   name: string;
   version: number; // PROTOCOL_VERSION
+  spectate: boolean; // watch instead of play
+}
+
+/** Switch between watching and playing. */
+export interface SpectateMessage {
+  type: 'spectate';
+  on: boolean;
 }
 
 /** Answers the server's ping, so it can measure each player's round trip. */
@@ -36,7 +52,7 @@ export interface ChatSendMessage {
   text: string;
 }
 
-export type ClientMessage = InputMessage | JoinMessage | PongMessage | ChatSendMessage;
+export type ClientMessage = InputMessage | JoinMessage | PongMessage | ChatSendMessage | SpectateMessage | AckMessage;
 
 export interface RemotePlayerState {
   id: string;
@@ -50,6 +66,9 @@ export interface RemotePlayerState {
   primary: WeaponId; // which weapon their model carries
   vehicle: number; // -1 on foot
   seat: number;
+  team: number; // -1 outside team modes
+  overdrive: boolean; // glowing with the overdrive
+  flag: number; // the team whose flag they carry, -1 for none
 }
 
 export interface ScoreEntry {
@@ -61,18 +80,32 @@ export interface ScoreEntry {
   bot: boolean;
   airshots: number; // kills on players in midair, this match
   bestStreak: number; // most kills in one life, this match
+  team: number; // -1 outside team modes
+  captures: number; // capture the flag
+  bestLap: number; // race: seconds, 0 for none yet
 }
 
 export type MatchPhase = 'playing' | 'intermission';
 
 export interface MatchState {
   id: number; // goes up by one every match
+  mode: GameMode;
   phase: MatchPhase;
   timeLeft: number; // seconds left in this phase
-  fragLimit: number;
+  scoreLimit: number; // kills (deathmatch), team kills (TDM) or captures (CTF) to win; 0 for none (race)
+  teamScores: [number, number]; // red, blue
   map: string;
   nextMap: string;
+  nextMode: GameMode;
   winnerId: string | null; // set during intermission
+  winnerTeam: number; // set during intermission in team modes; -1 for a draw
+}
+
+/** A capture-the-flag flag: where its foot is, who has it, and whether it's at its base. */
+export interface FlagState {
+  pos: Vec3Tuple;
+  carrier: string | null;
+  atHome: boolean;
 }
 
 export interface ProjectileState {
@@ -97,12 +130,14 @@ export type CrateState = number[];
 type WireOf<E> = E extends { pos: Vector3; normal: Vector3 } ? Omit<E, 'pos' | 'normal'> & { pos: Vec3Tuple; normal: Vec3Tuple } : E;
 export type WireEvent = WireOf<SimEvent> & { tick: number };
 
-/** Sent on joining, and again whenever the server changes map. */
+/** Sent on joining, and again whenever the server changes map or mode, or you start or stop spectating. */
 export interface WelcomeMessage {
   type: 'welcome';
   id: string;
   tick: number;
   map: string;
+  mode: GameMode;
+  spectator: boolean;
   match: MatchState;
 }
 
@@ -134,6 +169,8 @@ export interface SnapshotMessage {
   crates: CrateState[];
   vehicles: VehicleState[];
   pickups: number[]; // each mystery box's respawnIn: 0 while it's there to take
+  items: number[]; // each item's respawnIn, likewise
+  flags: FlagState[]; // red's then blue's (capture the flag only; empty otherwise)
   scores: ScoreEntry[]; // everyone, including the recipient
   match: MatchState;
   events: WireEvent[]; // the last NET.eventWindow ticks of events; clients skip ones they've seen
@@ -166,7 +203,11 @@ export function parseClientMessage(data: unknown): ClientMessage | null {
   const m = data as Record<string, unknown>;
   switch (m.type) {
     case 'join':
-      return { type: 'join', name: cleanText(m.name, MAX_NAME), version: finite(m.version, 0, 1e6) };
+      return { type: 'join', name: cleanText(m.name, MAX_NAME), version: finite(m.version, 0, 1e6), spectate: m.spectate === true };
+    case 'spectate':
+      return { type: 'spectate', on: m.on === true };
+    case 'ack':
+      return Number.isSafeInteger(m.tick) && (m.tick as number) >= 0 ? { type: 'ack', tick: m.tick as number } : null;
     case 'pong':
       return { type: 'pong', t: finite(m.t, 0, Number.MAX_SAFE_INTEGER) };
     case 'chat': {
@@ -193,13 +234,29 @@ export function parseClientMessage(data: unknown): ClientMessage | null {
         if (i.view !== undefined) input.view = finite(i.view, 0, 1e12);
         frames.push({ seq: f.seq, input });
       }
-      return { type: 'input', frames };
+      const snap = Number.isSafeInteger(m.snap) && (m.snap as number) >= 0 ? (m.snap as number) : undefined;
+      return { type: 'input', frames, snap };
     }
   }
   return null;
 }
 
 const tuple = (v: Vector3): Vec3Tuple => [v.x, v.y, v.z];
+
+/**
+ * Best first, by what wins the mode: kills (then fewest deaths) in deathmatch, captures then kills
+ * in capture the flag, the fastest lap in a race (no lap yet goes last).
+ */
+export function compareScores(mode: GameMode): (a: ScoreEntry, b: ScoreEntry) => number {
+  if (mode === 'race') return (a, b) => (a.bestLap || Infinity) - (b.bestLap || Infinity) || a.name.localeCompare(b.name);
+  if (mode === 'ctf') return (a, b) => b.captures - a.captures || b.kills - a.kills || a.deaths - b.deaths || a.name.localeCompare(b.name);
+  return (a, b) => b.kills - a.kills || a.deaths - b.deaths || a.name.localeCompare(b.name);
+}
+
+/** What a player's place is decided by, for the HUD: kills, captures, or a lap time. */
+export function hasScored(mode: GameMode, s: ScoreEntry): boolean {
+  return mode === 'race' ? s.bestLap > 0 : mode === 'ctf' ? s.captures > 0 || s.kills > 0 : s.kills > 0;
+}
 
 export function toWireEvent(e: SimEvent, tick: number): WireEvent {
   if (e.type === 'explosion' || e.type === 'bounce' || e.type === 'vehicleDestroyed') return { ...e, pos: tuple(e.pos), normal: tuple(e.normal), tick };

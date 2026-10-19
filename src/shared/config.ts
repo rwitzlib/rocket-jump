@@ -180,7 +180,57 @@ export const NET = {
 };
 
 /** Bump whenever client and server stop understanding each other; mismatched clients are told to reload. */
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
+
+/**
+ * - ffa: free-for-all deathmatch, first to the frag limit.
+ * - tdm: two teams, first team to the frag limit. No friendly fire (your rockets still shove teammates).
+ * - ctf: capture the flag. Take the other team's flag from their base and bring it to yours, while
+ *   your own flag is home.
+ * - race: a time trial round a loop of checkpoint rings. Nobody can hurt anyone, best lap wins.
+ */
+export type GameMode = 'ffa' | 'tdm' | 'ctf' | 'race';
+
+export const MODES: Record<GameMode, { name: string; short: string; teams: boolean; blurb: string }> = {
+  ffa: { name: 'Deathmatch', short: 'DM', teams: false, blurb: 'Everyone for themselves. First to the frag limit.' },
+  tdm: { name: 'Team Deathmatch', short: 'TDM', teams: true, blurb: 'Red against blue. First team to the frag limit.' },
+  ctf: { name: 'Capture the Flag', short: 'CTF', teams: true, blurb: "Grab their flag and bring it home while yours is safe." },
+  race: { name: 'Rocket Race', short: 'Race', teams: false, blurb: 'Rocket jump and grapple round the checkpoints. Best lap wins.' },
+};
+
+export const TEAMS = [
+  { name: 'Red', color: 0xf0503c },
+  { name: 'Blue', color: 0x3d8cf0 },
+] as const;
+
+/** Team deathmatch frag limits are this many times the map's free-for-all one: kills come from a whole team. */
+export const TDM = { fragScale: 1.6 };
+
+export const CTF = {
+  captureLimit: 3,
+  timeLimit: 10 * 60,
+  touchRadius: 1.7, // meters between a player's center and a flag's base for a touch
+  returnTime: 20, // seconds a dropped flag lies before it goes home by itself
+  carrierSpeedCap: 26, // m/s: a flag carrier's speed is clipped to this, so one rocket jump can't cross the map
+};
+
+export const RACE = {
+  timeLimit: 5 * 60,
+  ringRadius: 3.2, // pass within this of a checkpoint's center
+  respawnDelay: 0.6, // falling off restarts you at the start almost straight away
+};
+
+/**
+ * Items on the floor, besides mystery boxes. Health tops you up, past full to `max` (overhealth
+ * drains back to 100). Armor soaks up `absorb` of each hit until it runs out. Overdrive doubles your
+ * damage and knockback on other players for a while: there's one per map, somewhere hard to reach.
+ */
+export const ITEMS = {
+  reach: 1.1, // meters from the item's center to the player's capsule
+  health: { amount: 50, max: 150, respawn: 20, decay: 2 }, // decay: overhealth lost per second
+  armor: { amount: 50, max: 100, absorb: 2 / 3, respawn: 25 },
+  overdrive: { duration: 15, damage: 2, knockback: 1.5, respawn: 60 },
+};
 
 /**
  * A match is free-for-all deathmatch: first to the frag limit, or the most kills when time runs out.
@@ -188,6 +238,7 @@ export const PROTOCOL_VERSION = 2;
  * The server can override all of these (see src/server/main.ts).
  */
 export const MATCH = {
+  mode: 'ffa' as GameMode,
   timeLimit: 8 * 60, // seconds
   fragLimit: 25,
   intermission: 15, // seconds on the results screen
@@ -203,7 +254,7 @@ export const COMBAT = {
   spawnProtection: 3, // seconds of invulnerability after spawning
   regenDelay: 5, // seconds without taking damage before health starts coming back
   regenRate: 10, // health per second
-  respawnDelay: 3,
+  respawnDelay: 3.5, // long enough for the killcam
   killCredit: 5, // falling off the map within this many seconds of being hit counts as a kill for the hitter
 };
 

@@ -1,11 +1,14 @@
-import { COMBAT, WEAPONS } from '../shared/config';
+import { COMBAT, MODES, TEAMS, WEAPONS, type GameMode } from '../shared/config';
 import { MAPS } from '../shared/map';
-import type { MatchState, ScoreEntry } from '../shared/protocol';
+import { compareScores, hasScored, type FlagState, type MatchState, type ScoreEntry } from '../shared/protocol';
 import type { DeathCause } from '../shared/sim';
 import type { WeaponId } from '../shared/types';
 import { isTyping } from './input';
+import { formatLap } from './objectives';
 
-// Combat HUD: health, weapons, kill feed, death screen and the scoreboard (hold Tab).
+// Combat HUD: health and armor, weapons, kill feed, death screen and recap, the scoreboard (hold
+// Tab), and what each mode adds: team scores, flag status, the race clock, objective markers, and
+// a bar saying who you're watching while spectating.
 
 const KILL_VERB: Record<DeathCause, string> = {
   rocket: ' rocketed ',
@@ -16,6 +19,17 @@ const KILL_VERB: Record<DeathCause, string> = {
   fall: ' knocked off ',
   vehicle: ' blew up ',
   ram: ' ran over ',
+};
+/** What killed you, for the death recap. */
+const CAUSE_NAME: Record<DeathCause, string> = {
+  rocket: 'Rocket Launcher',
+  grenade: 'Grenade Launcher',
+  hypersonic: 'Hypersonic',
+  javelin: 'Javelin',
+  stinger: 'Stinger',
+  fall: 'a long fall',
+  vehicle: 'a vehicle blowing up',
+  ram: 'a buggy',
 };
 const NOTICE_TIME = 2000; // ms a pickup notice stays up
 // Every setter compares against what's already shown, so calling them each frame is cheap.
@@ -41,19 +55,47 @@ const ordinal = (n: number) => {
   return `${n}${['th', 'st', 'nd', 'rd'][n % 10] ?? 'th'}`;
 };
 
-/** Best first: most kills, then fewest deaths. */
-export const rankScores = (scores: readonly ScoreEntry[]) =>
-  [...scores].sort((a, b) => b.kills - a.kills || a.deaths - b.deaths || a.name.localeCompare(b.name));
+/** Best first, by what the mode scores. */
+export const rankScores = (scores: readonly ScoreEntry[], mode: GameMode = 'ffa') => [...scores].sort(compareScores(mode));
+
+const css = (color: number) => `#${color.toString(16).padStart(6, '0')}`;
+
+/** Everything the death screen shows. */
+export interface DeathInfo {
+  killerId: string | null;
+  cause: DeathCause;
+  distance: number;
+  killerHealth: number;
+  /** Damage you took this life, by who dealt it, most first. */
+  damage: { id: string; amount: number }[];
+  killcam: boolean; // the killcam is playing: the screen stays clear apart from the recap
+}
+
+/** A point of interest drawn over the 3D view: a flag, the next race ring. */
+export interface Marker {
+  x: number; // CSS pixels
+  y: number;
+  color: number;
+  label: string;
+  edge: boolean; // off screen: pinned to the edge, pointing the way
+  angle: number; // radians, which way to point when on the edge (0 = up)
+}
 
 export class Hud {
   private readonly health = el('health');
   private readonly healthValue = el('health-value');
   private readonly healthBar = el('health-bar');
+  private readonly armorValue = el('armor-value');
+  private readonly overdriveEl = el('overdrive');
   private readonly feed = el('killfeed');
   private readonly death = el('death');
   private readonly deathTitle = el('death-title');
   private readonly deathTimer = el('death-timer');
+  private readonly deathRecap = el('death-recap');
+  private readonly killcamLabel = el('killcam-label');
+  private shownRecap = '';
   private readonly board = el('scoreboard');
+  private readonly boardHead = el<HTMLTableSectionElement>('scoreboard-head');
   private readonly boardBody = el<HTMLTableSectionElement>('scoreboard-body');
   private readonly crosshair = el('crosshair');
   private readonly cooldowns = document.querySelector<SVGSVGElement>('#cooldowns')!;
@@ -78,8 +120,19 @@ export class Hud {
   private readonly vehicleName = el('vehicle-name');
   private readonly vehicleBar = el('vehicle-bar');
   private shownVehicle = '';
+  private readonly flagBar = el('flag-status');
+  private shownFlags = '';
+  private readonly race = el('race');
+  private readonly raceLap = el('race-lap');
+  private readonly raceInfo = el('race-info');
+  private shownRace = '';
+  private readonly markers = el('markers');
+  private shownMarkers = '';
+  private readonly spectating = el('spectating');
+  private readonly spectatingName = el('spectating-name');
+  private shownSpectating: string | null = null;
 
-  private shownHealth = -1;
+  private shownHealth = '';
   private shownProtected = false;
   private shownTimer = '';
   private shownBoard = '';
@@ -94,11 +147,14 @@ export class Hud {
   private readonly results = el('results');
   private shownResults = '';
   private readonly names = new Map<string, string>();
+  private readonly teams = new Map<string, number>();
   boardOpen = false; // Tab held
+  /** Whether the game has the keyboard (the mouse captured, or playing without it): Tab opens the board only then. */
+  isPlaying: () => boolean = () => !!document.pointerLockElement;
 
   constructor(private localId: string) {
     document.addEventListener('keydown', (e) => {
-      if (e.code !== 'Tab' || isTyping(e.target) || !document.pointerLockElement) return;
+      if (e.code !== 'Tab' || isTyping(e.target) || !this.isPlaying()) return;
       e.preventDefault(); // keep focus (and pointer lock) on the game
       this.boardOpen = true;
       this.board.hidden = false;
@@ -114,9 +170,12 @@ export class Hud {
     this.localId = id;
   }
 
-  /** Display names from the latest scores; also returned, for the name tags. */
+  /** Display names (and teams) from the latest scores; the names are also returned, for the name tags. */
   setNames(scores: readonly ScoreEntry[]): ReadonlyMap<string, string> {
-    for (const s of scores) this.names.set(s.id, s.name);
+    for (const s of scores) {
+      this.names.set(s.id, s.name);
+      this.teams.set(s.id, s.team);
+    }
     return this.names;
   }
 
@@ -125,46 +184,157 @@ export class Hud {
     this.feed.replaceChildren();
     this.medals.replaceChildren();
     this.damageDirs.replaceChildren();
+    this.markers.replaceChildren();
     this.results.hidden = true;
     this.matchBar.hidden = true;
     this.death.hidden = true;
-    this.shownMatch = this.shownResults = this.shownBoard = '';
+    this.flagBar.hidden = true;
+    this.race.hidden = true;
+    this.spectating.hidden = true;
+    el('hud').classList.remove('watching');
+    this.shownMatch = this.shownResults = this.shownBoard = this.shownFlags = this.shownRace = this.shownMarkers = this.shownRecap = '';
+    this.shownSpectating = null;
     this.names.clear();
+    this.teams.clear();
   }
 
-  /** The timer and standings at the top of the screen. */
+  /** The timer and standings at the top of the screen: your place in deathmatch, the team scores in team modes, the best laps in a race. */
   setMatch(match: MatchState | null, scores: readonly ScoreEntry[]) {
     if (!match) {
       this.matchBar.hidden = true;
       return;
     }
-    const ranked = rankScores(scores);
+    const time = formatTime(match.phase === 'playing' ? match.timeLeft : 0);
+    const ranked = rankScores(scores, match.mode);
     const myIndex = ranked.findIndex((s) => s.id === this.localId);
     const me = ranked[myIndex];
-    const leader = ranked[0];
-    const time = formatTime(match.phase === 'playing' ? match.timeLeft : 0);
-    const key = `${time}/${me?.kills}/${myIndex}/${leader?.name}/${leader?.kills}/${ranked[1]?.name}/${ranked[1]?.kills}/${match.fragLimit}`;
+    let left = '';
+    let right = '';
+    let leftClass = '';
+    let rightClass = '';
+    if (MODES[match.mode].teams) {
+      const [red, blue] = match.teamScores;
+      left = `${TEAMS[0].name.toUpperCase()} ${red}`;
+      right = `${blue} ${TEAMS[1].name.toUpperCase()}`;
+      leftClass = `team red${me?.team === 0 ? ' mine' : ''}`;
+      rightClass = `team blue${me?.team === 1 ? ' mine' : ''}`;
+    } else if (match.mode === 'race') {
+      const leader = ranked[0];
+      left = me?.bestLap ? `Best ${formatLap(me.bestLap)}` : 'No lap yet';
+      if (leader?.bestLap && leader.id !== this.localId) right = `Record: ${leader.name} ${formatLap(leader.bestLap)}`;
+      else if (leader?.bestLap) right = 'You hold the record';
+    } else {
+      const leader = ranked[0];
+      left = me ? `${ordinal(myIndex + 1)} · ${me.kills} / ${match.scoreLimit}` : '';
+      if (leader && leader.id !== this.localId && leader.kills > 0) right = `Leader: ${leader.name} ${leader.kills}`;
+      else if (ranked[1] && leader?.id === this.localId && leader.kills > 0) right = `Next: ${ranked[1].name} ${ranked[1].kills}`;
+    }
+    const key = `${time}/${left}/${right}/${leftClass}/${rightClass}`;
     if (key === this.shownMatch) return;
     this.shownMatch = key;
     this.matchBar.hidden = false;
     this.matchTime.textContent = time;
     this.matchTime.classList.toggle('urgent', match.phase === 'playing' && match.timeLeft <= 30);
-    this.matchRank.textContent = me ? `${ordinal(myIndex + 1)} · ${me.kills} / ${match.fragLimit}` : '';
-    if (leader && leader.id !== this.localId && leader.kills > 0) this.matchLeader.textContent = `Leader: ${leader.name} ${leader.kills}`;
-    else if (ranked[1] && leader?.id === this.localId && leader.kills > 0) this.matchLeader.textContent = `Next: ${ranked[1].name} ${ranked[1].kills}`;
-    else this.matchLeader.textContent = '';
+    this.matchRank.textContent = left;
+    this.matchRank.className = leftClass;
+    this.matchLeader.textContent = right;
+    this.matchLeader.className = rightClass;
+  }
+
+  /**
+   * Capture the flag: each flag's state under the match bar. `localTeam` -1 when watching.
+   * Pass null outside capture the flag.
+   */
+  setFlags(flags: readonly FlagState[] | null, localTeam: number) {
+    if (!flags || flags.length < 2) {
+      if (!this.flagBar.hidden) this.flagBar.hidden = true;
+      this.shownFlags = '';
+      return;
+    }
+    const status = flags.map((f) => {
+      if (f.atHome) return ['home', 'Home'];
+      if (f.carrier) return ['taken', f.carrier === this.localId ? 'You have it' : `${this.name(f.carrier)} has it`];
+      return ['dropped', 'Dropped'];
+    });
+    const key = JSON.stringify(status) + localTeam;
+    if (key === this.shownFlags) return;
+    this.shownFlags = key;
+    this.flagBar.hidden = false;
+    this.flagBar.replaceChildren(
+      ...status.map(([state, text], team) => {
+        const div = document.createElement('div');
+        div.className = `flag ${team === 0 ? 'red' : 'blue'} ${state}${team === localTeam ? ' mine' : ''}`;
+        const icon = document.createElement('span');
+        icon.className = 'icon';
+        const label = document.createElement('span');
+        label.textContent = `${team === localTeam ? 'Your flag' : `${TEAMS[team].name} flag`}: ${text}`;
+        div.append(icon, label);
+        return div;
+      }),
+    );
+  }
+
+  /** The race clock and progress. Null outside a race (or with nothing to show). */
+  setRace(race: { lapTime: number; ring: number; rings: number; best: number } | null) {
+    if (!race) {
+      if (!this.race.hidden) this.race.hidden = true;
+      this.shownRace = '';
+      return;
+    }
+    const lap = race.lapTime >= 0 ? formatLap(race.lapTime) : 'Through the start gate';
+    const info = race.lapTime >= 0 ? `Ring ${race.ring === 0 ? race.rings : race.ring} of ${race.rings}${race.ring === 0 ? ' · finish' : ''}` : 'E restarts';
+    const key = `${lap}/${info}`;
+    if (key === this.shownRace) return;
+    this.shownRace = key;
+    this.race.hidden = false;
+    this.raceLap.textContent = lap;
+    this.raceLap.classList.toggle('waiting', race.lapTime < 0);
+    this.raceInfo.textContent = info;
+  }
+
+  /** Points of interest over the view: flags, the next race ring. Rebuilt only when they visibly move. */
+  setMarkers(markers: readonly Marker[]) {
+    const key = markers.map((m) => `${Math.round(m.x / 2)},${Math.round(m.y / 2)},${m.label},${m.edge},${m.color}`).join('|');
+    if (key === this.shownMarkers) return;
+    this.shownMarkers = key;
+    while (this.markers.childElementCount > markers.length) this.markers.lastElementChild!.remove();
+    while (this.markers.childElementCount < markers.length) {
+      const div = document.createElement('div');
+      div.className = 'marker';
+      div.append(document.createElement('i'), document.createElement('span'));
+      this.markers.append(div);
+    }
+    markers.forEach((m, i) => {
+      const div = this.markers.children[i] as HTMLElement;
+      div.style.left = `${Math.round(m.x)}px`;
+      div.style.top = `${Math.round(m.y)}px`;
+      div.style.setProperty('--color', css(m.color));
+      div.style.setProperty('--angle', `${m.angle}rad`);
+      div.classList.toggle('edge', m.edge);
+      div.lastElementChild!.textContent = m.label;
+    });
+  }
+
+  /** "Watching NAME": null while playing. Watching hides your own health, weapons and crosshair. */
+  setSpectating(text: string | null) {
+    if (text === this.shownSpectating) return;
+    this.shownSpectating = text;
+    this.spectating.hidden = text === null;
+    el('hud').classList.toggle('watching', text !== null);
+    if (text !== null) this.spectatingName.textContent = text;
   }
 
   /**
    * A medal under the crosshair: `medal` for your achievements, `notice` for match news,
    * `big` for the start of a match. Newer ones replace older ones.
    */
-  medal(title: string, sub: string, kind: 'medal' | 'notice' | 'big') {
+  medal(title: string, sub: string, kind: 'medal' | 'notice' | 'big', color?: number) {
     const div = document.createElement('div');
     div.className = `medal ${kind}`;
     const t = document.createElement('div');
     t.className = 'title';
     t.textContent = title;
+    if (color !== undefined) t.style.color = css(color);
     div.append(t);
     if (sub) {
       const s = document.createElement('div');
@@ -176,11 +346,12 @@ export class Hud {
     setTimeout(() => div.remove(), MEDAL_TIME);
   }
 
-  /** A line in the kill feed that isn't a kill: sprees, shutdowns. */
-  feedNotice(text: string) {
+  /** A line in the kill feed that isn't a kill: sprees, shutdowns, flag news. */
+  feedNotice(text: string, color?: number) {
     const row = document.createElement('div');
     row.className = 'notice';
     row.textContent = text;
+    if (color !== undefined) row.style.borderLeft = `3px solid ${css(color)}`;
     this.feed.prepend(row);
     while (this.feed.childElementCount > FEED_MAX) this.feed.lastElementChild!.remove();
     setTimeout(() => row.remove(), FEED_TIME);
@@ -205,26 +376,41 @@ export class Hud {
       this.shownResults = '';
       return;
     }
+    const mode = match.mode;
+    const teams = MODES[mode].teams;
     // The server breaks ties; its winner heads the podium.
-    const ranked = rankScores(scores);
+    const ranked = rankScores(scores, mode);
     const w = ranked.findIndex((s) => s.id === match.winnerId);
     if (w > 0) ranked.unshift(...ranked.splice(w, 1));
-    const key = `${match.id}/${Math.ceil(match.timeLeft)}/${JSON.stringify(ranked.map((s) => [s.id, s.kills, s.deaths, s.name]))}`;
+    const key = `${match.id}/${Math.ceil(match.timeLeft)}/${JSON.stringify(ranked.map((s) => [s.id, s.kills, s.deaths, s.name, s.captures, s.bestLap]))}`;
     if (key === this.shownResults) return;
     this.shownResults = key;
 
     const winner = ranked[0];
-    const youWon = winner?.id === this.localId && winner.kills > 0;
+    const myTeam = scores.find((s) => s.id === this.localId)?.team ?? -1;
     const title = el('results-title');
-    title.textContent = !winner || winner.kills === 0 ? 'DRAW' : youWon ? 'VICTORY' : `${winner.name.toUpperCase()} WINS`;
+    let youWon: boolean;
+    if (teams) {
+      youWon = match.winnerTeam >= 0 && match.winnerTeam === myTeam;
+      title.textContent = match.winnerTeam < 0 ? 'DRAW' : youWon ? 'VICTORY' : `${TEAMS[match.winnerTeam].name.toUpperCase()} WINS`;
+      title.style.color = match.winnerTeam >= 0 && !youWon ? css(TEAMS[match.winnerTeam].color) : '';
+    } else {
+      youWon = winner?.id === this.localId && hasScored(mode, winner);
+      title.textContent = !winner || !hasScored(mode, winner) ? (mode === 'race' ? 'NO LAPS' : 'DRAW') : youWon ? 'VICTORY' : `${winner.name.toUpperCase()} WINS`;
+      title.style.color = '';
+    }
     title.classList.toggle('victory', youWon);
     const myPlace = ranked.findIndex((s) => s.id === this.localId);
-    el('results-sub').textContent = myPlace >= 0 ? `You placed ${ordinal(myPlace + 1)} of ${ranked.length}` : '';
+    const placed = myPlace >= 0 ? `You placed ${ordinal(myPlace + 1)} of ${ranked.length}` : '';
+    el('results-sub').textContent = teams ? `${TEAMS[0].name} ${match.teamScores[0]} – ${match.teamScores[1]} ${TEAMS[1].name}${placed ? ` · ${placed}` : ''}` : placed;
 
+    const scoreText = (s: ScoreEntry) =>
+      mode === 'race' ? (s.bestLap ? formatLap(s.bestLap) : 'no lap') : mode === 'ctf' ? `${s.captures} cap${s.captures === 1 ? '' : 's'} · ${s.kills} kills` : `${s.kills} kill${s.kills === 1 ? '' : 's'}`;
     el('results-podium').replaceChildren(
       ...ranked.slice(0, 3).map((s, i) => {
         const div = document.createElement('div');
         div.className = `place p${i + 1}${s.id === this.localId ? ' mine' : ''}`;
+        if (s.team >= 0) div.style.borderTopColor = css(TEAMS[s.team].color);
         const rank = document.createElement('div');
         rank.className = 'rank';
         rank.textContent = ordinal(i + 1);
@@ -233,7 +419,7 @@ export class Hud {
         name.textContent = s.name;
         const kills = document.createElement('div');
         kills.className = 'kills';
-        kills.textContent = `${s.kills} kill${s.kills === 1 ? '' : 's'}`;
+        kills.textContent = scoreText(s);
         div.append(rank, name, kills);
         return div;
       }),
@@ -247,12 +433,14 @@ export class Hud {
     };
     const kdOf = (s: ScoreEntry) => (s.kills >= 3 ? s.kills / Math.max(1, s.deaths) : 0);
     const awards: [string, ScoreEntry | undefined, string][] = [];
-    const air = best((s) => s.airshots);
-    const streak = best((s) => s.bestStreak);
-    const kd = best(kdOf);
-    if (air) awards.push(['Sky Hunter', air, `${air.airshots} airshot${air.airshots === 1 ? '' : 's'}`]);
-    if (streak) awards.push(['Unstoppable', streak, `${streak.bestStreak} kill streak`]);
-    if (kd) awards.push(['Survivor', kd, `${kdOf(kd).toFixed(1)} kills per death`]);
+    if (mode !== 'race') {
+      const air = best((s) => s.airshots);
+      const streak = best((s) => s.bestStreak);
+      const kd = best(kdOf);
+      if (air) awards.push(['Sky Hunter', air, `${air.airshots} airshot${air.airshots === 1 ? '' : 's'}`]);
+      if (streak) awards.push(['Unstoppable', streak, `${streak.bestStreak} kill streak`]);
+      if (kd) awards.push(['Survivor', kd, `${kdOf(kd).toFixed(1)} kills per death`]);
+    }
     el('results-awards').replaceChildren(
       ...awards.map(([name, s, what]) => {
         const div = document.createElement('div');
@@ -266,16 +454,26 @@ export class Hud {
         return div;
       }),
     );
-    el('results-next').textContent = `Next up: ${mapTitle(match.nextMap)} in ${Math.ceil(match.timeLeft)}`;
+    const next = match.nextMode === match.mode && match.nextMap === match.map ? mapTitle(match.nextMap) : `${MODES[match.nextMode].name} on ${mapTitle(match.nextMap)}`;
+    el('results-next').textContent = `Next up: ${next} in ${Math.ceil(match.timeLeft)}`;
   }
 
-  setHealth(value: number) {
+  /** Health (over 100 from health packs shows gold), armor, and the overdrive's time left. */
+  setHealth(value: number, armor = 0, overdrive = 0) {
     const shown = Math.max(0, Math.ceil(value));
-    if (shown === this.shownHealth) return;
-    this.shownHealth = shown;
+    const shownArmor = Math.ceil(armor);
+    const shownOverdrive = Math.ceil(overdrive);
+    const key = `${shown}/${shownArmor}/${shownOverdrive}`;
+    if (key === this.shownHealth) return;
+    this.shownHealth = key;
     this.healthValue.textContent = String(shown);
-    this.healthBar.style.transform = `scaleX(${shown / COMBAT.maxHealth})`;
+    this.healthBar.style.transform = `scaleX(${Math.min(1, shown / COMBAT.maxHealth)})`;
     this.health.classList.toggle('low', shown <= 30);
+    this.health.classList.toggle('over', shown > COMBAT.maxHealth);
+    this.armorValue.hidden = shownArmor <= 0;
+    this.armorValue.textContent = String(shownArmor);
+    this.overdriveEl.hidden = shownOverdrive <= 0;
+    this.overdriveEl.textContent = `OVERDRIVE ${shownOverdrive}`;
   }
 
   setProtected(on: boolean) {
@@ -326,7 +524,6 @@ export class Hud {
     }
   }
 
-  /** Someone's seeker missile is coming for you. */
   /** A key hint under the crosshair, like "E  Drive Buggy". Null hides it. */
   setPrompt(key: string | null, action = '') {
     const shown = key ? `${key}/${action}` : '';
@@ -352,15 +549,16 @@ export class Hud {
     this.vehicle.classList.toggle('low', frac <= 0.3);
   }
 
+  /** Someone's seeker missile is coming for you. */
   setMissileWarning(on: boolean) {
     if (on === this.shownWarning) return;
     this.shownWarning = on;
     this.missileWarning.hidden = !on;
   }
 
-  /** Flashes the name of a weapon you just picked up under the crosshair. */
-  pickedUp(weapon: WeaponId) {
-    this.notice.textContent = WEAPONS[weapon].name;
+  /** Flashes a line under the crosshair: the name of a weapon you just picked up, or an item. */
+  pickedUp(what: WeaponId | string) {
+    this.notice.textContent = what in WEAPONS ? WEAPONS[what as WeaponId].name : what;
     this.notice.classList.remove('show');
     void this.notice.offsetWidth; // restart the CSS animation
     this.notice.classList.add('show');
@@ -383,11 +581,13 @@ export class Hud {
   }
 
   /** Pass null while alive. */
-  setDeath(info: { killerId: string | null; cause: DeathCause } | null, respawnIn: number) {
+  setDeath(info: DeathInfo | null, respawnIn: number) {
     this.death.hidden = !info;
     this.crosshair.hidden = !!info;
     this.cooldowns.classList.toggle('hidden', !!info);
     if (!info) return;
+    this.death.classList.toggle('killcam', info.killcam);
+    this.killcamLabel.hidden = !info.killcam;
     const timer = respawnIn > 0 ? `Respawning in ${Math.ceil(respawnIn)}` : 'Respawning…';
     if (timer !== this.shownTimer) this.deathTimer.textContent = this.shownTimer = timer;
     this.deathTitle.textContent = info.killerId
@@ -395,6 +595,24 @@ export class Hud {
       : info.cause === 'fall'
         ? 'You fell'
         : 'You blew yourself up';
+    // The recap: what did it, from how far, how the killer was doing, and who else hurt you.
+    const lines: string[] = [];
+    if (info.killerId) {
+      lines.push(`${CAUSE_NAME[info.cause]}${info.distance > 1 ? ` from ${Math.round(info.distance)} m` : ''}`);
+      lines.push(`${this.name(info.killerId)} had ${info.killerHealth} health left`);
+    }
+    const others = info.damage.filter((d) => d.amount > 0);
+    if (others.length) lines.push(`Damage taken: ${others.map((d) => `${this.name(d.id)} ${Math.round(d.amount)}`).join(' · ')}`);
+    const key = lines.join('\n');
+    if (key === this.shownRecap) return;
+    this.shownRecap = key;
+    this.deathRecap.replaceChildren(
+      ...lines.map((line) => {
+        const div = document.createElement('div');
+        div.textContent = line;
+        return div;
+      }),
+    );
   }
 
   killed(victimId: string, killerId: string | null, cause: DeathCause) {
@@ -418,27 +636,60 @@ export class Hud {
     c.classList.add(kill ? 'kill' : 'hit');
   }
 
-  /** Only rebuilt while the board is open and the numbers changed. */
+  /** Only rebuilt while the board is open and the numbers changed. Team modes split it by team. */
   setScores(scores: readonly ScoreEntry[], match: MatchState | null) {
     if (!this.boardOpen) return;
-    const sorted = rankScores(scores);
-    const title = match ? `${mapTitle(match.map)}  ·  first to ${match.fragLimit}  ·  ${formatTime(match.phase === 'playing' ? match.timeLeft : 0)} left` : '';
-    const key = title + JSON.stringify(sorted);
+    const mode = match?.mode ?? 'ffa';
+    const sorted = rankScores(scores, mode);
+    const goal = !match ? '' : mode === 'race' ? 'best lap wins' : mode === 'ctf' ? `first to ${match.scoreLimit} captures` : `first to ${match.scoreLimit}`;
+    const title = match ? `${MODES[mode].name}  ·  ${mapTitle(match.map)}  ·  ${goal}  ·  ${formatTime(match.phase === 'playing' ? match.timeLeft : 0)} left` : '';
+    const key = title + JSON.stringify(sorted) + JSON.stringify(match?.teamScores);
     if (key === this.shownBoard) return;
     this.shownBoard = key;
     this.boardTitle.textContent = title;
-    this.boardBody.replaceChildren(
-      ...sorted.map((s) => {
-        const tr = document.createElement('tr');
-        if (s.id === this.localId) tr.classList.add('mine');
-        for (const text of [s.name, String(s.kills), String(s.deaths), String(s.airshots), s.bot ? 'bot' : String(s.ping)]) {
-          const td = document.createElement('td');
-          td.textContent = text;
-          tr.append(td);
-        }
-        return tr;
-      }),
-    );
+
+    const columns: [string, (s: ScoreEntry) => string][] =
+      mode === 'race'
+        ? [['Best lap', (s) => (s.bestLap ? formatLap(s.bestLap) : '–')]]
+        : mode === 'ctf'
+          ? [['Caps', (s) => String(s.captures)], ['Kills', (s) => String(s.kills)], ['Deaths', (s) => String(s.deaths)]]
+          : [['Kills', (s) => String(s.kills)], ['Deaths', (s) => String(s.deaths)], ['Air', (s) => String(s.airshots)]];
+    const head = document.createElement('tr');
+    for (const text of ['Player', ...columns.map(([name]) => name), 'Ping']) {
+      const th = document.createElement('th');
+      th.textContent = text;
+      head.append(th);
+    }
+    this.boardHead.replaceChildren(head);
+
+    const row = (s: ScoreEntry) => {
+      const tr = document.createElement('tr');
+      if (s.id === this.localId) tr.classList.add('mine');
+      for (const text of [s.name, ...columns.map(([, value]) => value(s)), s.bot ? 'bot' : String(s.ping)]) {
+        const td = document.createElement('td');
+        td.textContent = text;
+        tr.append(td);
+      }
+      return tr;
+    };
+    if (!MODES[mode].teams) {
+      this.boardBody.replaceChildren(...sorted.map(row));
+      return;
+    }
+    const rows: HTMLTableRowElement[] = [];
+    TEAMS.forEach((team, t) => {
+      const header = document.createElement('tr');
+      header.className = 'team-row';
+      header.style.setProperty('--team', css(team.color));
+      const name = document.createElement('td');
+      name.textContent = team.name;
+      const score = document.createElement('td');
+      score.colSpan = columns.length + 1;
+      score.textContent = String(match?.teamScores[t] ?? 0);
+      header.append(name, score);
+      rows.push(header, ...sorted.filter((s) => s.team === t).map(row));
+    });
+    this.boardBody.replaceChildren(...rows);
   }
 
   /** What to call a player: "You", or their name. */
@@ -446,9 +697,12 @@ export class Hud {
     return id === this.localId ? 'You' : (this.names.get(id) ?? id);
   }
 
+  /** A name for the kill feed, in its team's color in team modes. */
   private nameSpan(id: string): HTMLElement {
     const span = document.createElement('b');
     span.textContent = this.name(id);
+    const team = this.teams.get(id) ?? -1;
+    if (team >= 0) span.style.color = css(TEAMS[team].color);
     return span;
   }
 }

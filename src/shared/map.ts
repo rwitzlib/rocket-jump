@@ -105,6 +105,14 @@ export interface VehicleDef {
   yaw: number;
 }
 
+export type ItemKind = 'health' | 'armor' | 'overdrive';
+
+/** A health pack, armor or the overdrive, standing on the surface at `pos`. */
+export interface ItemDef {
+  kind: ItemKind;
+  pos: Vec3Tuple; // on the floor: the item floats a little above it
+}
+
 export interface MapDef {
   title: string; // shown in menus and on the scoreboard
   blurb: string; // a line about it for the menu
@@ -113,6 +121,11 @@ export interface MapDef {
   crates: Vec3Tuple[];
   spawns: SpawnDef[];
   pickups: Vec3Tuple[]; // mystery box centers
+  items?: ItemDef[];
+  /** Capture the flag bases, red then blue, on the floor. Default: the two spawns farthest apart (see modes.ts). */
+  flags?: [Vec3Tuple, Vec3Tuple];
+  /** Rocket race: where racers start (on the floor) and the ring centers, ring 0 being the start/finish gate. */
+  race?: { start: Vec3Tuple; rings: Vec3Tuple[] };
   killY: number;
   botOrbit?: number; // radius of the circle wandering bots follow around the center
   vehicles?: VehicleDef[];
@@ -195,6 +208,21 @@ export const ARENA: MapDef = {
     [0, 1.4, -30],
     [-3.5, 22.2, 3.5], // on the tower deck
   ],
+  items: [
+    { kind: 'health', pos: [12, 0, 17] },
+    { kind: 'health', pos: [-12, 0, -17] },
+    { kind: 'health', pos: [17, 0, -12] },
+    { kind: 'health', pos: [-17, 0, 12] },
+    { kind: 'armor', pos: [20, 12.4, 0] },
+    { kind: 'armor', pos: [-20, 12.4, 0] },
+    { kind: 'overdrive', pos: [-4, 21, -4] },
+  ],
+  flags: [[0, 0, 50], [0, 0, -50]],
+  // Up onto a platform, the tower, swing under a beam, another platform, then the top of a pillar.
+  race: {
+    start: [0, 1, 44],
+    rings: [[0, 2.5, 36], [20, 14, 0], [0, 22.6, 0], [-35, 22, 0], [0, 16, -22], [35, 31.6, -35]],
+  },
   killY: -30,
 };
 
@@ -302,6 +330,19 @@ export const CITADEL: MapDef = {
     ...quad<Vec3Tuple>([[60, 1.4, 0], [TOWER + 8, RING_Y + 1.9, TOWER - 8]], turnPos),
     [0, SPIRE_H + 1.9, 0],
   ],
+  items: [
+    ...quad<Vec3Tuple>([[8, RING_Y + 0.5, 14]], turnPos).map((pos) => ({ kind: 'health' as const, pos })),
+    ...quad<Vec3Tuple>([[40, 0, 60]], turnPos).map((pos) => ({ kind: 'health' as const, pos })),
+    { kind: 'armor', pos: [90, TOWER_H + 1, 90] },
+    { kind: 'armor', pos: [-90, TOWER_H + 1, -90] },
+    { kind: 'overdrive', pos: [5, SPIRE_H + 1, 5] },
+  ],
+  // On the ramparts at either end, between the helicopter pads and the pylon.
+  flags: [[0, 8, 112], [0, 8, -112]],
+  race: {
+    start: [60, 1, 100],
+    rings: [[60, 2.5, 92], [100, 12, 50], [50, 26, 16], [0, 43, -4], [-90, 33, 90], [0, 10, 112]],
+  },
   // A buggy on the ground in each quadrant, and helicopters on two of the ramparts.
   vehicles: [
     ...quad<VehicleDef>([{ kind: 'car', pos: [30, 0.7, 96], yaw: Math.atan2(30, 96) }], (v, k) => ({

@@ -1,9 +1,10 @@
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
-import { PLAYER } from '../shared/config';
+import { PLAYER, TEAMS } from '../shared/config';
 import type { WeaponId } from '../shared/types';
 import type { RemotePlayer } from './net/netclient';
 import { buildGauntlet, buildHookHead, LAUNCHER, PRIMARY_MODELS } from './weapons';
+import { buildFlagModel } from './objectives';
 
 // Other players: an armored figure built from primitives, sized to the hit capsule (feet at -0.9,
 // eyes at +0.6 from its center). It carries the same two weapons you do, a shoulder-mounted rocket
@@ -12,6 +13,9 @@ import { buildGauntlet, buildHookHead, LAUNCHER, PRIMARY_MODELS } from './weapon
 // from the interpolated movement; the gauntlet swings to point along the rope while grappling.
 
 const COLORS = [0x3d9cf0, 0xf0a830, 0xa860f0, 0x40c878, 0xf05a80, 0x30c8d0];
+/** Colors by index: the free-for-all palette, then red and blue for teams. */
+const ALL_COLORS = [...COLORS, ...TEAMS.map((t) => t.color)];
+const OVERDRIVE_COLOR = 0xff40d0;
 
 const TAG_HEIGHT = 0.045; // with no size attenuation: about 2% of the screen height at a 90° FOV
 const HIP_Y = -0.05; // relative to the capsule center
@@ -64,6 +68,9 @@ interface Entry {
   hook: THREE.Object3D;
   hookHead: THREE.Object3D; // the one loaded in the gauntlet, hidden while it's out on the rope
   shell: THREE.Mesh;
+  overdrive: THREE.Mesh;
+  carried: THREE.Object3D[]; // a flag on their back, red's then blue's
+  color: number; // index into ALL_COLORS
   tag: THREE.Sprite;
   tagName: string;
   // Animation state
@@ -100,7 +107,14 @@ export class RemotePlayersView {
   private readonly ropeMat = new THREE.LineBasicMaterial({ color: 0x2a2a2a });
   private readonly hookProto = buildHookHead();
   private readonly shellGeo = new THREE.CapsuleGeometry(PLAYER.radius + 0.18, PLAYER.halfHeight * 2, 6, 20);
-  private readonly shellMat = shieldMaterial();
+  private readonly shellMat = shieldMaterial(0x7ce0ff);
+  private readonly overdriveMat = shieldMaterial(OVERDRIVE_COLOR);
+  private readonly flagProtos = TEAMS.map((t) => {
+    const flag = buildFlagModel(t.color, 0.55);
+    flag.position.set(0.12, -0.15, 0.32); // strapped to the jetpack
+    flag.rotation.set(0.15, 0, -0.1);
+    return flag;
+  });
   private readonly flashMat = new THREE.MeshBasicMaterial({
     color: new THREE.Color(2.4, 1.6, 0.7),
     transparent: true,
@@ -111,7 +125,7 @@ export class RemotePlayersView {
   /** Stand-ins for the player's color and its glowing strips; swapped for the team's own on each clone. */
   private readonly teamProto = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.5, metalness: 0.2 });
   private readonly glowProto = new THREE.MeshStandardMaterial({ color: 0x000000, emissive: 0xffffff });
-  private readonly teamMats = COLORS.map((color) => ({
+  private readonly teamMats = ALL_COLORS.map((color) => ({
     team: withRim(new THREE.MeshStandardMaterial({ color, roughness: 0.45, metalness: 0.15 })),
     glow: new THREE.MeshStandardMaterial({ color: 0x000000, emissive: color, emissiveIntensity: 2.4 }),
   }));
@@ -125,6 +139,10 @@ export class RemotePlayersView {
   castLevel: ((from: THREE.Vector3, dir: THREE.Vector3, max: number, outNormal: THREE.Vector3) => number | null) | null = null;
   /** Display names by player id, for the tags over their heads. */
   names: ReadonlyMap<string, string> = new Map();
+  /** Teams by player id, in team modes: their armor takes the team's color. */
+  teams: ReadonlyMap<string, number> = new Map();
+  /** Our own team (-1 outside team modes, or watching): name tags read white for allies, red for enemies. */
+  localTeam = -1;
 
   constructor(private readonly scene: THREE.Scene) {
     this.proto = this.buildModel();
@@ -142,7 +160,7 @@ export class RemotePlayersView {
    * up and a random shove), tumbling and flailing, and pops after a second or so.
    */
   spawnCorpse(id: string, pos: THREE.Vector3, vel: THREE.Vector3, yaw: number, primary: WeaponId) {
-    const root = this.dress(this.proto.clone(), id);
+    const root = this.dress(this.proto.clone(), this.colorIndex(id));
     for (const weapon of Object.keys(PRIMARY_MODELS)) {
       const launcher = root.getObjectByName(`${weapon}Launcher`);
       if (launcher) launcher.visible = weapon === primary;
@@ -279,10 +297,25 @@ export class RemotePlayersView {
     } else this.remove('__warmup');
   }
 
-  /** A player's team color (the same for everyone, worked out from their id). */
+  /** A player's color: their team's, or one worked out from their id (the same for everyone). */
   colorOf(id: string): number {
-    return COLORS[teamIndex(id)];
+    return ALL_COLORS[this.colorIndex(id)];
   }
+
+  private colorIndex(id: string): number {
+    const team = this.teams.get(id) ?? -1;
+    return team >= 0 ? COLORS.length + team : teamIndex(id);
+  }
+
+  /** Hides (or shows again) everyone and every corpse: the killcam draws its own copies meanwhile. */
+  setVisible(on: boolean) {
+    for (const e of this.entries.values()) {
+      if (!on) e.root.visible = e.rope.visible = e.hook.visible = false;
+    }
+    for (const c of this.corpses) c.root.visible = on;
+    this.hidden = !on;
+  }
+  private hidden = false;
 
   /** A remote player fired: kick the launcher back and flash its muzzle. */
   fired(id: string) {
@@ -308,13 +341,21 @@ export class RemotePlayersView {
       // They just died where we could see them: leave a corpse in their place.
       if (e.alive && !r.alive && e.root.visible && !e.fresh) this.spawnCorpse(r.id, e.root.position, e.vel, e.root.rotation.y, e.primary);
       e.alive = r.alive;
-      e.root.visible = r.alive && !r.hidden;
-      this.setTag(e, this.names.get(r.id) ?? '');
+      e.root.visible = r.alive && !r.hidden && !this.hidden;
+      const color = this.colorIndex(r.id);
+      if (color !== e.color) {
+        this.dress(e.root, color);
+        e.color = color;
+      }
+      this.setTag(e, this.names.get(r.id) ?? '', this.tagColor(r.id));
       e.shell.visible = r.protected;
+      e.overdrive.visible = r.overdrive;
+      if (r.overdrive) e.overdrive.scale.setScalar(1 + Math.sin(performance.now() / 90) * 0.04);
+      e.carried.forEach((flag, team) => (flag.visible = r.flag === team));
       this.setPrimary(e, r.primary);
       this.animate(e, r, dt);
 
-      const grappling = r.alive && !!r.anchor;
+      const grappling = r.alive && !!r.anchor && !this.hidden;
       e.rope.visible = e.hook.visible = grappling;
       e.hookHead.visible = !grappling;
       if (grappling && r.anchor) {
@@ -419,7 +460,8 @@ export class RemotePlayersView {
   private entryFor(id: string): Entry {
     let e = this.entries.get(id);
     if (e) return e;
-    const root = this.dress(this.proto.clone(), id);
+    const color = this.colorIndex(id);
+    const root = this.dress(this.proto.clone(), color);
     const get = (name: string) => root.getObjectByName(name)!;
     // Each model gets its own flash material so one player's shot doesn't light up everyone's barrel.
     const flash = get('flash') as THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>;
@@ -428,6 +470,15 @@ export class RemotePlayersView {
     const shell = new THREE.Mesh(this.shellGeo, this.shellMat);
     shell.visible = false;
     root.add(shell);
+    const overdrive = new THREE.Mesh(this.shellGeo, this.overdriveMat);
+    overdrive.visible = false;
+    root.add(overdrive);
+    const carried = this.flagProtos.map((proto) => {
+      const flag = proto.clone();
+      flag.visible = false;
+      return flag;
+    });
+    get('torso').add(...carried);
     const rope = new THREE.Line(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3)), this.ropeMat);
     rope.frustumCulled = false;
     rope.visible = false;
@@ -462,6 +513,9 @@ export class RemotePlayersView {
       rope,
       hook,
       shell,
+      overdrive,
+      carried,
+      color,
       lastPos: new THREE.Vector3(),
       vel: new THREE.Vector3(),
       phase: Math.random() * Math.PI * 2,
@@ -474,20 +528,34 @@ export class RemotePlayersView {
     return e;
   }
 
-  /** Swaps the stand-in team materials on a copy of the rig for this player's own. */
-  private dress(root: THREE.Group, id: string): THREE.Group {
-    const team = this.teamMats[teamIndex(id)];
+  /** Swaps the team-colored materials on a copy of the rig (stand-ins, or another color) for this color's. */
+  private dress<T extends THREE.Object3D>(root: T, color: number): T {
+    const team = this.teamMats[color];
     root.traverse((o) => {
       if (!(o instanceof THREE.Mesh)) return;
-      if (o.material === this.teamProto) o.material = team.team;
-      else if (o.material === this.glowProto) o.material = team.glow;
+      if (o.material === this.teamProto) o.userData.slot = 'team';
+      else if (o.material === this.glowProto) o.userData.slot = 'glow';
+      if (o.userData.slot === 'team') o.material = team.team;
+      else if (o.userData.slot === 'glow') o.material = team.glow;
     });
     return root;
   }
 
-  private setTag(e: Entry, name: string) {
-    if (name === e.tagName) return;
-    e.tagName = name;
+  /**
+   * A name tag's text color. In team modes: white for a teammate, red for an enemy (or, watching,
+   * each team's own color). Otherwise white.
+   */
+  private tagColor(id: string): string {
+    const team = this.teams.get(id) ?? -1;
+    if (team < 0) return '#fff';
+    if (this.localTeam < 0) return team === 0 ? '#ff8a7a' : '#7ab4ff';
+    return team === this.localTeam ? '#fff' : '#ff4a3a';
+  }
+
+  private setTag(e: Entry, name: string, color: string) {
+    const key = `${name}|${color}`;
+    if (key === e.tagName) return;
+    e.tagName = key;
     e.tag.visible = !!name;
     e.tag.material.map?.dispose();
     e.tag.material.map = null;
@@ -504,7 +572,7 @@ export class RemotePlayersView {
     ctx.beginPath();
     ctx.roundRect(0, 0, width, 56, 12);
     ctx.fill();
-    ctx.fillStyle = '#fff';
+    ctx.fillStyle = color;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(name, width / 2, 30);
@@ -689,10 +757,10 @@ export function withRim<T extends THREE.MeshStandardMaterial>(material: T, stren
   return material;
 }
 
-/** Spawn protection: a bubble that glows at its edges, with soft bands of light around it. */
-function shieldMaterial(): THREE.ShaderMaterial {
+/** Spawn protection (and the overdrive): a bubble that glows at its edges, with soft bands of light around it. */
+function shieldMaterial(color: number): THREE.ShaderMaterial {
   return new THREE.ShaderMaterial({
-    uniforms: { color: { value: new THREE.Color(0x7ce0ff) } },
+    uniforms: { color: { value: new THREE.Color(color) } },
     vertexShader: /* glsl */ `
       varying vec3 vNormal;
       varying vec3 vView;

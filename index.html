@@ -30,6 +30,16 @@
         <div id="match-time">0:00</div>
         <div id="match-leader"></div>
       </div>
+      <!-- Capture the flag: where each flag is. -->
+      <div id="flag-status" hidden></div>
+      <!-- Rocket race: the lap clock and which ring is next. -->
+      <div id="race" hidden><div id="race-lap"></div><div id="race-info"></div></div>
+      <!-- Flags and race rings, pinned over the view (or to its edge when off screen). -->
+      <div id="markers"></div>
+      <div id="spectating" hidden>
+        <div id="spectating-name"></div>
+        <div class="hint"><kbd>LMB</kbd> next <kbd>RMB</kbd> previous <kbd>Space</kbd> free camera <kbd>J</kbd> join the game</div>
+      </div>
       <div id="medals"></div>
       <div id="speed">0.0 m/s</div>
       <div id="pickup-notice"></div>
@@ -42,17 +52,23 @@
       <div id="weapons"><div><kbd>LMB</kbd><span id="weapon-primary">Rocket Launcher</span><span id="weapon-ammo"></span></div><div><kbd>RMB</kbd><span id="weapon-secondary">Grapple</span></div></div>
       <div id="mute"></div>
 
-      <div id="health"><span id="health-value">100</span><span class="shield">Spawn protection</span><div class="bar"><div id="health-bar"></div></div></div>
+      <div id="health">
+        <div id="overdrive" hidden></div>
+        <span id="health-value">100</span><span id="armor-value" hidden></span><span class="shield">Spawn protection</span>
+        <div class="bar"><div id="health-bar"></div></div>
+      </div>
       <div id="killfeed"></div>
       <div id="chat"><div id="chat-log"></div><input id="chat-input" type="text" autocomplete="off" placeholder="Say something, Enter to send" hidden /></div>
       <div id="death" hidden>
+        <div id="killcam-label" hidden>KILLCAM</div>
         <div id="death-title"></div>
+        <div id="death-recap"></div>
         <div id="death-timer"></div>
       </div>
       <div id="scoreboard" hidden>
         <div id="scoreboard-title"></div>
         <table>
-          <thead><tr><th>Player</th><th>Kills</th><th>Deaths</th><th title="Kills on players in midair">Air</th><th>Ping</th></tr></thead>
+          <thead id="scoreboard-head"></thead>
           <tbody id="scoreboard-body"></tbody>
         </table>
       </div>
@@ -78,8 +94,13 @@
           <span class="label">Play online</span>
           <small id="online-status">Checking server…</small>
         </button>
+        <div class="menu-row online-row">
+          <button id="open-rooms" class="ghost">Servers and rooms</button>
+          <button id="watch-online" class="ghost">Watch online</button>
+        </div>
         <div class="practice">
           <button id="play-practice" disabled title="Practice against bots, offline">Practice</button>
+          <select id="practice-mode" aria-label="Practice mode"></select>
           <select id="practice-map" aria-label="Practice map"></select>
           <select id="practice-bots" aria-label="Number of bots">
             <option value="1">1 bot</option>
@@ -107,10 +128,12 @@
       <div class="menu-panel small">
         <h2 id="pause-title">Paused</h2>
         <p class="hint" id="pause-hint">The match keeps going while you're away.</p>
+        <p class="hint room-line" id="pause-room" hidden><span id="pause-room-name"></span> <button id="copy-invite" class="link">Copy invite link</button></p>
         <button id="resume" class="primary">Click to play</button>
         <div class="menu-row">
           <button id="pause-settings" class="ghost">Settings</button>
           <button id="pause-controls" class="ghost">How to play</button>
+          <button id="pause-spectate" class="ghost">Spectate</button>
           <button id="leave" class="ghost">Leave match</button>
         </div>
       </div>
@@ -120,6 +143,41 @@
       <div class="menu-panel small">
         <h2 id="connecting-title">Connecting…</h2>
         <button id="connecting-cancel" class="ghost">Cancel</button>
+      </div>
+    </div>
+
+    <!-- Servers and rooms: the public rooms on this server, joining one by code, opening one. -->
+    <div id="rooms" class="screen modal" hidden>
+      <div class="menu-panel wide">
+        <h2>Servers and rooms</h2>
+        <div id="room-list" class="room-list"><p class="hint">Looking…</p></div>
+        <div class="room-code">
+          <input id="room-code" type="text" maxlength="5" autocomplete="off" spellcheck="false" placeholder="Room code" aria-label="Room code" />
+          <button id="room-join">Join</button>
+          <button id="room-watch" class="ghost">Watch</button>
+        </div>
+        <h3>Open a room</h3>
+        <div class="room-form">
+          <input id="room-name" type="text" maxlength="32" autocomplete="off" placeholder="Room name" aria-label="Room name" />
+          <select id="room-mode" aria-label="Mode"></select>
+          <select id="room-map" aria-label="Map"></select>
+          <select id="room-bots" aria-label="Bots">
+            <option value="0">No bots</option>
+            <option value="4" selected>Bots up to 4</option>
+            <option value="6">Bots up to 6</option>
+            <option value="8">Bots up to 8</option>
+          </select>
+          <select id="room-skill" aria-label="Bot difficulty">
+            <option value="auto" selected>Bots adapt</option>
+            <option value="easy">Easy bots</option>
+            <option value="normal">Normal bots</option>
+            <option value="hard">Hard bots</option>
+          </select>
+          <label class="check"><input id="room-private" type="checkbox" /><span>Private: only people with the code</span></label>
+          <button id="room-create" class="primary">Open room</button>
+        </div>
+        <p id="rooms-error" class="error" hidden></p>
+        <button id="rooms-done" class="ghost">Close</button>
       </div>
     </div>
 
@@ -134,6 +192,7 @@
           <option value="low">Low: faster on older laptops</option>
         </select></label>
         <label class="check"><input id="set-invert" type="checkbox" /><span>Invert mouse Y</span></label>
+        <label class="check"><input id="set-killcam" type="checkbox" /><span>Killcam: replay how you died from your killer's view</span></label>
         <button id="settings-done" class="primary">Done</button>
       </div>
     </div>
@@ -146,9 +205,10 @@
             <tr><td>WASD</td><td>Move</td></tr>
             <tr><td>Mouse</td><td>Look</td></tr>
             <tr><td>Space</td><td>Jump (hold to bunny-hop)</td></tr>
-            <tr><td>Left click</td><td>Fire</td></tr>
-            <tr><td>Right click / Shift</td><td>Grapple (hold)</td></tr>
-            <tr><td>E</td><td>Get in / out of a vehicle</td></tr>
+            <tr><td>Left click / F</td><td>Fire</td></tr>
+            <tr><td>Right click / Shift / Q</td><td>Grapple (hold)</td></tr>
+            <tr><td>Arrow keys</td><td>Look around (if the mouse can't be captured)</td></tr>
+            <tr><td>E</td><td>Get in / out of a vehicle (restart a race)</td></tr>
             <tr><td>Space / Shift</td><td>Helicopter climb / descend (C works too)</td></tr>
             <tr><td>Tab (hold)</td><td>Scoreboard</td></tr>
             <tr><td>T / Enter</td><td>Chat</td></tr>
@@ -161,7 +221,9 @@
             <li><b>Airshots:</b> hitting someone in midair rings a bell and counts toward the Sky Hunter award.</li>
             <li><b>Knock people off the map</b>: a fall within 5 seconds of your hit is your kill.</li>
             <li><b>? boxes</b> swap your launcher for a random one: grenades, the Hypersonic, or heat seekers.</li>
-            <li>First to the frag limit wins. Streaks, multi kills and shutdowns earn medals.</li>
+            <li><b>Health packs, armor and the overdrive</b> lie around the maps. Armor soaks up two thirds of each hit; the overdrive doubles your damage for 15 seconds.</li>
+            <li><b>Modes:</b> deathmatch, team deathmatch, capture the flag (take theirs home while yours is safe) and rocket race (fly through the rings, best lap wins).</li>
+            <li>Streaks, multi kills and shutdowns earn medals. Press Esc and Spectate to watch.</li>
           </ul>
         </div>
         <button id="controls-done" class="primary">Got it</button>

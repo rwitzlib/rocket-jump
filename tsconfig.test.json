@@ -1,0 +1,4 @@
+{
+  "extends": "./tsconfig.server.json",
+  "include": ["test", "scripts", "src/shared", "src/client/net/netclient.ts"]
+}

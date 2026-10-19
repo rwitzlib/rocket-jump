@@ -11,6 +11,7 @@ export interface Settings {
   invertY: boolean;
   showFps: boolean;
   graphics: 'high' | 'low'; // post-processing (outlines, bloom, antialiasing) on or off
+  killcam: boolean; // replay your death from the killer's view
 }
 
 const KEY = 'rocket-jump:settings';
@@ -23,6 +24,7 @@ export const DEFAULTS: Settings = {
   invertY: false,
   showFps: false,
   graphics: 'high',
+  killcam: true,
 };
 
 export const LIMITS = {
@@ -43,6 +45,7 @@ export function loadSettings(): Settings {
     s.invertY = !!s.invertY;
     s.showFps = !!s.showFps;
     s.graphics = s.graphics === 'low' ? 'low' : 'high';
+    s.killcam = s.killcam !== false;
     return s;
   } catch {
     return { ...DEFAULTS };

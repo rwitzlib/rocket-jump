@@ -1,11 +1,14 @@
-import { DT, MATCH, NET, PROTOCOL_VERSION } from './config';
+import { DT, MATCH, NET, PROTOCOL_VERSION, TEAMS, type GameMode } from './config';
 import { Bot, type BotSkill } from './bot';
 import { MAPS } from './map';
+import { parseRotation, scoreLimit, timeLimit, type RotationEntry } from './modes';
 import {
+  compareScores,
   MAX_NAME,
   toWireEvent,
   type ClientMessage,
   type CrateState,
+  type FlagState,
   type InputFrame,
   type MatchState,
   type RemotePlayerState,
@@ -14,16 +17,18 @@ import {
   type ServerMessage,
   type WireEvent,
 } from './protocol';
-import { GameSim, type SimEvent } from './sim';
+import { GameSim, type PlayerSim, type SimEvent } from './sim';
 import { EMPTY_INPUT, type PlayerInput } from './types';
 
 // The authoritative game server, independent of any transport. Whatever carries the bytes (the
 // in-page loopback, or WebSockets in src/server/main.ts) calls receive/disconnect and tick, and
 // delivers what comes out of `send`. A client's first message must be `join`.
 //
-// It runs back-to-back deathmatches: first to the frag limit, or the most kills when time runs
-// out, then an intermission on the results and the next map in the rotation. Bots fill in so a
-// lone player always has someone to fight, and step aside as people join.
+// It runs back-to-back matches: each rotation entry is a map and a mode (deathmatch, team
+// deathmatch, capture the flag or a race). A match ends at its score limit or when time runs out,
+// then comes an intermission on the results and the next entry in the rotation. Bots fill in so a
+// lone player always has someone to fight, and step aside as people join (they sit out races).
+// People can also watch: spectators get snapshots but have no player.
 
 interface Connection {
   name: string;
@@ -35,6 +40,8 @@ interface Connection {
   dropped: number; // inputs thrown away because the queue grew too long
   ping: number; // ms, smoothed
   lastChat: number; // ms timestamp, for rate limiting
+  spectator: boolean; // watching: no player in the sim
+  waiting: boolean; // watching only because the server was full: let in when a place comes free
 }
 
 interface Stats {
@@ -44,15 +51,20 @@ interface Stats {
 }
 
 export interface ServerOptions {
-  /** Map rotation, by name in MAPS. */
+  /** Rotation: map names in MAPS, each optionally with a mode, like "temple:ctf". */
   maps: string[];
-  timeLimit: number;
-  /** Null: each map's own (MapDef.fragLimit), else MATCH.fragLimit. */
+  /** The mode for rotation entries that don't name one. */
+  mode: GameMode;
+  /** Seconds per match. Null: the mode's own (CTF and races run differently from deathmatch). */
+  timeLimit: number | null;
+  /** Null: each map's own (MapDef.fragLimit), else MATCH.fragLimit. Team deathmatch scales it up. */
   fragLimit: number | null;
   intermission: number;
   /** Bots fill the game up to this many players while anyone is connected. 0 for no bots. */
   minPlayers: number;
   maxPlayers: number;
+  /** People allowed to watch on top of maxPlayers. Someone joining a full server watches until there's room. */
+  maxSpectators: number;
   /** How good bots are. 'auto' starts easy and follows how the people on the server are doing. */
   botSkill: BotSkill | 'auto';
 }
@@ -73,6 +85,7 @@ export class GameServer {
   private readonly stats = new Map<string, Stats>();
   private readonly inputs = new Map<string, PlayerInput>();
   private recentEvents: WireEvent[] = [];
+  private readonly rotation: RotationEntry[];
   private mapIndex = 0;
   private nextBot = 1;
   private lastPing = 0;
@@ -86,37 +99,60 @@ export class GameServer {
   ) {
     this.options = {
       maps: ['arena'],
-      timeLimit: MATCH.timeLimit,
+      mode: MATCH.mode,
+      timeLimit: null,
       fragLimit: null,
       intermission: MATCH.intermission,
       minPlayers: MATCH.minPlayers,
       maxPlayers: MATCH.maxPlayers,
+      maxSpectators: 8,
       botSkill: 'auto',
       ...options,
     };
-    this.options.maps = this.options.maps.filter((m) => MAPS[m]);
-    if (!this.options.maps.length) this.options.maps = ['arena'];
-    this.sim = new GameSim(MAPS[this.mapName]);
+    this.rotation = parseRotation(this.options.maps, this.options.mode);
+    if (!this.rotation.length) this.rotation.push({ map: 'arena', mode: this.options.mode });
+    this.options.maps = this.rotation.map((r) => `${r.map}:${r.mode}`);
+    this.sim = new GameSim(MAPS[this.mapName], this.mode);
     this.match = this.newMatch(1);
     if (this.options.botSkill !== 'auto') this.skill = this.options.botSkill;
   }
 
-  get mapName(): string {
-    return this.options.maps[this.mapIndex % this.options.maps.length];
+  private entry(offset = 0): RotationEntry {
+    return this.rotation[(this.mapIndex + offset) % this.rotation.length];
   }
 
+  get mapName(): string {
+    return this.entry().map;
+  }
+
+  get mode(): GameMode {
+    return this.entry().mode;
+  }
+
+  /** People connected, playing or watching. */
   get playerCount(): number {
     return this.connections.size;
   }
 
+  /** People playing (not watching). */
+  private get people(): number {
+    let n = 0;
+    for (const c of this.connections.values()) if (!c.spectator) n++;
+    return n;
+  }
+
   /** Who's playing, for a status page. */
   status() {
+    const conns = [...this.connections.values()];
     return {
       map: this.mapName,
-      players: [...this.connections.values()].map((c) => c.name),
+      mode: this.mode,
+      players: conns.filter((c) => !c.spectator).map((c) => c.name),
+      spectators: conns.filter((c) => c.spectator).map((c) => c.name),
       bots: this.bots.size,
       botSkill: this.skill,
       maxPlayers: this.options.maxPlayers,
+      rotation: this.options.maps,
       match: { ...this.match, timeLeft: Math.round(this.match.timeLeft) },
     };
   }
@@ -129,18 +165,20 @@ export class GameServer {
     this.stats.delete(id);
     this.sim.removePlayer(id);
     this.notice(`${conn.name} left`);
+    if (!conn.spectator) this.admitWaiting();
     this.fillBots();
   }
 
   receive(id: string, msg: ClientMessage) {
     if (msg.type === 'join') {
-      this.join(id, msg.name, msg.version);
+      this.join(id, msg.name, msg.version, msg.spectate);
       return;
     }
     const conn = this.connections.get(id);
     if (!conn) return;
     switch (msg.type) {
       case 'input':
+        if (conn.spectator) break;
         // Packets can arrive late, twice, or out of order: keep each new seq once, in order.
         for (const frame of msg.frames) {
           if (frame.seq <= conn.lastProcessed) continue;
@@ -165,16 +203,21 @@ export class GameServer {
         for (const other of this.connections.keys()) this.send(other, { type: 'chat', id, name: conn.name, text: msg.text });
         break;
       }
+      case 'spectate':
+        this.setSpectating(id, conn, msg.on);
+        break;
     }
   }
 
-  private join(id: string, rawName: string, version: number) {
+  private join(id: string, rawName: string, version: number, spectate: boolean) {
     if (this.connections.has(id)) return; // a resent join
     if (version !== PROTOCOL_VERSION) {
       this.send(id, { type: 'rejected', reason: 'The game has been updated. Reload the page to get the new version.' });
       return;
     }
-    if (this.connections.size >= this.options.maxPlayers) {
+    const full = this.people >= this.options.maxPlayers;
+    const watchers = this.connections.size - this.people;
+    if ((full || spectate) && watchers >= this.options.maxSpectators) {
       this.send(id, { type: 'rejected', reason: `The server is full (${this.options.maxPlayers} players). Try again in a bit.` });
       return;
     }
@@ -185,7 +228,7 @@ export class GameServer {
     }
 
     const name = this.uniqueName(rawName || `Player ${Math.floor(Math.random() * 900 + 100)}`);
-    this.connections.set(id, {
+    const conn: Connection = {
       name,
       queue: [],
       lastProcessed: 0,
@@ -194,18 +237,88 @@ export class GameServer {
       starved: 0,
       dropped: 0,
       ping: 0,
-      lastChat: 0,
-    });
+      lastChat: -Infinity,
+      spectator: spectate || full,
+      waiting: full && !spectate,
+    };
+    this.connections.set(id, conn);
     this.stats.set(id, { streak: 0, bestStreak: 0, airshots: 0 });
-    this.sim.addPlayer(id);
+    if (!conn.spectator) this.addToSim(id);
     this.send(id, this.welcome(id));
     this.send(id, { type: 'ping', t: now() });
-    this.notice(`${name} joined`);
+    if (conn.waiting) this.tell(id, `The server is full, so you're watching for now. You'll be let in when a place comes free.`);
+    this.notice(conn.spectator ? `${name} is watching` : `${name} joined${this.teamSuffix(id)}`);
     this.fillBots();
   }
 
+  /** Start or stop watching. Playing again needs a free place. */
+  private setSpectating(id: string, conn: Connection, on: boolean) {
+    if (on === conn.spectator) return;
+    if (!on && this.people >= this.options.maxPlayers) {
+      conn.waiting = true;
+      this.tell(id, `The server is full (${this.options.maxPlayers} players). You'll be let in when a place comes free.`);
+      return;
+    }
+    conn.spectator = on;
+    conn.waiting = false;
+    conn.queue = [];
+    conn.buffering = true;
+    if (on) {
+      this.sim.removePlayer(id);
+      this.inputs.delete(id);
+    } else this.addToSim(id);
+    this.send(id, this.welcome(id));
+    this.notice(on ? `${conn.name} is watching` : `${conn.name} joined${this.teamSuffix(id)}`);
+    if (on) this.admitWaiting();
+    this.fillBots();
+  }
+
+  /** A place came free: whoever has been waiting longest to play gets it. */
+  private admitWaiting() {
+    if (this.people >= this.options.maxPlayers) return;
+    for (const [id, conn] of this.connections) {
+      if (!conn.waiting) continue;
+      this.setSpectating(id, conn, false);
+      return;
+    }
+  }
+
+  /** " (Red)" in team modes, so everyone knows which side a newcomer took. */
+  private teamSuffix(id: string): string {
+    const team = this.sim.players.get(id)?.team ?? -1;
+    return team >= 0 ? ` (${TEAMS[team].name})` : '';
+  }
+
+  /** Puts a person or bot into the game, on the smaller team in team modes. */
+  private addToSim(id: string): PlayerSim {
+    return this.sim.addPlayer(id, this.sim.teams ? this.smallerTeam() : -1);
+  }
+
+  /** The team with fewer players; on a tie, the one behind. */
+  private smallerTeam(): number {
+    const count = [0, 0];
+    for (const p of this.sim.players.values()) if (p.team >= 0) count[p.team]++;
+    if (count[0] !== count[1]) return count[0] < count[1] ? 0 : 1;
+    const [red, blue] = this.sim.teamScores;
+    return red !== blue ? (red < blue ? 0 : 1) : Math.random() < 0.5 ? 0 : 1;
+  }
+
+  /** Fresh, even teams for a new match: people spread first, then bots fill in. -1 for everyone outside team modes. */
+  private assignTeams() {
+    const ids = [...this.sim.players.keys()];
+    const people = ids.filter((id) => this.connections.has(id)).sort(() => Math.random() - 0.5);
+    const bots = ids.filter((id) => !this.connections.has(id));
+    const count = [0, 0];
+    for (const id of [...people, ...bots]) {
+      const team = count[0] <= count[1] ? 0 : 1;
+      count[team]++;
+      this.sim.players.get(id)!.team = this.sim.teams ? team : -1;
+    }
+  }
+
   private welcome(id: string): ServerMessage {
-    return { type: 'welcome', id, tick: this.sim.tick, map: this.mapName, match: { ...this.match } };
+    const spectator = this.connections.get(id)?.spectator ?? false;
+    return { type: 'welcome', id, tick: this.sim.tick, map: this.mapName, mode: this.mode, spectator, match: { ...this.match } };
   }
 
   private uniqueName(name: string): string {
@@ -220,7 +333,12 @@ export class GameServer {
 
   /** A server line in everyone's chat. */
   private notice(text: string) {
-    for (const id of this.connections.keys()) this.send(id, { type: 'chat', id: null, name: '', text });
+    for (const id of this.connections.keys()) this.tell(id, text);
+  }
+
+  /** A server line in one person's chat. */
+  private tell(id: string, text: string) {
+    this.send(id, { type: 'chat', id: null, name: '', text });
   }
 
   addBot(skill: BotSkill = this.skill): string {
@@ -230,7 +348,7 @@ export class GameServer {
     const name = free.length ? free[Math.floor(Math.random() * free.length)] : `Bot ${this.nextBot}`;
     this.bots.set(id, { bot: new Bot(skill), name });
     this.stats.set(id, { streak: 0, bestStreak: 0, airshots: 0 });
-    this.sim.addPlayer(id);
+    this.addToSim(id);
     return id;
   }
 
@@ -241,56 +359,93 @@ export class GameServer {
     this.sim.removePlayer(id);
   }
 
-  /** Bots make up the numbers while anyone is here, and leave when the last person does. */
+  /**
+   * Bots make up the numbers while anyone is here (playing or watching), and leave when the last
+   * person does. They join the smaller team, and leave from the bigger one. They sit out races.
+   */
   private fillBots() {
-    const people = this.connections.size;
-    const want = people === 0 ? 0 : Math.max(0, this.options.minPlayers - people);
+    const people = this.people;
+    const want = this.connections.size === 0 || this.mode === 'race' ? 0 : Math.max(0, this.options.minPlayers - people);
     while (this.bots.size < want) this.addBot();
     while (this.bots.size > want) {
-      // The one with the fewest kills leaves, so the leaderboard barely changes.
+      // The one with the fewest kills leaves (from the bigger team), so the leaderboard barely changes.
+      const count = [0, 0];
+      for (const p of this.sim.players.values()) if (p.team >= 0) count[p.team]++;
+      const bigger = count[0] === count[1] ? -1 : count[0] > count[1] ? 0 : 1;
       let worst: string | null = null;
       let worstKills = Infinity;
       for (const id of this.bots.keys()) {
-        const kills = this.sim.players.get(id)?.kills ?? 0;
+        const p = this.sim.players.get(id);
+        if (bigger >= 0 && p && p.team !== bigger) continue;
+        const kills = p?.kills ?? 0;
         if (kills < worstKills) {
           worst = id;
           worstKills = kills;
         }
       }
-      this.removeBot(worst!);
+      this.removeBot(worst ?? this.bots.keys().next().value!);
+    }
+    this.balanceTeams();
+  }
+
+  /** People leaving can leave one team two or more short: a bot changes sides (at its next respawn spot). */
+  private balanceTeams() {
+    if (!this.sim.teams) return;
+    for (;;) {
+      const count = [0, 0];
+      for (const p of this.sim.players.values()) if (p.team >= 0) count[p.team]++;
+      if (Math.abs(count[0] - count[1]) < 2) return;
+      const bigger = count[0] > count[1] ? 0 : 1;
+      const bot = [...this.bots.keys()].map((id) => this.sim.players.get(id)).find((p) => p?.team === bigger);
+      if (!bot) return;
+      bot.team = 1 - bigger;
+      this.sim.respawn(bot);
     }
   }
 
   private newMatch(id: number): MatchState {
-    const maps = this.options.maps;
+    const map = MAPS[this.mapName];
     return {
       id,
+      mode: this.mode,
       phase: 'playing',
-      timeLeft: this.options.timeLimit,
-      fragLimit: this.options.fragLimit ?? MAPS[this.mapName].fragLimit ?? MATCH.fragLimit,
+      timeLeft: timeLimit(this.mode, this.options.timeLimit),
+      scoreLimit: scoreLimit(map, this.mode, this.options.fragLimit),
+      teamScores: [0, 0],
       map: this.mapName,
-      nextMap: maps[(this.mapIndex + 1) % maps.length],
+      nextMap: this.entry(1).map,
+      nextMode: this.entry(1).mode,
       winnerId: null,
+      winnerTeam: -1,
     };
   }
 
-  /** Starts the next match, on the next map in the rotation if `advance`. */
+  /** Starts the next match, on the next entry in the rotation if `advance`. */
   private startMatch(advance: boolean) {
     const oldMap = this.mapName;
-    if (advance) this.mapIndex = (this.mapIndex + 1) % this.options.maps.length;
+    const oldMode = this.mode;
+    if (advance) this.mapIndex = (this.mapIndex + 1) % this.rotation.length;
     this.match = this.newMatch(this.match.id + 1);
     for (const s of this.stats.values()) Object.assign(s, { streak: 0, bestStreak: 0, airshots: 0 });
 
     if (this.mapName !== oldMap) {
       const tick = this.sim.tick;
       this.sim.world.free();
-      this.sim = new GameSim(MAPS[this.mapName]);
+      this.sim = new GameSim(MAPS[this.mapName], this.mode);
       this.sim.tick = tick; // ticks keep counting up, so clients never see time run backwards
       this.recentEvents = [];
-      for (const id of [...this.connections.keys(), ...this.bots.keys()]) this.sim.addPlayer(id);
-      for (const id of this.connections.keys()) this.send(id, this.welcome(id));
+      for (const [id, conn] of this.connections) if (!conn.spectator) this.sim.addPlayer(id);
+      for (const id of this.bots.keys()) this.sim.addPlayer(id);
+      this.assignTeams();
+      this.sim.resetForMatch(); // respawn everyone now they have teams
     } else {
-      this.sim.resetForMatch();
+      this.sim.mode = this.mode;
+      this.assignTeams();
+      this.sim.resetForMatch(this.mode);
+    }
+    this.fillBots(); // races have none, other modes want them back
+    if (this.mapName !== oldMap || this.mode !== oldMode) {
+      for (const id of this.connections.keys()) this.send(id, this.welcome(id));
     }
   }
 
@@ -305,6 +460,7 @@ export class GameServer {
 
     const frozen = this.match.phase === 'intermission';
     for (const [id, conn] of this.connections) {
+      if (conn.spectator) continue;
       const input = this.nextInput(conn);
       // Between matches everyone can look around, but not move or shoot. Clients do the same, so prediction agrees.
       this.inputs.set(id, frozen ? freeze(input) : input);
@@ -373,31 +529,33 @@ export class GameServer {
     const m = this.match;
     m.timeLeft = Math.max(0, m.timeLeft - DT);
     if (m.phase === 'playing') {
+      m.teamScores = [this.sim.teamScores[0], this.sim.teamScores[1]];
       const leader = this.leader();
-      const fragged = leader !== null && (this.sim.players.get(leader)?.kills ?? 0) >= m.fragLimit;
-      if (fragged || m.timeLeft === 0) {
+      let over = m.timeLeft === 0;
+      if (m.scoreLimit > 0) {
+        if (this.sim.teams) over ||= Math.max(...m.teamScores) >= m.scoreLimit;
+        else over ||= leader !== null && (this.sim.players.get(leader)?.kills ?? 0) >= m.scoreLimit;
+      }
+      if (over) {
         m.phase = 'intermission';
         m.timeLeft = this.options.intermission;
         m.winnerId = leader;
+        const [red, blue] = m.teamScores;
+        m.winnerTeam = !this.sim.teams || red === blue ? -1 : red > blue ? 0 : 1;
       }
     } else if (m.timeLeft === 0) {
       this.startMatch(true);
     }
   }
 
-  /** Most kills, then fewest deaths. */
+  /** The best player by what the mode scores (kills, captures, lap time), or null if nobody has scored yet. */
   private leader(): string | null {
-    let best: string | null = null;
-    let bestKills = -1;
-    let bestDeaths = Infinity;
-    for (const p of this.sim.players.values()) {
-      if (p.kills > bestKills || (p.kills === bestKills && p.deaths < bestDeaths)) {
-        best = p.id;
-        bestKills = p.kills;
-        bestDeaths = p.deaths;
-      }
-    }
-    return bestKills > 0 ? best : null;
+    const scores = this.scores();
+    const best = scores.sort(compareScores(this.mode))[0];
+    if (!best) return null;
+    if (this.mode === 'race') return best.bestLap > 0 ? best.id : null;
+    if (this.mode === 'ctf') return best.captures > 0 || best.kills > 0 ? best.id : null;
+    return best.kills > 0 ? best.id : null;
   }
 
   /** One input per tick. A small buffer absorbs jitter; if it runs dry, the last input is repeated. */
@@ -422,13 +580,9 @@ export class GameServer {
     return frame.input;
   }
 
-  private broadcast() {
-    const sim = this.sim;
-    const players: RemotePlayerState[] = [];
+  private scores(): ScoreEntry[] {
     const scores: ScoreEntry[] = [];
-    for (const p of sim.players.values()) {
-      const a = p.grapple?.anchor;
-      players.push({ id: p.id, pos: [r3(p.pos.x), r3(p.pos.y), r3(p.pos.z)], yaw: r3(p.yaw), pitch: r3(p.pitch), anchor: a ? [r3(a.x), r3(a.y), r3(a.z)] : null, alive: p.alive, protected: p.protectedFor > 0, grounded: p.grounded, primary: p.primary, vehicle: p.vehicle, seat: p.seat });
+    for (const p of this.sim.players.values()) {
       const conn = this.connections.get(p.id);
       const stats = this.stats.get(p.id);
       scores.push({
@@ -440,8 +594,37 @@ export class GameServer {
         bot: !conn,
         airshots: stats?.airshots ?? 0,
         bestStreak: stats?.bestStreak ?? 0,
+        team: p.team,
+        captures: p.captures,
+        bestLap: Math.round(p.bestLap * 1000) / 1000,
       });
     }
+    return scores;
+  }
+
+  private broadcast() {
+    const sim = this.sim;
+    const players: RemotePlayerState[] = [];
+    for (const p of sim.players.values()) {
+      const a = p.grapple?.anchor;
+      players.push({
+        id: p.id,
+        pos: [r3(p.pos.x), r3(p.pos.y), r3(p.pos.z)],
+        yaw: r3(p.yaw),
+        pitch: r3(p.pitch),
+        anchor: a ? [r3(a.x), r3(a.y), r3(a.z)] : null,
+        alive: p.alive,
+        protected: p.protectedFor > 0,
+        grounded: p.grounded,
+        primary: p.primary,
+        vehicle: p.vehicle,
+        seat: p.seat,
+        team: p.team,
+        overdrive: p.overdrive > 0,
+        flag: p.flag,
+      });
+    }
+    const scores = this.scores();
     const projectiles: ProjectileState[] = sim.projectiles.map((r) => ({
       id: r.id,
       kind: r.kind,
@@ -458,6 +641,8 @@ export class GameServer {
       power: r.power,
     }));
     const pickups = sim.pickups.map((b) => b.respawnIn);
+    const items = sim.items.map((b) => b.respawnIn);
+    const flags: FlagState[] = sim.mode === 'ctf' ? sim.flags.map((f) => ({ pos: [r3(f.pos.x), r3(f.pos.y), r3(f.pos.z)], carrier: f.carrier, atHome: f.atHome })) : [];
     const vehicles = sim.vehicles.map((v) => v.capture());
     const crates: CrateState[] = sim.crates.map((c) => {
       const t = c.translation();
@@ -471,15 +656,17 @@ export class GameServer {
         type: 'snapshot',
         tick: sim.tick,
         ack: conn.lastProcessed,
-        you: sim.players.get(id)?.capture() ?? null,
+        you: conn.spectator ? null : (sim.players.get(id)?.capture() ?? null),
         players: players.filter((p) => p.id !== id),
         projectiles,
         crates,
         vehicles,
         pickups,
+        items,
+        flags,
         scores,
         match,
-        events: this.recentEvents,
+        events: this.recentEvents.slice(), // a copy: whatever sends it may keep it (as a delta baseline)
         input: { queued: conn.queue.length, starved: conn.starved, dropped: conn.dropped },
       });
     }

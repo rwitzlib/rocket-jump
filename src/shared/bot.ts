@@ -6,7 +6,9 @@ import type { PlayerInput } from './types';
 // A simple server-side opponent. It circles the tower bunny-hopping, and when it can see another
 // player it shoots at them: leading their movement, aiming at the feet of grounded targets for
 // splash, with some reaction time and aim error so it's beatable. With nobody in sight it rocket
-// jumps and grapples now and then, so it keeps moving.
+// jumps and grapples now and then, so it keeps moving. In team modes it leaves its teammates alone,
+// and in capture the flag it heads for an objective instead of circling: most bots attack (go for
+// the enemy flag, escort whoever has it, run it home), the rest defend their own.
 
 const ORBIT_RADIUS = 28;
 
@@ -32,9 +34,19 @@ const DOWN = new Vector3(0, -1, 0);
 const SAFE_TURNS = [0.5, -0.5, 1, -1, 1.6, -1.6, 2.3, -2.3, Math.PI];
 const _aim = new Vector3();
 const _targetEye = new Vector3();
+const _goal = new Vector3();
 
 export class Bot {
   constructor(public skill: BotSkill = 'normal') {}
+
+  /** Capture the flag: what this bot does when nothing more urgent is going on. */
+  readonly role: 'attack' | 'defend' = Math.random() < 0.65 ? 'attack' : 'defend';
+  // Heading for an objective, it notices when it stops getting closer (a wall, a ledge it can't
+  // climb) and tries a detour: off to one side, jumping and rocket jumping.
+  private progressAt = 0; // `t` when it last got meaningfully closer
+  private closest = Infinity;
+  private detour = 0; // seconds of detour left
+  private detourSide = 1;
 
   private t = Math.random() * 100;
   private readonly orbitSpeed = (0.15 + Math.random() * 0.1) * (Math.random() < 0.5 ? -1 : 1);
@@ -114,14 +126,36 @@ export class Bot {
     return sim.clearDistance(_probe, DOWN, depth + 1) < depth + 1;
   }
 
+  /**
+   * Capture the flag: where to go. Carrying their flag, home. Our flag lying somewhere, go and send
+   * it back; carried off, chase the carrier. Otherwise attackers go for their flag (or stay with the
+   * teammate who has it) and defenders circle our base.
+   */
+  private objective(p: PlayerSim, sim: GameSim): Vector3 | null {
+    if (sim.mode !== 'ctf' || p.team < 0) return null;
+    const own = sim.flags[p.team];
+    const enemy = sim.flags[1 - p.team];
+    if (p.flag >= 0) return _goal.copy(own.home);
+    const ownCarrier = own.carrier ? sim.players.get(own.carrier) : undefined;
+    if (ownCarrier && (this.role === 'defend' || ownCarrier.pos.distanceTo(p.pos) < 40)) return _goal.copy(ownCarrier.pos);
+    if (!own.atHome && !own.carrier) return _goal.copy(own.pos);
+    if (this.role === 'defend') {
+      const a = this.t * this.orbitSpeed * 2;
+      return _goal.set(own.home.x + Math.cos(a) * 9, own.home.y, own.home.z + Math.sin(a) * 9);
+    }
+    const escort = enemy.carrier ? sim.players.get(enemy.carrier) : undefined;
+    return _goal.copy(escort ? escort.pos : enemy.pos);
+  }
+
   private decide(p: PlayerSim, sim: GameSim): PlayerInput {
     this.t += DT;
 
-    // Head for a point that slides around a circle, strafing side to side like an air-strafer.
+    // Head for the objective, or a point that slides around a circle, strafing side to side like an air-strafer.
+    const goal = this.objective(p, sim);
     const a = this.t * this.orbitSpeed;
     const orbit = sim.map.botOrbit ?? ORBIT_RADIUS;
-    const dx = Math.cos(a) * orbit - p.pos.x;
-    const dz = Math.sin(a) * orbit - p.pos.z;
+    const dx = (goal ? goal.x : Math.cos(a) * orbit) - p.pos.x;
+    const dz = (goal ? goal.z : Math.sin(a) * orbit) - p.pos.z;
 
     const input: PlayerInput = {
       forward: 1,
@@ -135,10 +169,21 @@ export class Bot {
       pitch: 0,
     };
 
+    // A flag carrier runs for home and doesn't stop to fight.
+    if (goal && p.flag >= 0) {
+      this.climbToward(p, goal, input);
+      return input;
+    }
     const target = this.updateTarget(p, sim);
     if (target) {
       this.aimAt(p, target, input);
       input.forward = 0.3; // strafe around them rather than running into its own splash
+      if (goal) {
+        // Shooting on the move: keep heading for the objective, whichever way it's aiming.
+        const along = Math.atan2(-dx, -dz) - input.yaw;
+        input.forward = Math.cos(along);
+        input.right = -Math.sin(along);
+      }
       this.reaction -= DT;
       const skill = BOT_SKILLS[this.skill];
       if (this.reaction <= 0 && p.fireCooldown === 0 && Math.random() < DT / (DT + skill.hesitate)) {
@@ -149,6 +194,10 @@ export class Bot {
       return input;
     }
 
+    if (goal) {
+      this.climbToward(p, goal, input);
+      return input;
+    }
     const depth = p.pos.y - sim.map.killY;
     this.nextRocketJump -= DT;
     // Only where there's somewhere to come down.
@@ -171,6 +220,54 @@ export class Bot {
     return input;
   }
 
+  /**
+   * Gets up to an objective above it: a rocket jump toward it from the ground, then the grapple
+   * at a point just over it while coming back down. Stuck, it detours.
+   */
+  private climbToward(p: PlayerSim, goal: Vector3, input: PlayerInput) {
+    const dx = goal.x - p.pos.x;
+    const dz = goal.z - p.pos.z;
+    const horizontal = Math.hypot(dx, dz);
+    const dist = Math.hypot(horizontal, goal.y - p.pos.y);
+    if (dist < this.closest - 1 || dist > this.closest + 15) {
+      this.closest = dist;
+      this.progressAt = this.t;
+    }
+    if (this.detour > 0) {
+      this.detour -= DT;
+      input.yaw = Math.atan2(-dx, -dz) + this.detourSide * 1.3;
+      input.forward = 1;
+      input.right = 0;
+      input.jump = true;
+      if (p.grounded && p.fireCooldown === 0 && Math.random() < 0.05) {
+        input.pitch = -1.35;
+        input.fire = true;
+      }
+      return;
+    }
+    if (this.t - this.progressAt > 2.5 && horizontal > 3) {
+      this.detour = 1 + Math.random();
+      this.detourSide = -this.detourSide;
+      this.closest = Infinity;
+      return;
+    }
+    const above = goal.y - (p.pos.y - 0.9);
+    this.grappleFor = 0;
+    if (above < 2.5 || horizontal > 30) return;
+    input.yaw = Math.atan2(-dx, -dz);
+    if (p.grounded && p.fireCooldown === 0) {
+      input.pitch = -1.35; // at the feet
+      input.fire = true;
+      input.jump = true;
+      return;
+    }
+    if (!p.grounded && (p.vel.y < 3 || p.grapple)) {
+      input.pitch = Math.atan2(above + 2 - 0.6, Math.max(horizontal, 1));
+      input.grapple = true;
+      input.right = 0;
+    }
+  }
+
   /** The nearest living player in sight, re-checked a few times a second. */
   private updateTarget(p: PlayerSim, sim: GameSim): PlayerSim | null {
     this.retarget -= DT;
@@ -182,7 +279,7 @@ export class Bot {
     let best: PlayerSim | null = null;
     let bestDist = BOT_SKILLS[this.skill].sight;
     for (const o of sim.players.values()) {
-      if (o === p || !o.alive) continue;
+      if (o === p || !o.alive || (p.team >= 0 && o.team === p.team)) continue;
       const dist = o.pos.distanceTo(p.pos);
       if (dist < bestDist && sim.canSee(_eye, o.eye(_targetEye))) {
         best = o;
