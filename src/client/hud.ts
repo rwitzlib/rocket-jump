@@ -1,8 +1,12 @@
-import { COMBAT } from '../shared/config';
+import { COMBAT, GRENADE, WEAPONS } from '../shared/config';
 import type { ScoreEntry } from '../shared/protocol';
 import type { DeathCause } from '../shared/sim';
+import type { WeaponId } from '../shared/types';
 
-// Combat HUD: health, kill feed, death screen and the scoreboard (hold Tab).
+// Combat HUD: health, weapons, kill feed, death screen and the scoreboard (hold Tab).
+
+const KILL_VERB: Record<DeathCause, string> = { rocket: ' rocketed ', grenade: ' fragged ', fall: ' knocked off ' };
+const NOTICE_TIME = 2000; // ms a pickup notice stays up
 // Every setter compares against what's already shown, so calling them each frame is cheap.
 
 const FEED_TIME = 6000; // ms a kill feed entry stays up
@@ -25,6 +29,12 @@ export class Hud {
   private readonly rocketArc = document.querySelector<SVGPathElement>('#cd-rocket')!;
   private readonly grappleArc = document.querySelector<SVGPathElement>('#cd-grapple')!;
   private readonly shownCharge = { rocket: -1, grapple: -1 };
+  private readonly primaryName = el('weapon-primary');
+  private readonly secondaryName = el('weapon-secondary');
+  private readonly ammo = el('weapon-ammo');
+  private readonly notice = el('pickup-notice');
+  private noticeTimer = 0;
+  private shownWeapons = '';
 
   private shownHealth = -1;
   private shownProtected = false;
@@ -61,7 +71,28 @@ export class Hud {
     this.health.classList.toggle('protected', on);
   }
 
-  /** How charged each weapon is, 0 (just used) to 1 (ready). */
+  /** `ammo`: rounds left for a weapon that has a magazine, 'reloading', or null for none. */
+  setWeapons(primary: WeaponId, secondary: WeaponId, ammo: number | 'reloading' | null) {
+    const key = `${primary}/${secondary}/${ammo}`;
+    if (key === this.shownWeapons) return;
+    this.shownWeapons = key;
+    this.primaryName.textContent = WEAPONS[primary].name;
+    this.secondaryName.textContent = WEAPONS[secondary].name;
+    this.ammo.textContent = ammo === null ? '' : ammo === 'reloading' ? 'Reloading' : `${ammo}/${GRENADE.drum}`;
+    this.ammo.classList.toggle('reloading', ammo === 'reloading' || ammo === 0);
+  }
+
+  /** Flashes the name of a weapon you just picked up under the crosshair. */
+  pickedUp(weapon: WeaponId) {
+    this.notice.textContent = WEAPONS[weapon].name;
+    this.notice.classList.remove('show');
+    void this.notice.offsetWidth; // restart the CSS animation
+    this.notice.classList.add('show');
+    clearTimeout(this.noticeTimer);
+    this.noticeTimer = window.setTimeout(() => this.notice.classList.remove('show'), NOTICE_TIME);
+  }
+
+  /** How charged each weapon is, 0 (just used) to 1 (ready): the primary on the right, the grapple on the left. */
   setCooldowns(rocket: number, grapple: number) {
     this.setArc(this.rocketArc, 'rocket', rocket);
     this.setArc(this.grappleArc, 'grapple', grapple);
@@ -94,7 +125,7 @@ export class Hud {
     const row = document.createElement('div');
     const victim = this.nameSpan(victimId);
     if (killerId) {
-      row.append(this.nameSpan(killerId), cause === 'fall' ? ' knocked off ' : ' rocketed ', victim);
+      row.append(this.nameSpan(killerId), KILL_VERB[cause], victim);
     } else {
       row.append(victim, cause === 'fall' ? ' fell' : ' blew up');
     }

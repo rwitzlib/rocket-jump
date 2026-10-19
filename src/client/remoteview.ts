@@ -1,11 +1,12 @@
 import * as THREE from 'three';
 import { PLAYER } from '../shared/config';
+import type { WeaponId } from '../shared/types';
 import type { RemotePlayer } from './net/netclient';
-import { buildGauntlet, buildHookHead, buildLauncher, LAUNCHER } from './weapons';
+import { buildGauntlet, buildGrenadeLauncher, buildHookHead, buildLauncher, LAUNCHER } from './weapons';
 
 // Other players: an armored figure built from primitives, sized to the hit capsule (feet at -0.9,
 // eyes at +0.6 from its center). It carries the same two weapons you do, a shoulder-mounted rocket
-// launcher on the right and a grapple gauntlet on the left, both following where the player aims,
+// (or grenade) launcher on the right and a grapple gauntlet on the left, both following where the player aims,
 // so you can read their aim and see shots leave the barrel. Legs walk, strafe and tuck mid-air
 // from the interpolated movement; the gauntlet swings to point along the rope while grappling.
 
@@ -44,6 +45,9 @@ interface Entry {
   head: THREE.Object3D;
   aim: THREE.Object3D;
   launcher: THREE.Object3D;
+  /** Each primary weapon's model and muzzle; only the one in hand is visible. */
+  primaries: Partial<Record<WeaponId, { root: THREE.Object3D; muzzle: THREE.Object3D }>>;
+  primary: WeaponId;
   muzzle: THREE.Object3D;
   flash: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>;
   gauntlet: THREE.Object3D;
@@ -125,6 +129,7 @@ export class RemotePlayersView {
       const e = this.entryFor(r.id);
       e.root.visible = r.alive;
       e.shell.visible = r.protected;
+      this.setPrimary(e, r.primary);
       this.animate(e, r, dt);
 
       const grappling = r.alive && !!r.anchor;
@@ -145,6 +150,15 @@ export class RemotePlayersView {
     for (const id of this.entries.keys()) {
       if (!remotes.has(id) && id !== '__warmup') this.remove(id);
     }
+  }
+
+  private setPrimary(e: Entry, weapon: WeaponId) {
+    const model = e.primaries[weapon];
+    if (weapon === e.primary || !model) return;
+    for (const m of Object.values(e.primaries)) m.root.visible = m === model;
+    e.primary = weapon;
+    e.muzzle = model.muzzle;
+    e.muzzle.add(e.flash);
   }
 
   private animate(e: Entry, r: RemotePlayer, dt: number) {
@@ -256,7 +270,12 @@ export class RemotePlayersView {
       head: get('head'),
       aim: get('aim'),
       launcher: get('launcher'),
-      muzzle: get('muzzle'),
+      primaries: {
+        rocket: { root: get('rocketLauncher'), muzzle: get('rocketMuzzle') },
+        grenade: { root: get('grenadeLauncher'), muzzle: get('grenadeMuzzle') },
+      },
+      primary: 'rocket',
+      muzzle: get('rocketMuzzle'),
       flash,
       gauntlet: get('gauntlet'),
       hookTip: get('hookTip'),
@@ -349,7 +368,13 @@ export class RemotePlayersView {
     flash.name = 'flash';
     flash.scale.set(1, 1, 1.5);
     launcherModel.muzzle.add(flash);
-    const launcher = named('launcher', launcherModel.root);
+    launcherModel.root.name = 'rocketLauncher';
+    launcherModel.muzzle.name = 'rocketMuzzle';
+    const grenadeModel = buildGrenadeLauncher(team);
+    grenadeModel.root.name = 'grenadeLauncher';
+    grenadeModel.muzzle.name = 'grenadeMuzzle';
+    grenadeModel.root.visible = false;
+    const launcher = named('launcher', launcherModel.root, grenadeModel.root);
     const launcherMount = named('launcherMount', launcher);
     launcherMount.position.set(0.31, 0.13, 0);
 

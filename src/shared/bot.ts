@@ -1,5 +1,5 @@
 import { Vector3 } from 'three';
-import { DT, ROCKET } from './config';
+import { DT, GRAVITY, GRENADE, ROCKET } from './config';
 import type { GameSim, PlayerSim } from './sim';
 import type { PlayerInput } from './types';
 
@@ -105,9 +105,11 @@ export class Bot {
 
   private aimAt(p: PlayerSim, target: PlayerSim, input: PlayerInput) {
     p.eye(_eye);
-    const flight = target.pos.distanceTo(_eye) / ROCKET.speed;
+    const grenade = p.primary === 'grenade';
+    const flight = target.pos.distanceTo(_eye) / (grenade ? GRENADE.speed : ROCKET.speed);
     _aim.copy(target.pos).addScaledVector(target.vel, flight);
     if (target.grounded) _aim.y -= 0.8; // the floor at their feet: splash is easier to land than a direct hit
+    if (grenade) _aim.y += 0.5 * GRAVITY * flight * flight; // lob it: aim above by as much as it will drop
     _aim.sub(_eye);
     input.yaw = Math.atan2(-_aim.x, -_aim.z) + this.errYaw;
     input.pitch = Math.atan2(_aim.y, Math.hypot(_aim.x, _aim.z)) + this.errPitch;

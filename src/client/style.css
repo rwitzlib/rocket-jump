@@ -79,6 +79,68 @@ body {
   margin-top: 4px;
 }
 
+/* Above the health readout, clear of the netcode overlay and mute notice on the right. */
+#weapons {
+  position: fixed;
+  left: 24px;
+  bottom: 96px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  color: #fff;
+  font-size: 15px;
+  font-weight: 700;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+  pointer-events: none;
+}
+
+#weapons kbd {
+  margin-right: 8px;
+  padding: 1px 5px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 3px;
+  font: 600 11px ui-monospace, monospace;
+  color: #aab4c4;
+}
+
+#weapon-ammo {
+  margin-left: 8px;
+  color: #ffe680;
+  font-variant-numeric: tabular-nums;
+}
+
+#weapon-ammo.reloading {
+  color: #ff8a5c;
+}
+
+#pickup-notice {
+  position: fixed;
+  left: 50%;
+  top: calc(50% + 44px);
+  transform: translateX(-50%);
+  color: #ffe680;
+  font-size: 20px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  text-shadow: 0 0 8px rgba(150, 90, 255, 0.9), 0 1px 3px rgba(0, 0, 0, 0.8);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 400ms;
+}
+
+#pickup-notice.show {
+  opacity: 1;
+  transition: none;
+  animation: pickup-pop 300ms ease-out;
+}
+
+@keyframes pickup-pop {
+  from {
+    transform: translateX(-50%) scale(1.5);
+  }
+}
+
 #mute {
   position: fixed;
   right: 16px;

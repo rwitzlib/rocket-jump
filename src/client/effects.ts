@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import { DecalGeometry } from 'three/examples/jsm/geometries/DecalGeometry.js';
-import { ROCKET } from '../shared/config';
-import type { Rocket } from '../shared/sim';
+import { GRENADE, ROCKET } from '../shared/config';
+import { isArmed, type Projectile, type ProjectileKind } from '../shared/sim';
 import { ParticleSystem } from './particles';
-import { buildRocket } from './weapons';
+import { buildGrenade, buildRocket, GRENADE_LIGHT } from './weapons';
 
 const _pos = new THREE.Vector3();
 const _vel = new THREE.Vector3();
@@ -15,6 +15,11 @@ const _decalBounds = new THREE.Box3();
 const Z = new THREE.Vector3(0, 0, 1);
 
 const TRAIL_SPACING = 0.3; // meters between smoke puffs, so trails look the same at any frame rate
+const GRENADE_TRAIL_SPACING = 0.45;
+const GRENADE_SPIN = 14; // radians per second of tumble
+const GRENADE_UNARMED = new THREE.Color(0x7cf0a0);
+const GRENADE_ARMED = new THREE.Color(0xff3c28);
+const LIFETIME: Record<ProjectileKind, number> = { rocket: ROCKET.lifetime, grenade: GRENADE.lifetime };
 const MUZZLE_BLEND_TIME = 0.2; // seconds for a rocket drawn from a barrel to merge onto its simulated path
 const RING_TIME = 0.3;
 const LIGHT_TIME = 0.35;
@@ -97,23 +102,33 @@ function scorchTexture(): THREE.Texture {
   return new THREE.CanvasTexture(canvas);
 }
 
-/** Rockets, trails and explosions. Purely visual: reads game state, never writes it. */
+interface ProjectileMesh {
+  mesh: THREE.Object3D;
+  lastTrail: THREE.Vector3;
+  seen: number;
+  offset: THREE.Vector3;
+  age: number;
+  light: THREE.MeshBasicMaterial | null; // a grenade's arming light
+  spin: number; // a grenade's tumble so far, radians
+}
+
+/** Rockets, grenades, trails and explosions. Purely visual: reads game state, never writes it. */
 export class Effects {
   readonly fire = new ParticleSystem(3000, THREE.AdditiveBlending);
   readonly smoke = new ParticleSystem(3000, THREE.NormalBlending);
 
-  private rocketMeshes = new Map<number, { mesh: THREE.Object3D; lastTrail: THREE.Vector3; seen: number; offset: THREE.Vector3; age: number }>();
+  private projectileMeshes = new Map<number, ProjectileMesh>();
   /**
-   * Rockets are simulated from the shooter's eye. When the shooter has a visible weapon, this gives
-   * the barrel's offset from that eye; the rocket is drawn starting there and eases onto its real path.
+   * Projectiles are simulated from the shooter's eye. When the shooter has a visible weapon, this gives
+   * the barrel's offset from that eye; the projectile is drawn starting there and eases onto its real path.
    */
   muzzleOffset: ((ownerId: string, out: THREE.Vector3) => THREE.Vector3 | null) | null = null;
   private frameNo = 0;
-  private rocketProto: THREE.Object3D;
+  private readonly protos: Record<ProjectileKind, THREE.Object3D> = { rocket: buildRocket(), grenade: buildGrenade() };
   private lights: Timed<THREE.PointLight>[] = [];
   // Rings and decals are pooled and never disposed: disposing the last user of a material makes
   // three.js delete its shader program, so the next explosion would recompile it (a visible hitch).
-  private rings: Timed<THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial>>[] = [];
+  private rings: (Timed<THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial>> & { radius: number })[] = [];
   private decals: Timed<THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>>[] = [];
   /** Starting shape for pooled scorch marks (and what the startup warm-up draws); replaced on first use. */
   private readonly decalPlaceholder = new THREE.CircleGeometry(1, 24);
@@ -125,8 +140,6 @@ export class Effects {
     // Both systems sit at the origin, so force the glow to draw after (on top of) the smoke.
     this.fire.points.renderOrder = 1;
     scene.add(this.smoke.points, this.fire.points);
-
-    this.rocketProto = buildRocket();
 
     const ringGeo = new THREE.RingGeometry(0.85, 1, 48);
     for (let i = 0; i < MAX_RINGS; i++) {
@@ -142,7 +155,7 @@ export class Effects {
       );
       ring.visible = false;
       scene.add(ring);
-      this.rings.push({ obj: ring, age: RING_TIME });
+      this.rings.push({ obj: ring, age: RING_TIME, radius: ROCKET.blastRadius });
     }
 
     const decalTex = scorchTexture();
@@ -170,7 +183,7 @@ export class Effects {
     }
   }
 
-  private warmRocket: THREE.Object3D | null = null;
+  private warmProjectiles: THREE.Object3D[] = [];
 
   /**
    * Makes one of every effect drawable (or puts them back). Rendering a frame in this state at
@@ -180,17 +193,17 @@ export class Effects {
   setWarmup(on: boolean) {
     const showcase: THREE.Object3D[] = [this.rings[0].obj, this.decals[0].obj];
     if (on) {
-      this.warmRocket = this.rocketProto.clone();
-      this.scene.add(this.warmRocket);
-      showcase.push(this.warmRocket);
+      this.warmProjectiles = Object.values(this.protos).map((proto) => proto.clone());
+      this.scene.add(...this.warmProjectiles);
+      showcase.push(...this.warmProjectiles);
       _pos.set(0, 1, 0);
       this.fire.emit({ pos: _pos, life: 1, size: [1, 1], color: [0xffffff, 0xffffff] });
       this.smoke.emit({ pos: _pos, life: 1, size: [1, 1], color: [0xffffff, 0xffffff] });
       this.fire.update(0);
       this.smoke.update(0);
     } else {
-      if (this.warmRocket) this.scene.remove(this.warmRocket);
-      this.warmRocket = null;
+      for (const obj of this.warmProjectiles) this.scene.remove(obj);
+      this.warmProjectiles = [];
       this.fire.update(1e6); // ages out the warm-up particles
       this.smoke.update(1e6);
     }
@@ -206,8 +219,10 @@ export class Effects {
     this.smoke.setViewport(heightPx, fov);
   }
 
-  explosion(at: THREE.Vector3, normal: THREE.Vector3, surface: boolean) {
-    const r = ROCKET.blastRadius;
+  /** `radius`: the blast's real reach, which the fireball and shockwave are sized to. */
+  explosion(at: THREE.Vector3, normal: THREE.Vector3, surface: boolean, radius: number) {
+    const r = radius;
+    const k = radius / ROCKET.blastRadius; // everything below was tuned on a rocket's blast
 
     // 1. Flash: a single huge, very short-lived glow.
     this.fire.emit({ pos: at, life: 0.09, size: [r * 2.2, r * 2.6], color: [0xfff4d0, 0xffb060], alpha: 1 });
@@ -215,13 +230,13 @@ export class Effects {
     // 2. Fireball: puffs pushed outward (biased away from the surface) that slow down quickly.
     for (let i = 0; i < 24; i++) {
       randomInSphere(_rand);
-      _vel.copy(_rand).multiplyScalar(10).addScaledVector(normal, 5);
-      _pos.copy(at).addScaledVector(_rand, 0.6);
+      _vel.copy(_rand).multiplyScalar(10 * k).addScaledVector(normal, 5 * k);
+      _pos.copy(at).addScaledVector(_rand, 0.6 * k);
       this.fire.emit({
         pos: _pos,
         vel: _vel,
         life: 0.4 + Math.random() * 0.35,
-        size: [2, 3.5 + Math.random() * 2],
+        size: [2 * k, (3.5 + Math.random() * 2) * k],
         color: [0xfff0c0, 0xff4a10],
         alpha: 1,
         drag: 6,
@@ -267,6 +282,7 @@ export class Effects {
     // 5. Shockwave ring flat against the surface, sized to the real blast radius.
     const ring = oldest(this.rings);
     ring.age = 0;
+    ring.radius = radius;
     ring.obj.visible = true;
     ring.obj.position.copy(at).addScaledVector(normal, 0.05);
     ring.obj.quaternion.setFromUnitVectors(Z, normal);
@@ -280,8 +296,41 @@ export class Effects {
     light.obj.position.copy(at).addScaledVector(normal, 0.8);
   }
 
-  update(rockets: readonly Rocket[], alpha: number, dt: number) {
-    this.syncRockets(rockets, alpha, dt);
+  /** A grenade bouncing off something before it's armed: a few sparks, more the harder it hit. */
+  bounce(at: THREE.Vector3, normal: THREE.Vector3, speed: number) {
+    const count = Math.min(Math.round(speed / 2), 10);
+    for (let i = 0; i < count; i++) {
+      randomInSphere(_rand).normalize();
+      if (_rand.dot(normal) < 0) _rand.reflect(normal);
+      _vel.copy(_rand).multiplyScalar(3 + Math.random() * speed * 0.5);
+      this.fire.emit({ pos: at, vel: _vel, life: 0.2 + Math.random() * 0.25, size: [0.1, 0.03], color: [0xfff0c0, 0xff9040], alpha: 1, gravity: 22, drag: 2 });
+    }
+    _vel.copy(normal).multiplyScalar(0.6);
+    this.smoke.emit({ pos: at, vel: _vel, life: 0.6, size: [0.2, 0.7], color: [0xb8b0a4, 0x8a8682], alpha: 0.5, drag: 3 });
+  }
+
+  /** A mystery box being taken: a burst of glitter spraying out of it. */
+  sparkle(at: THREE.Vector3) {
+    this.fire.emit({ pos: at, life: 0.25, size: [1.5, 3], color: [0xfff4d0, 0xc070ff], alpha: 0.9 });
+    for (let i = 0; i < 40; i++) {
+      randomInSphere(_rand).normalize();
+      _vel.copy(_rand).multiplyScalar(3 + Math.random() * 5);
+      _vel.y += 2;
+      this.fire.emit({
+        pos: at,
+        vel: _vel,
+        life: 0.5 + Math.random() * 0.6,
+        size: [0.16, 0.04],
+        color: [Math.random() < 0.5 ? 0xffe070 : 0xd090ff, 0x8040ff],
+        alpha: 1,
+        gravity: 6,
+        drag: 2.5,
+      });
+    }
+  }
+
+  update(projectiles: readonly Projectile[], alpha: number, dt: number) {
+    this.syncProjectiles(projectiles, alpha, dt);
     this.fire.update(dt);
     this.smoke.update(dt);
 
@@ -295,7 +344,7 @@ export class Effects {
       r.age += dt;
       const t = r.age / RING_TIME;
       r.obj.visible = t < 1;
-      r.obj.scale.setScalar(0.3 + ROCKET.blastRadius * Math.sqrt(t));
+      r.obj.scale.setScalar(0.3 + r.radius * Math.sqrt(t));
       r.obj.material.opacity = (1 - t) * 0.8;
     }
 
@@ -337,25 +386,33 @@ export class Effects {
     decal.material.opacity = 1;
   }
 
-  private syncRockets(rockets: readonly Rocket[], alpha: number, dt: number) {
+  private syncProjectiles(projectiles: readonly Projectile[], alpha: number, dt: number) {
     const frame = ++this.frameNo;
-    for (const r of rockets) {
-      let entry = this.rocketMeshes.get(r.id);
+    for (const r of projectiles) {
+      let entry = this.projectileMeshes.get(r.id);
       if (!entry) {
-        const mesh = this.rocketProto.clone();
+        const mesh = this.protos[r.kind].clone();
+        let light: THREE.MeshBasicMaterial | null = null;
+        const lightMesh = mesh.getObjectByName(GRENADE_LIGHT) as THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial> | undefined;
+        if (lightMesh) lightMesh.material = light = lightMesh.material.clone();
         this.scene.add(mesh);
-        // Only for rockets seen right as they're fired; one that first shows up mid-flight stays on its path.
+        // Only for projectiles seen right as they're fired; one that first shows up mid-flight stays on its path.
         const offset = new THREE.Vector3();
-        if (r.life > ROCKET.lifetime - MUZZLE_BLEND_TIME / 2) this.muzzleOffset?.(r.ownerId, offset);
-        entry = { mesh, lastTrail: r.prevPos.clone().add(offset), seen: frame, offset, age: 0 };
-        this.rocketMeshes.set(r.id, entry);
+        if (r.life > LIFETIME[r.kind] - MUZZLE_BLEND_TIME / 2) this.muzzleOffset?.(r.ownerId, offset);
+        entry = { mesh, lastTrail: r.prevPos.clone().add(offset), seen: frame, offset, age: 0, light, spin: 0 };
+        this.projectileMeshes.set(r.id, entry);
       }
       entry.seen = frame;
       entry.age += dt;
       const { mesh, lastTrail } = entry;
       const blend = Math.min(entry.age / MUZZLE_BLEND_TIME, 1);
       mesh.position.lerpVectors(r.prevPos, r.pos, alpha).addScaledVector(entry.offset, 1 - blend * blend * (3 - 2 * blend));
-      mesh.lookAt(_pos.copy(mesh.position).sub(r.dir));
+      // A grenade rolling to a stop jitters in direction: it keeps the pose it had while still moving.
+      if (r.kind === 'rocket' || r.vel.lengthSq() > 4) mesh.lookAt(_pos.copy(mesh.position).sub(r.vel));
+      if (r.kind === 'grenade') {
+        this.updateGrenade(r, entry, dt);
+        continue;
+      }
 
       // Lay smoke + exhaust glow at fixed spacing along the path traveled since the last frame.
       let gap = lastTrail.distanceTo(mesh.position);
@@ -377,11 +434,32 @@ export class Effects {
         this.fire.emit({ pos: lastTrail, life: 0.12, size: [0.5, 0.2], color: [0xffd080, 0xff5010], alpha: 0.8 });
       }
     }
-    for (const [id, entry] of this.rocketMeshes) {
+    for (const [id, entry] of this.projectileMeshes) {
       if (entry.seen !== frame) {
         this.scene.remove(entry.mesh);
-        this.rocketMeshes.delete(id);
+        entry.light?.dispose();
+        this.projectileMeshes.delete(id);
       }
+    }
+  }
+
+  /** Tumbles end over end, trails thin smoke, and its light goes from green to blinking red once armed. */
+  private updateGrenade(r: Projectile, entry: ProjectileMesh, dt: number) {
+    const { mesh, lastTrail } = entry;
+    entry.spin += dt * GRENADE_SPIN * Math.min(r.vel.length() / GRENADE.speed, 1);
+    if (r.vel.lengthSq() > 4) mesh.rotateX(entry.spin);
+    if (entry.light) {
+      const armed = isArmed(r);
+      entry.light.color.copy(armed ? GRENADE_ARMED : GRENADE_UNARMED);
+      entry.light.visible = !armed || Math.floor(entry.age * 12) % 2 === 0;
+    }
+    let gap = lastTrail.distanceTo(mesh.position);
+    _step.subVectors(mesh.position, lastTrail).normalize();
+    while (gap >= GRENADE_TRAIL_SPACING) {
+      lastTrail.addScaledVector(_step, GRENADE_TRAIL_SPACING);
+      gap -= GRENADE_TRAIL_SPACING;
+      randomInSphere(_rand).multiplyScalar(0.2);
+      this.smoke.emit({ pos: lastTrail, vel: _rand, life: 0.5 + Math.random() * 0.3, size: [0.15, 0.6], color: [0xe0dcd8, 0xa8a4a0], alpha: 0.45, drag: 1, gravity: -0.3 });
     }
   }
 }

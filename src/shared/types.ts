@@ -1,3 +1,7 @@
+export type WeaponId = 'rocket' | 'grenade' | 'grapple';
+/** Fire (left click) uses the primary weapon, grapple (right click) the secondary. */
+export type WeaponSlot = 'primary' | 'secondary';
+
 // One tick of player intent. This is exactly what a client will send to the server in multiplayer,
 // so keep it small and serializable.
 export interface PlayerInput {

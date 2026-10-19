@@ -18,6 +18,7 @@ export interface MapDef {
   boxes: BoxDef[];
   crates: Vec3Tuple[];
   spawns: SpawnDef[];
+  pickups: Vec3Tuple[]; // mystery box centers
   killY: number;
 }
 
@@ -88,6 +89,11 @@ export const ARENA: MapDef = {
     { pos: [0, 2, -40], yaw: Math.PI },
     { pos: [40, 2, 0], yaw: Math.PI / 2 },
     { pos: [-40, 2, 0], yaw: -Math.PI / 2 },
+  ],
+  pickups: [
+    [0, 1.4, 30], // in front of the north and south spawns
+    [0, 1.4, -30],
+    [-3.5, 22.2, 3.5], // on the tower deck
   ],
   killY: -30,
 };

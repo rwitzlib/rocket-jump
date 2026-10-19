@@ -1,6 +1,6 @@
 import RAPIER from '@dimforge/rapier3d-compat';
 import * as THREE from 'three';
-import { DT, GRAPPLE, ROCKET } from '../shared/config';
+import { DT, GRAPPLE, GRENADE, ROCKET } from '../shared/config';
 import { ARENA } from '../shared/map';
 import { GameSim, type DeathCause, type PlayerSim, type SimEvent } from '../shared/sim';
 import { GameAudio } from './audio';
@@ -13,6 +13,7 @@ import { Loopback, type NetConditions } from './net/loopback';
 import { NetClient } from './net/netclient';
 import { NetOverlay } from './net/netoverlay';
 import { PerfOverlay } from './perf';
+import { PickupView } from './pickups';
 import { RemotePlayersView } from './remoteview';
 import { Rope } from './rope';
 import { ViewModel } from './viewmodel';
@@ -71,8 +72,9 @@ async function main() {
   const effects = new Effects(scene, levelMeshes);
   const rope = new Rope(scene);
   const remoteView = new RemotePlayersView(scene);
+  const pickupView = new PickupView(scene, sim.pickups);
   let fov = FOV;
-  // Rockets are drawn leaving the barrel you see: the first-person one for ours, the model's for others.
+  // Rockets and grenades are drawn leaving the barrel you see: the first-person one for ours, the model's for others.
   effects.muzzleOffset = (id, out) => {
     if (id !== localId) return remoteView.muzzleOffset(id, out);
     camera.updateMatrixWorld();
@@ -129,23 +131,38 @@ async function main() {
     const mine = 'playerId' in e && e.playerId === localId;
     switch (e.type) {
       case 'explosion': {
-        effects.explosion(e.pos, e.normal, e.surface);
+        effects.explosion(e.pos, e.normal, e.surface, e.radius);
         audio.play('explosion', { at: e.pos, volume: 1.6 });
         const dist = e.pos.distanceTo(me.pos);
         cameraFx.shake(Math.max(0, 0.7 * (1 - dist / 25)));
         break;
       }
-      case 'fired':
+      case 'fired': {
+        const sound = e.weapon === 'grenade' ? 'grenadeFire' : 'fire';
         if (mine) {
           viewModel.fire();
-          audio.play('fire', { volume: 0.8 });
-          cameraFx.shake(0.12);
+          audio.play(sound, { volume: 0.8 });
+          cameraFx.shake(e.weapon === 'grenade' ? 0.08 : 0.12);
         } else {
           remoteView.fired(e.playerId);
           const at = playerPos(e.playerId);
-          if (at) audio.play('fire', { at });
+          if (at) audio.play(sound, { at });
         }
         break;
+      }
+      case 'bounce':
+        effects.bounce(e.pos, e.normal, e.speed);
+        audio.play('bounce', { at: e.pos, volume: Math.min(0.3 + e.speed / 15, 1), rate: 0.9 + Math.random() * 0.2 });
+        break;
+      case 'pickup': {
+        const box = sim.pickups[e.box];
+        if (box) effects.sparkle(box.pos);
+        if (mine) {
+          hud.pickedUp(e.weapon);
+          audio.play('pickup', { volume: 0.7 });
+        } else if (box) audio.play('pickup', { at: box.pos, volume: 0.6 });
+        break;
+      }
       case 'knockback':
         if (mine) {
           cameraFx.shake(0.3 * e.strength);
@@ -259,12 +276,21 @@ async function main() {
 
     crates.sync();
     effects.setViewport(renderer.domElement.height, fov);
-    const rockets = client ? client.renderRockets : sim.rockets;
-    viewModel.update(dt, horizontalSpeed, me.grounded, !!me.grapple, 1 - me.fireCooldown / ROCKET.cooldown, 1 - me.grappleCooldown / GRAPPLE.cooldown);
-    effects.update(rockets, alpha, dt);
+    const projectiles = client ? client.renderProjectiles : sim.projectiles;
+    // The grenade launcher's arc shows what's left in the drum, then the reload filling it back up.
+    const grenades = me.primary === 'grenade';
+    const reloading = grenades && me.reloading;
+    const reloaded = 1 - me.fireCooldown / GRENADE.reload;
+    const fireReady = grenades ? (reloading ? reloaded : 1) : 1 - me.fireCooldown / ROCKET.cooldown;
+    const fireCharge = grenades ? (reloading ? reloaded : me.drum / GRENADE.drum) : fireReady;
+    const grappleReady = 1 - me.grappleCooldown / GRAPPLE.cooldown;
+    viewModel.setPrimary(me.primary);
+    viewModel.update(dt, horizontalSpeed, me.grounded, !!me.grapple, fireReady, grappleReady, reloading);
+    effects.update(projectiles, alpha, dt);
+    pickupView.update(dt);
     if (me.grapple) rope.follow(me.grapple.anchor, me.grapple.normal);
     rope.update(dt, camera.localToWorld(viewModel.ropeOrigin(fov, hand)), camera);
-    audio.update(camera, rockets);
+    audio.update(camera, projectiles);
 
     // Only touch the DOM when something visibly changed; style writes every frame cost layout/paint work.
     flash = Math.max(0, flash - dt * 2.5);
@@ -276,7 +302,8 @@ async function main() {
     crosshair.classList.toggle('grappling', !!me.grapple);
     hud.setHealth(me.health);
     hud.setProtected(me.alive && me.protectedFor > 0);
-    hud.setCooldowns(1 - me.fireCooldown / ROCKET.cooldown, 1 - me.grappleCooldown / GRAPPLE.cooldown);
+    hud.setCooldowns(fireCharge, grappleReady);
+    hud.setWeapons(me.primary, me.secondary, grenades ? (reloading ? 'reloading' : me.drum) : null);
     hud.setDeath(me.alive ? null : (death ?? { killerId: null, cause: 'rocket' }), me.respawnIn);
     if (hud.boardOpen) {
       hud.setScores(client ? client.scores : [...sim.players.values()].map((p) => ({ id: p.id, kills: p.kills, deaths: p.deaths })));

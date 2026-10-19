@@ -73,6 +73,8 @@ export interface LauncherModel {
   muzzle: THREE.Object3D;
   /** Status light on the housing's inner side: set its color to show whether a shot is ready. */
   light: THREE.MeshStandardMaterial;
+  /** A revolving drum, turned around the barrel's axis (Z) as it fires. */
+  drum?: THREE.Object3D;
 }
 
 /** A shoulder-fired launcher: a ribbed rear housing around a long tube, gripped from below. */
@@ -114,6 +116,85 @@ export function buildLauncher(accent: THREE.Material = DEFAULT_ACCENT): Launcher
   muzzle.position.z = LAUNCHER.muzzleZ;
   root.add(muzzle);
   return { root, muzzle, light };
+}
+
+// --- Grenade launcher ------------------------------------------------------------------------
+
+/** Grenade launcher landmarks. It shares the rocket launcher's grips, so the same hands hold it. */
+export const GRENADE_LAUNCHER = {
+  muzzleZ: -0.64,
+};
+
+const grenadeLauncherGeo = {
+  barrel: lathe([
+    [0.055, 0.1],
+    [0.07, 0.12],
+    [0.07, 0.54],
+    [0.086, 0.56],
+    [0.086, 0.64],
+    [0.06, 0.645],
+  ]),
+  drum: new THREE.CylinderGeometry(0.15, 0.15, 0.24, 24).rotateX(Math.PI / 2),
+  drumCap: new THREE.CylinderGeometry(0.11, 0.11, 0.02, 20).rotateX(Math.PI / 2),
+  flute: new THREE.BoxGeometry(0.035, 0.02, 0.2),
+  chamber: new THREE.CircleGeometry(0.036, 12),
+  band: new THREE.CylinderGeometry(0.078, 0.078, 0.05, 20).rotateX(Math.PI / 2),
+  strap: new THREE.BoxGeometry(0.05, 0.035, 0.56),
+  sight: new THREE.BoxGeometry(0.05, 0.07, 0.03),
+  handguard: new THREE.BoxGeometry(0.12, 0.07, 0.28),
+  frame: new THREE.BoxGeometry(0.08, 0.06, 0.32),
+  stock: new THREE.BoxGeometry(0.1, 0.15, 0.24),
+  grip: launcherGeo.grip,
+  guard: launcherGeo.guard,
+  bore: new THREE.CircleGeometry(0.058, 16),
+  light: launcherGeo.light,
+};
+
+/**
+ * A revolver-style grenade launcher: a fat six-shot drum behind a short, wide barrel, gripped
+ * where the rocket launcher is. Same landmarks as `buildLauncher`, so it can stand in for it.
+ */
+export function buildGrenadeLauncher(accent: THREE.Material = DEFAULT_ACCENT): LauncherModel {
+  const g = grenadeLauncherGeo;
+  const root = new THREE.Group();
+  const light = new THREE.MeshStandardMaterial({ color: 0x7cf0a0, emissive: 0x3cbf6a });
+
+  root.add(part(g.barrel, gunmetal));
+  root.add(part(g.band, accent, 0, 0, -0.2), part(g.band, accent, 0, 0, -0.5));
+  // The drum turns as a unit around the barrel's axis.
+  const drum = new THREE.Group();
+  drum.add(part(g.drum, dark, 0, 0, 0.02), part(g.drumCap, gunmetal, 0, 0, -0.1), part(g.drumCap, gunmetal, 0, 0, 0.14));
+  root.add(drum);
+  for (let k = 0; k < 6; k++) {
+    const a = (k / 6) * Math.PI * 2 + Math.PI / 6;
+    const flute = part(g.flute, gunmetal, Math.cos(a) * 0.145, Math.sin(a) * 0.145, 0.02);
+    flute.rotation.z = a + Math.PI / 2;
+    // Chamber mouths on the drum's front face, between the flutes.
+    const b = a + Math.PI / 6;
+    const chamber = part(g.chamber, bore, Math.cos(b) * 0.085, Math.sin(b) * 0.085, -0.101);
+    chamber.rotation.y = Math.PI;
+    drum.add(flute, chamber);
+  }
+  root.add(part(g.strap, dark, 0, 0.16, -0.17), part(g.sight, gunmetal, 0, 0.2, -0.02));
+  root.add(part(g.handguard, dark, 0, -0.09, LAUNCHER.foreGrip.z));
+  root.add(part(g.frame, gunmetal, 0, -0.15, 0.06), part(g.stock, dark, 0, -0.03, 0.26));
+  root.add(part(g.light, light, -0.152, 0.03, 0.02));
+
+  const fore = part(g.grip, dark, LAUNCHER.foreGrip.x, LAUNCHER.foreGrip.y + 0.04, LAUNCHER.foreGrip.z);
+  fore.rotation.x = -0.15;
+  const rear = part(g.grip, dark, LAUNCHER.rearGrip.x, LAUNCHER.rearGrip.y + 0.04, LAUNCHER.rearGrip.z);
+  rear.rotation.x = 0.3;
+  root.add(fore, rear, part(g.guard, gunmetal, 0, -0.17, 0.02));
+
+  const muzzleBore = part(g.bore, bore, 0, 0, GRENADE_LAUNCHER.muzzleZ + 0.015);
+  muzzleBore.rotation.y = Math.PI;
+  root.add(muzzleBore);
+
+  const muzzle = new THREE.Object3D();
+  muzzle.name = 'muzzle';
+  muzzle.position.z = GRENADE_LAUNCHER.muzzleZ;
+  root.add(muzzle);
+  return { root, muzzle, light, drum };
 }
 
 // --- Grapple ---------------------------------------------------------------------------------
@@ -190,6 +271,37 @@ export function buildGauntlet(accent: THREE.Material = DEFAULT_ACCENT, outerSide
   tip.position.copy(GAUNTLET.tip);
   root.add(tip);
   return { root, hookHead, tip, strip };
+}
+
+// --- Grenade ---------------------------------------------------------------------------------
+
+const olive = new THREE.MeshStandardMaterial({ color: 0x5f6e3c, metalness: 0.2, roughness: 0.55 });
+
+/** Name of the grenade's arming light: each copy gets its own material so it can blink on its own. */
+export const GRENADE_LIGHT = 'grenadeLight';
+
+/** A stubby 40 mm-style round: olive body, steel cap, a light on the nose that shows when it's armed. */
+export function buildGrenade(): THREE.Group {
+  const root = new THREE.Group();
+  const body = part(
+    lathe([
+      [0, -0.11],
+      [0.055, -0.105],
+      [0.08, -0.08],
+      [0.09, -0.03],
+      [0.09, 0.04],
+      [0.075, 0.08],
+      [0.045, 0.105],
+      [0, 0.115],
+    ], 16),
+    olive,
+  );
+  const band = part(new THREE.CylinderGeometry(0.093, 0.093, 0.03, 16).rotateX(Math.PI / 2), steel, 0, 0, 0.0);
+  const light = part(new THREE.SphereGeometry(0.03, 10, 8), new THREE.MeshBasicMaterial({ color: 0x7cf0a0 }), 0, 0, -0.11);
+  light.name = GRENADE_LIGHT;
+  light.castShadow = false;
+  root.add(body, band, light);
+  return root;
 }
 
 // --- Rocket ----------------------------------------------------------------------------------

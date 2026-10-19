@@ -1,3 +1,5 @@
+import type { WeaponId, WeaponSlot } from './types';
+
 // All gameplay tuning lives here. Units are meters and seconds.
 // This file is shared so a future server simulates with identical numbers.
 
@@ -33,6 +35,28 @@ export const ROCKET = {
   selfKnockback: 1.4, // your own rockets launch you this much harder: bigger rocket jumps
   crateKnockback: 12,
   hookRadius: 0.6, // how close a grapple ray has to pass to a rocket to hook it: a bit bigger than it looks
+};
+
+// The burst and area-denial weapon: empty a six-shot drum fast, then wait out a long reload. Each
+// grenade hits for less than a rocket but over a wider area, and they bounce off walls, so they can
+// be banked around corners or left rolling in a doorway until the fuse goes.
+export const GRENADE = {
+  speed: 24, // launch speed along the aim; gravity bends it from there
+  cooldown: 0.3, // between shots while the drum has grenades in it
+  drum: 6, // grenades per load
+  reload: 2.5, // seconds to refill an empty drum
+  lifetime: 2.5, // fuse: explodes on its own if it hasn't hit anyone by then
+  radius: 0.12, // collision radius, so it bounces off surfaces instead of sinking into them
+  armDistance: 6, // meters flown before it explodes on players. Surfaces it always bounces off
+  restitution: 0.55, // fraction of the speed into a surface it bounces back with
+  friction: 0.75, // fraction of the speed along a surface it keeps on each bounce
+  blastRadius: 5,
+  knockback: 14,
+  selfKnockback: 1.4,
+  crateKnockback: 11,
+  damage: 55, // at the center of the blast, falling off linearly. Two close ones kill
+  impactDamage: 35, // an unarmed grenade hitting someone point blank: it bounces off them instead of exploding
+  impactKnockback: 4, // velocity change from that hit, along the grenade's flight
 };
 
 export const GRAPPLE = {
@@ -71,4 +95,20 @@ export const COMBAT = {
   regenRate: 10, // health per second
   respawnDelay: 3,
   killCredit: 5, // falling off the map within this many seconds of being hit counts as a kill for the hitter
+};
+
+export const WEAPONS: Record<WeaponId, { slot: WeaponSlot; name: string }> = {
+  rocket: { slot: 'primary', name: 'Rocket Launcher' },
+  grenade: { slot: 'primary', name: 'Grenade Launcher' },
+  grapple: { slot: 'secondary', name: 'Grapple' },
+};
+
+/** What everyone spawns with. Mystery boxes swap one slot for something else until you die. */
+export const LOADOUT = { primary: 'rocket', secondary: 'grapple' } as const satisfies Record<WeaponSlot, WeaponId>;
+
+/** Floating mystery boxes: walk into one to swap a weapon for one you don't have. */
+export const PICKUP = {
+  size: 0.8, // cube edge
+  reach: 0.5, // how close (beyond the box's half size) your capsule has to get to take it
+  respawn: 10, // seconds until a taken box comes back
 };

@@ -1,7 +1,7 @@
 import { Vector3 } from 'three';
 import type { Vec3Tuple } from './map';
-import type { PlayerState, SimEvent } from './sim';
-import type { PlayerInput } from './types';
+import type { PlayerState, ProjectileKind, SimEvent } from './sim';
+import type { PlayerInput, WeaponId } from './types';
 
 // Messages between client and server. Plain JSON-able data for now; a compact binary encoding can
 // replace this later without touching the code on either side of it.
@@ -28,6 +28,7 @@ export interface RemotePlayerState {
   alive: boolean;
   protected: boolean; // spawn protection
   grounded: boolean; // only drives the remote player's animation
+  primary: WeaponId; // which weapon their model carries
 }
 
 export interface ScoreEntry {
@@ -36,13 +37,15 @@ export interface ScoreEntry {
   deaths: number;
 }
 
-export interface RocketState {
+export interface ProjectileState {
   id: number;
+  kind: ProjectileKind;
   ownerId: string;
   shot: number; // seq of the owner's input that fired it, so the owner can match its predicted copy
   pos: Vec3Tuple;
-  dir: Vec3Tuple;
+  vel: Vec3Tuple;
   life: number;
+  traveled: number;
 }
 
 /** Position then rotation quaternion: [x, y, z, qx, qy, qz, qw]. */
@@ -63,8 +66,9 @@ export interface SnapshotMessage {
   ack: number; // last input seq the server has simulated for the recipient
   you: PlayerState | null; // the recipient's own player, full precision, for reconciliation
   players: RemotePlayerState[]; // everyone else
-  rockets: RocketState[];
+  projectiles: ProjectileState[];
   crates: CrateState[];
+  pickups: number[]; // each mystery box's respawnIn: 0 while it's there to take
   scores: ScoreEntry[]; // everyone, including the recipient
   events: WireEvent[]; // the last NET.eventWindow ticks of events; clients skip ones they've seen
   input: { queued: number; starved: number; dropped: number }; // the recipient's input stream health, for debugging
@@ -75,12 +79,12 @@ export type ServerMessage = WelcomeMessage | SnapshotMessage;
 const tuple = (v: Vector3): Vec3Tuple => [v.x, v.y, v.z];
 
 export function toWireEvent(e: SimEvent, tick: number): WireEvent {
-  if (e.type === 'explosion') return { ...e, pos: tuple(e.pos), normal: tuple(e.normal), tick };
+  if (e.type === 'explosion' || e.type === 'bounce') return { ...e, pos: tuple(e.pos), normal: tuple(e.normal), tick };
   return { ...e, tick };
 }
 
 export function fromWireEvent(w: WireEvent): SimEvent {
   const { tick: _, ...e } = w;
-  if (e.type === 'explosion') return { ...e, pos: new Vector3(...e.pos), normal: new Vector3(...e.normal) };
+  if (e.type === 'explosion' || e.type === 'bounce') return { ...e, pos: new Vector3(...e.pos), normal: new Vector3(...e.normal) };
   return e;
 }

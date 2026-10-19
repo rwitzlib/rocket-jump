@@ -7,7 +7,7 @@ import {
   type CrateState,
   type InputFrame,
   type RemotePlayerState,
-  type RocketState,
+  type ProjectileState,
   type ScoreEntry,
   type ServerMessage,
   type WireEvent,
@@ -129,17 +129,20 @@ export class GameServer {
     const scores: ScoreEntry[] = [];
     for (const p of sim.players.values()) {
       const a = p.grapple?.anchor;
-      players.push({ id: p.id, pos: [p.pos.x, p.pos.y, p.pos.z], yaw: p.yaw, pitch: p.pitch, anchor: a ? [a.x, a.y, a.z] : null, alive: p.alive, protected: p.protectedFor > 0, grounded: p.grounded });
+      players.push({ id: p.id, pos: [p.pos.x, p.pos.y, p.pos.z], yaw: p.yaw, pitch: p.pitch, anchor: a ? [a.x, a.y, a.z] : null, alive: p.alive, protected: p.protectedFor > 0, grounded: p.grounded, primary: p.primary });
       scores.push({ id: p.id, kills: p.kills, deaths: p.deaths });
     }
-    const rockets: RocketState[] = sim.rockets.map((r) => ({
+    const projectiles: ProjectileState[] = sim.projectiles.map((r) => ({
       id: r.id,
+      kind: r.kind,
       ownerId: r.ownerId,
       shot: r.shot,
       pos: [r.pos.x, r.pos.y, r.pos.z],
-      dir: [r.dir.x, r.dir.y, r.dir.z],
+      vel: [r.vel.x, r.vel.y, r.vel.z],
       life: r.life,
+      traveled: r.traveled,
     }));
+    const pickups = sim.pickups.map((b) => b.respawnIn);
     const crates: CrateState[] = sim.crates.map((c) => {
       const t = c.translation();
       const q = c.rotation();
@@ -153,8 +156,9 @@ export class GameServer {
         ack: conn.lastProcessed,
         you: sim.players.get(id)?.capture() ?? null,
         players: players.filter((p) => p.id !== id),
-        rockets,
+        projectiles,
         crates,
+        pickups,
         scores,
         events: this.recentEvents,
         input: { queued: conn.queue.length, starved: conn.starved, dropped: conn.dropped },

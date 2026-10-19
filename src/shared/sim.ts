@@ -1,10 +1,10 @@
 import RAPIER from '@dimforge/rapier3d-compat';
 import { Euler, Quaternion, Vector3 } from 'three';
-import { COMBAT, CRATE, DT, GRAPPLE, GRAVITY, PLAYER, ROCKET } from './config';
+import { COMBAT, CRATE, DT, GRAPPLE, GRAVITY, GRENADE, LOADOUT, PICKUP, PLAYER, ROCKET, WEAPONS } from './config';
 import type { MapDef, SpawnDef, Vec3Tuple } from './map';
 import { capsuleNormal, PositionHistory, rayCapsule, REWIND_TICKS } from './hits';
 import { aimDirection, applyGrapple, updateVelocity, type GrappleState, type Hook } from './movement';
-import { EMPTY_INPUT, type PlayerInput } from './types';
+import { EMPTY_INPUT, type PlayerInput, type WeaponId } from './types';
 
 // The authoritative game simulation. It has no rendering or DOM code, so the same class can run
 // in the browser (single-player / client prediction) or in Node (the multiplayer server).
@@ -26,6 +26,8 @@ export interface PlayerState {
   grounded: boolean;
   grapple: { anchor: Vec3Tuple; normal: Vec3Tuple; length: number; hook: HookState | null } | null;
   fireCooldown: number;
+  drum: number; // grenades left in the grenade launcher
+  reloading: boolean; // the drum is being refilled; fireCooldown counts it down
   grappleCooldown: number;
   grappleUsed: boolean;
   yaw: number;
@@ -34,9 +36,11 @@ export interface PlayerState {
   alive: boolean;
   respawnIn: number; // seconds, while dead
   protectedFor: number; // seconds of spawn protection left
+  primary: WeaponId;
+  secondary: WeaponId;
 }
 
-export type DeathCause = 'rocket' | 'fall';
+export type DeathCause = 'rocket' | 'grenade' | 'fall';
 
 export type HookState =
   | { kind: 'player'; id: string; offset: Vec3Tuple }
@@ -88,12 +92,16 @@ export class PlayerSim {
   grounded = false;
   grapple: GrappleState | null = null;
   fireCooldown = 0;
+  drum: number = GRENADE.drum;
+  reloading = false;
   grappleCooldown = 0;
   grappleUsed = false; // this press of the grapple button already fired; cleared on release
   yaw = 0;
   pitch = 0;
   /** Seq of the input being simulated (0 offline). Tags fired rockets so a client can match its predictions. */
   seq = 0;
+  primary: WeaponId = LOADOUT.primary;
+  secondary: WeaponId = LOADOUT.secondary;
 
   health: number = COMBAT.maxHealth;
   alive = true;
@@ -125,6 +133,8 @@ export class PlayerSim {
       grounded: this.grounded,
       grapple: g && { anchor: tuple(g.anchor), normal: tuple(g.normal), length: g.length, hook: hookToState(g.hook) },
       fireCooldown: this.fireCooldown,
+      drum: this.drum,
+      reloading: this.reloading,
       grappleCooldown: this.grappleCooldown,
       grappleUsed: this.grappleUsed,
       yaw: this.yaw,
@@ -133,6 +143,8 @@ export class PlayerSim {
       alive: this.alive,
       respawnIn: this.respawnIn,
       protectedFor: this.protectedFor,
+      primary: this.primary,
+      secondary: this.secondary,
     };
   }
 
@@ -150,6 +162,8 @@ export class PlayerSim {
       hook: hookFromState(g.hook),
     };
     this.fireCooldown = s.fireCooldown;
+    this.drum = s.drum;
+    this.reloading = s.reloading;
     this.grappleCooldown = s.grappleCooldown;
     this.grappleUsed = s.grappleUsed;
     this.yaw = s.yaw;
@@ -157,6 +171,8 @@ export class PlayerSim {
     this.health = s.health;
     this.respawnIn = s.respawnIn;
     this.protectedFor = s.protectedFor;
+    this.primary = s.primary;
+    this.secondary = s.secondary;
     if (s.alive !== this.alive) {
       this.alive = s.alive;
       this.collider.setEnabled(s.alive);
@@ -166,20 +182,52 @@ export class PlayerSim {
   }
 }
 
-export interface Rocket {
-  id: number; // server-assigned; predicted rockets use -shot until the server's copy replaces them
+export type ProjectileKind = 'rocket' | 'grenade';
+
+/**
+ * Rockets fly straight at a constant speed and explode on anything. Grenades fall and bounce off
+ * surfaces; once armed they explode on any player they touch, otherwise when the fuse runs out.
+ */
+export interface Projectile {
+  id: number; // server-assigned; predicted ones use -shot until the server's copy replaces them
+  kind: ProjectileKind;
   ownerId: string;
   shot: number; // seq of the owner's input that fired it
   pos: Vector3;
   prevPos: Vector3;
-  dir: Vector3;
+  vel: Vector3;
   life: number;
+  traveled: number; // meters flown: a grenade arms (explodes on players) at GRENADE.armDistance
   lag: number; // ticks to rewind other players by when testing hits: how far behind the shooter was seeing
+  struck: string | null; // the last player an unarmed grenade bounced off, so one hit only hurts once
 }
 
+export const isArmed = (p: Projectile) => p.kind === 'rocket' || p.traveled >= GRENADE.armDistance;
+
+/** A mystery box. Server-side state, mirrored to clients from snapshots. */
+export interface Pickup {
+  pos: Vector3;
+  respawnIn: number; // 0 while it's there to take
+}
+
+interface Blast {
+  radius: number;
+  knockback: number;
+  selfKnockback: number;
+  crateKnockback: number;
+  damage: number;
+}
+
+const BLASTS: Record<ProjectileKind, Blast> = {
+  rocket: { radius: ROCKET.blastRadius, knockback: ROCKET.knockback, selfKnockback: ROCKET.selfKnockback, crateKnockback: ROCKET.crateKnockback, damage: COMBAT.rocketDamage },
+  grenade: { radius: GRENADE.blastRadius, knockback: GRENADE.knockback, selfKnockback: GRENADE.selfKnockback, crateKnockback: GRENADE.crateKnockback, damage: GRENADE.damage },
+};
+
 export type SimEvent =
-  | { type: 'fired'; playerId: string }
-  | { type: 'explosion'; pos: Vector3; normal: Vector3; surface: boolean; ownerId: string; shot: number } // surface = false for mid-air
+  | { type: 'fired'; playerId: string; weapon: WeaponId }
+  | { type: 'explosion'; pos: Vector3; normal: Vector3; surface: boolean; ownerId: string; shot: number; radius: number } // surface = false for mid-air
+  | { type: 'bounce'; pos: Vector3; normal: Vector3; ownerId: string; shot: number; speed: number } // a grenade hitting something before it arms
+  | { type: 'pickup'; playerId: string; weapon: WeaponId; box: number }
   | { type: 'grapple'; playerId: string; attached: boolean }
   | { type: 'grappleMiss'; playerId: string }
   | { type: 'jumped'; playerId: string }
@@ -198,11 +246,13 @@ const _center = new Vector3();
 const _toTarget = new Vector3();
 const _aimOrigin = new Vector3();
 const _aimDir = new Vector3();
+const _step = new Vector3();
+const _segment = new Vector3();
 
 type AimKind = 'none' | 'world' | 'player' | 'crate' | 'rocket';
 
 /** Result of aimHit, reused between calls. */
-const _aim = { kind: 'none' as AimKind, dist: 0, playerId: '', crateIndex: -1, center: new Vector3(), rocket: null as Rocket | null };
+const _aim = { kind: 'none' as AimKind, dist: 0, playerId: '', crateIndex: -1, center: new Vector3(), rocket: null as Projectile | null };
 
 /** Distance along a ray (unit `dir`) to where it enters a sphere, or null if it misses or the hit is past `maxDist`. */
 function raySphere(origin: Vector3, dir: Vector3, center: Vector3, radius: number, maxDist: number): number | null {
@@ -234,16 +284,17 @@ function clipVelocity(v: number, desired: number, actual: number): number {
 export class GameSim {
   readonly world: RAPIER.World;
   readonly players = new Map<string, PlayerSim>();
-  readonly rockets: Rocket[] = [];
+  readonly projectiles: Projectile[] = [];
   readonly crates: RAPIER.RigidBody[] = [];
+  readonly pickups: Pickup[];
   tick = 0;
   /**
    * Client only: where other players are being drawn (alive ones), set by the netcode. A client's
    * sim has no colliders for them, so hooks and predicted rockets test against these instead.
    */
   remotePositions: ReadonlyMap<string, Vector3> | null = null;
-  /** Client only: other players' rockets, where they're being drawn. `rockets` holds just our own there. */
-  remoteRockets: readonly Rocket[] | null = null;
+  /** Client only: other players' projectiles, where they're being drawn. `projectiles` holds just our own there. */
+  remoteProjectiles: readonly Projectile[] | null = null;
 
   private readonly crateIndex = new Map<number, number>(); // rigid-body handle -> index in `crates`
   private readonly controller: RAPIER.KinematicCharacterController;
@@ -254,6 +305,7 @@ export class GameSim {
   constructor(readonly map: MapDef) {
     this.world = new RAPIER.World({ x: 0, y: -GRAVITY, z: 0 });
     this.world.timestep = DT;
+    this.pickups = map.pickups.map((pos) => ({ pos: new Vector3(...pos), respawnIn: 0 }));
 
     const q = new Quaternion();
     for (const box of map.boxes) {
@@ -316,6 +368,10 @@ export class GameSim {
     p.prevPos.copy(p.pos);
     p.vel.set(0, 0, 0);
     p.grapple = null;
+    p.primary = LOADOUT.primary;
+    p.secondary = LOADOUT.secondary;
+    p.drum = GRENADE.drum;
+    p.reloading = false;
     p.body.setTranslation(p.pos, true);
     p.body.setNextKinematicTranslation(p.pos);
     this.pendingEvents.push({ type: 'respawn', playerId: p.id, yaw: spawn.yaw });
@@ -383,13 +439,14 @@ export class GameSim {
    */
   private aimRockets(playerId: string, origin: Vector3, dir: Vector3, maxDist: number, view: number | undefined) {
     _aim.rocket = null;
-    const rewind = this.remoteRockets || view === undefined ? 0 : Math.min(Math.max(this.tick - view, 0), REWIND_TICKS);
-    const test = (r: Rocket) => {
+    const rewind = this.remoteProjectiles || view === undefined ? 0 : Math.min(Math.max(this.tick - view, 0), REWIND_TICKS);
+    const test = (r: Projectile) => {
+      if (r.kind !== 'rocket') return;
       const own = r.ownerId === playerId;
       if (own && !GRAPPLE.hookOwnRockets) return;
       // Our own rockets are seen where they are (predicted), not a lag behind.
       _center.copy(r.pos);
-      if (!own) _center.addScaledVector(r.dir, -ROCKET.speed * DT * rewind);
+      if (!own) _center.addScaledVector(r.vel, -DT * rewind);
       const t = raySphere(origin, dir, _center, ROCKET.hookRadius, maxDist);
       if (t === null) return;
       maxDist = t;
@@ -397,13 +454,13 @@ export class GameSim {
       _aim.dist = t;
       _aim.rocket = r;
     };
-    this.rockets.forEach(test);
-    this.remoteRockets?.forEach(test);
+    this.projectiles.forEach(test);
+    this.remoteProjectiles?.forEach(test);
   }
 
-  private findRocket(ownerId: string, shot: number): Rocket | undefined {
-    const match = (r: Rocket) => r.ownerId === ownerId && r.shot === shot;
-    return this.rockets.find(match) ?? this.remoteRockets?.find(match);
+  private findRocket(ownerId: string, shot: number): Projectile | undefined {
+    const match = (r: Projectile) => r.kind === 'rocket' && r.ownerId === ownerId && r.shot === shot;
+    return this.projectiles.find(match) ?? this.remoteProjectiles?.find(match);
   }
 
   /**
@@ -520,7 +577,8 @@ export class GameSim {
     for (const p of this.players.values()) {
       this.stepPlayer(p, inputs.get(p.id) ?? EMPTY_INPUT, events, 'authority');
     }
-    this.stepRockets(events, 'authority');
+    this.stepPickups(events);
+    this.stepProjectiles(events, 'authority');
     this.world.step();
     this.tick++;
     for (const p of this.players.values()) if (p.alive) p.history.record(this.tick, p.pos);
@@ -528,24 +586,24 @@ export class GameSim {
   }
 
   /**
-   * Client prediction: one tick for just this player and the rockets in this sim (its own). Other
-   * players, their rockets and the crates come from the server.
+   * Client prediction: one tick for just this player and the projectiles in this sim (its own).
+   * Other players, their projectiles, the crates and the mystery boxes come from the server.
    */
   predict(p: PlayerSim, input: PlayerInput): SimEvent[] {
     const events = this.takePendingEvents();
     this.stepPlayer(p, input, events, 'predict');
-    this.stepRockets(events, 'predict');
+    this.stepProjectiles(events, 'predict');
     this.world.step();
     return events;
   }
 
   /**
-   * Re-runs one already-predicted tick for this player and its rockets after a server correction.
+   * Re-runs one already-predicted tick for this player and its projectiles after a server correction.
    * No physics step and no events, so replaying a handful of ticks per snapshot is cheap.
    */
   replay(p: PlayerSim, input: PlayerInput) {
     this.stepPlayer(p, input, _discard, 'replay');
-    this.stepRockets(_discard, 'replay');
+    this.stepProjectiles(_discard, 'replay');
     _discard.length = 0;
   }
 
@@ -582,9 +640,11 @@ export class GameSim {
 
     // Grapple: fires on press, or the moment its cooldown ends if the button is still held.
     // Releases on let go.
+    // The grapple is the only secondary weapon so far: without it the button does nothing.
+    const grappleHeld = input.grapple && p.secondary === 'grapple';
     p.grappleCooldown = Math.max(0, p.grappleCooldown - DT);
-    if (!input.grapple) p.grappleUsed = false;
-    if (input.grapple && !p.grappleUsed && !p.grapple && p.grappleCooldown === 0) {
+    if (!grappleHeld) p.grappleUsed = false;
+    if (grappleHeld && !p.grappleUsed && !p.grapple && p.grappleCooldown === 0) {
       p.grappleUsed = true;
       const normal = new Vector3();
       const anchor = this.grappleTarget(p, new Vector3(), normal, input.view);
@@ -618,7 +678,7 @@ export class GameSim {
         }
         events.push({ type: 'grapple', playerId: p.id, attached: true });
       }
-    } else if (!input.grapple && p.grapple) {
+    } else if (!grappleHeld && p.grapple) {
       p.grapple = null;
       p.grappleCooldown = GRAPPLE.cooldown;
       events.push({ type: 'grapple', playerId: p.id, attached: false });
@@ -661,55 +721,171 @@ export class GameSim {
     }
 
     p.fireCooldown = Math.max(0, p.fireCooldown - DT);
-    if (input.fire && p.fireCooldown === 0) {
-      p.fireCooldown = ROCKET.cooldown;
+    if (p.reloading && p.fireCooldown === 0) {
+      p.reloading = false;
+      p.drum = GRENADE.drum;
+    }
+    if (input.fire && p.fireCooldown === 0 && (p.primary === 'rocket' || p.primary === 'grenade')) {
+      const grenade = p.primary === 'grenade';
+      p.fireCooldown = grenade ? GRENADE.cooldown : ROCKET.cooldown;
+      if (grenade && --p.drum === 0) {
+        p.reloading = true;
+        p.fireCooldown = GRENADE.reload;
+      }
       const pos = p.eye(new Vector3());
-      this.rockets.push({
-        // A predicted rocket's id must survive replays so its mesh and trail stay put: derive it from the input.
+      this.projectiles.push({
+        // A predicted projectile's id must survive replays so its mesh and trail stay put: derive it from the input.
         id: mode === 'authority' ? this.nextRocketId++ : -p.seq,
+        kind: p.primary,
         ownerId: p.id,
         shot: p.seq,
         pos,
         prevPos: pos.clone(),
-        dir: aimDirection(p.yaw, p.pitch, new Vector3()),
-        life: ROCKET.lifetime,
+        vel: aimDirection(p.yaw, p.pitch, new Vector3()).multiplyScalar(grenade ? GRENADE.speed : ROCKET.speed),
+        life: grenade ? GRENADE.lifetime : ROCKET.lifetime,
+        traveled: 0,
         lag: mode === 'authority' && input.view !== undefined ? Math.min(Math.max(this.tick - input.view, 0), REWIND_TICKS) : 0,
+        struck: null,
       });
-      events.push({ type: 'fired', playerId: p.id });
+      events.push({ type: 'fired', playerId: p.id, weapon: p.primary });
     }
   }
 
-  private stepRockets(events: SimEvent[], mode: StepMode) {
-    const travel = ROCKET.speed * DT;
-    for (let i = this.rockets.length - 1; i >= 0; i--) {
-      const r = this.rockets[i];
+  /** Mystery boxes, server only: walking into one swaps a weapon for one you aren't carrying. */
+  private stepPickups(events: SimEvent[]) {
+    const reach = PICKUP.size / 2 + PICKUP.reach + PLAYER.radius;
+    this.pickups.forEach((box, index) => {
+      if (box.respawnIn > 0) {
+        box.respawnIn = Math.max(0, box.respawnIn - DT);
+        return;
+      }
+      for (const p of this.players.values()) {
+        if (!p.alive) continue;
+        // Distance from the box to the core segment of the player's capsule.
+        const dy = Math.min(Math.max(box.pos.y - p.pos.y, -PLAYER.halfHeight), PLAYER.halfHeight);
+        if (_segment.set(p.pos.x, p.pos.y + dy, p.pos.z).distanceTo(box.pos) > reach) continue;
+        const weapon = this.swapWeapon(p);
+        if (!weapon) continue;
+        box.respawnIn = PICKUP.respawn;
+        events.push({ type: 'pickup', playerId: p.id, weapon, box: index });
+        return;
+      }
+    });
+  }
+
+  /** Gives a player a random weapon they aren't carrying, in that weapon's slot. Null if there's none. */
+  private swapWeapon(p: PlayerSim): WeaponId | null {
+    const options = (Object.keys(WEAPONS) as WeaponId[]).filter((w) => w !== p.primary && w !== p.secondary);
+    if (!options.length) return null;
+    const weapon = options[Math.floor(Math.random() * options.length)];
+    if (WEAPONS[weapon].slot === 'primary') {
+      p.primary = weapon;
+      p.drum = GRENADE.drum; // a fresh weapon comes loaded
+      if (p.reloading) p.fireCooldown = 0;
+      p.reloading = false;
+    } else {
+      p.secondary = weapon;
+      p.grapple = null;
+    }
+    return weapon;
+  }
+
+  private stepProjectiles(events: SimEvent[], mode: StepMode) {
+    for (let i = this.projectiles.length - 1; i >= 0; i--) {
+      const r = this.projectiles[i];
       r.prevPos.copy(r.pos);
-      const normal = new Vector3();
-      // Other players are rewound by the shooter's lag, so a rocket that hits someone on the
-      // shooter's screen hits them here too.
-      const kind = this.aimHit(r.pos, r.dir, travel, r.ownerId, r.lag ? this.tick - r.lag : undefined, normal);
-      if (kind === 'player') {
-        r.pos.addScaledVector(r.dir, Math.max(0, _aim.dist - 0.1));
-        this.explode(r, normal, false, events, mode, { id: _aim.playerId, center: _aim.center.clone() });
-        this.rockets.splice(i, 1);
-        continue;
-      }
-      if (kind !== 'none') {
-        r.pos.addScaledVector(r.dir, _aim.dist - 0.1);
-      } else {
-        r.pos.addScaledVector(r.dir, travel);
-        r.life -= DT;
-        if (r.life > 0) continue;
-        normal.copy(r.dir).negate();
-      }
-      this.explode(r, normal, true, events, mode);
-      this.rockets.splice(i, 1);
+      const exploded = r.kind === 'rocket' ? this.stepRocket(r, events, mode) : this.stepGrenade(r, events, mode);
+      if (exploded) this.projectiles.splice(i, 1);
     }
   }
 
-  /** `direct`: the player the rocket hit, at the (possibly rewound) position it hit them at. */
+  /** Straight line at a constant speed until it hits something. True once it has exploded. */
+  private stepRocket(r: Projectile, events: SimEvent[], mode: StepMode): boolean {
+    const travel = ROCKET.speed * DT;
+    const dir = _step.copy(r.vel).normalize();
+    const normal = new Vector3();
+    // Other players are rewound by the shooter's lag, so a rocket that hits someone on the
+    // shooter's screen hits them here too.
+    const kind = this.aimHit(r.pos, dir, travel, r.ownerId, r.lag ? this.tick - r.lag : undefined, normal);
+    if (kind === 'player') {
+      r.pos.addScaledVector(dir, Math.max(0, _aim.dist - 0.1));
+      this.explode(r, normal, false, events, mode, { id: _aim.playerId, center: _aim.center.clone() });
+      return true;
+    }
+    if (kind !== 'none') {
+      r.pos.addScaledVector(dir, _aim.dist - 0.1);
+    } else {
+      r.pos.addScaledVector(dir, travel);
+      r.traveled += travel;
+      r.life -= DT;
+      if (r.life > 0) return false;
+      normal.copy(dir).negate();
+    }
+    this.explode(r, normal, true, events, mode);
+    return true;
+  }
+
+  /**
+   * Gravity, then a sweep along this tick's motion. Grenades bounce off surfaces, so they can be
+   * banked around corners. A player they touch sets them off once they've flown GRENADE.armDistance;
+   * closer than that they bounce off the player too, hurting them. Otherwise the fuse sets them off.
+   * True once it has exploded.
+   */
+  private stepGrenade(g: Projectile, events: SimEvent[], mode: StepMode): boolean {
+    g.vel.y -= GRAVITY * DT;
+    g.life -= DT;
+    const speed = g.vel.length();
+    const travel = speed * DT;
+    if (travel < 1e-6) return this.fuse(g, events, mode);
+    const dir = _step.copy(g.vel).divideScalar(speed);
+    const normal = new Vector3();
+    // The ray reaches a radius past the center's new spot, so the grenade's surface stops at walls.
+    const kind = this.aimHit(g.pos, dir, travel + GRENADE.radius, g.ownerId, g.lag ? this.tick - g.lag : undefined, normal);
+    if (kind === 'none') {
+      g.pos.addScaledVector(dir, travel);
+      g.traveled += travel;
+      return this.fuse(g, events, mode);
+    }
+
+    const dist = Math.max(0, _aim.dist - GRENADE.radius);
+    g.pos.addScaledVector(dir, dist);
+    g.traveled += dist;
+    const player = kind === 'player' ? { id: _aim.playerId, center: _aim.center.clone() } : undefined;
+    if (player && isArmed(g)) {
+      this.explode(g, normal, false, events, mode, player);
+      return true;
+    }
+
+    // Not armed yet: a player hit point blank takes a knock and some damage, once.
+    if (player && player.id !== g.struck) {
+      g.struck = player.id;
+      const target = this.players.get(player.id);
+      if (target) {
+        target.vel.addScaledVector(dir, GRENADE.impactKnockback);
+        target.grounded = false;
+        if (mode === 'authority') this.damage(target, GRENADE.impactDamage, g.ownerId, events, 'grenade');
+      }
+    }
+    // Bounce off the surface or player: lose some of the speed into it, and a little along it.
+    const into = -g.vel.dot(normal);
+    if (into > 0) {
+      g.vel.addScaledVector(normal, into).multiplyScalar(GRENADE.friction).addScaledVector(normal, into * GRENADE.restitution);
+      if (into > 2) events.push({ type: 'bounce', pos: g.pos.clone(), normal, ownerId: g.ownerId, shot: g.shot, speed: into });
+    }
+    g.pos.addScaledVector(normal, 0.01); // off the surface, so next tick's ray doesn't start inside it
+    return this.fuse(g, events, mode);
+  }
+
+  /** A grenade whose fuse has run out explodes where it is. True if it did. */
+  private fuse(g: Projectile, events: SimEvent[], mode: StepMode): boolean {
+    if (g.life > 0) return false;
+    this.explode(g, new Vector3(0, 1, 0), false, events, mode);
+    return true;
+  }
+
+  /** `direct`: the player the projectile hit, at the (possibly rewound) position it hit them at. */
   private explode(
-    r: Rocket,
+    r: Projectile,
     normal: Vector3,
     surface: boolean,
     events: SimEvent[],
@@ -717,7 +893,8 @@ export class GameSim {
     direct?: { id: string; center: Vector3 },
   ) {
     const at = r.pos;
-    const radius = ROCKET.blastRadius;
+    const blast = BLASTS[r.kind];
+    const radius = blast.radius;
 
     for (const p of this.players.values()) {
       if (!p.alive) continue;
@@ -728,22 +905,22 @@ export class GameSim {
       const falloff = 1 - dist / radius;
       if (dist < 1e-3) _dir.set(0, 1, 0);
       else _dir.subVectors(center, at).divideScalar(dist);
-      const boost = p.id === r.ownerId ? ROCKET.selfKnockback : 1;
-      p.vel.addScaledVector(_dir, ROCKET.knockback * boost * falloff);
+      const boost = p.id === r.ownerId ? blast.selfKnockback : 1;
+      p.vel.addScaledVector(_dir, blast.knockback * boost * falloff);
       p.grounded = false;
       events.push({ type: 'knockback', playerId: p.id, strength: falloff, sourceId: r.ownerId, shot: r.shot });
       // Health is server-only: clients show what the server says, a round trip later.
       if (mode === 'authority' && (p.id !== r.ownerId || COMBAT.selfDamage)) {
-        this.damage(p, Math.round(COMBAT.rocketDamage * falloff), r.ownerId, events);
+        this.damage(p, Math.round(blast.damage * falloff), r.ownerId, events, r.kind);
       }
     }
 
     // On a client the crates are only server-placed obstacles.
-    if (mode === 'authority') this.pushCrates(at);
-    events.push({ type: 'explosion', pos: at.clone(), normal, surface, ownerId: r.ownerId, shot: r.shot });
+    if (mode === 'authority') this.pushCrates(at, blast);
+    events.push({ type: 'explosion', pos: at.clone(), normal, surface, ownerId: r.ownerId, shot: r.shot, radius });
   }
 
-  private damage(p: PlayerSim, amount: number, sourceId: string, events: SimEvent[]) {
+  private damage(p: PlayerSim, amount: number, sourceId: string, events: SimEvent[], cause: DeathCause) {
     if (amount <= 0 || p.protectedFor > 0) return;
     // Finishing yourself off right after someone hit you still counts as their kill.
     const killer = sourceId === p.id ? this.recentAttacker(p) : sourceId;
@@ -754,7 +931,7 @@ export class GameSim {
       p.sinceAttacked = 0;
     }
     events.push({ type: 'damaged', playerId: p.id, sourceId, amount });
-    if (p.health <= 0) this.kill(p, killer, 'rocket', events);
+    if (p.health <= 0) this.kill(p, killer, cause, events);
   }
 
   private recentAttacker(p: PlayerSim): string | null {
@@ -774,8 +951,8 @@ export class GameSim {
     events.push({ type: 'killed', playerId: p.id, killerId, cause });
   }
 
-  private pushCrates(at: Vector3) {
-    const radius = ROCKET.blastRadius;
+  private pushCrates(at: Vector3, blast: Blast) {
+    const radius = blast.radius;
     for (const crate of this.crates) {
       const t = crate.translation();
       _crate.set(t.x, t.y, t.z);
@@ -784,7 +961,7 @@ export class GameSim {
       const falloff = 1 - dist / radius;
       if (dist < 1e-3) _dir.set(0, 1, 0);
       else _dir.subVectors(_crate, at).divideScalar(dist);
-      _dir.multiplyScalar(ROCKET.crateKnockback * falloff * crate.mass());
+      _dir.multiplyScalar(blast.crateKnockback * falloff * crate.mass());
       crate.applyImpulse(_dir, true);
     }
   }

@@ -5,6 +5,9 @@ import type * as THREE from 'three';
 
 type SoundName =
   | 'fire'
+  | 'grenadeFire'
+  | 'bounce'
+  | 'pickup'
   | 'explosion'
   | 'grappleFire'
   | 'grappleAttach'
@@ -14,6 +17,12 @@ type SoundName =
   | 'land'
   | 'hit'
   | 'kill';
+
+interface Flying {
+  id: number;
+  kind: string;
+  pos: THREE.Vector3;
+}
 
 interface PlayOptions {
   at?: THREE.Vector3; // omit for non-positional (your own weapon, UI)
@@ -80,6 +89,38 @@ function synthesize(ctx: BaseAudioContext): Record<SoundName | 'noise', AudioBuf
       return (t) =>
         osc(40 + 140 * Math.exp(-t * 18)) * env(t, 0.002, 0.12) * 0.9 +
         lp(noise(), 300 + 3500 * Math.exp(-t * 14)) * env(t, 0.001, 0.09) * 1.4;
+    }),
+
+    // A hollow thoonk: a low pop with a short air rush, much softer than the rocket's roar.
+    grenadeFire: build(0.4, () => {
+      const lp = lowpass(sr);
+      const osc = sweep(sr);
+      return (t) =>
+        osc(70 + 220 * Math.exp(-t * 30)) * env(t, 0.001, 0.07) * 1.2 + lp(noise(), 600 + 1800 * Math.exp(-t * 25)) * env(t, 0.001, 0.05) * 0.8;
+    }),
+
+    // An unarmed grenade hitting something: a dull knock with a short metallic ring.
+    bounce: build(0.25, () => {
+      const lp = lowpass(sr);
+      const partials = [1240, 2310, 3470];
+      return (t) => {
+        let ring = 0;
+        partials.forEach((f, k) => (ring += Math.sin(2 * Math.PI * f * t) * Math.exp(-t * (30 + k * 12))));
+        return ring * 0.4 + lp(noise(), 1500) * env(t, 0.0005, 0.01) * 1.4;
+      };
+    }),
+
+    // Taking a mystery box: a quick rising arpeggio.
+    pickup: build(0.6, () => {
+      const notes = [660, 880, 1100, 1320];
+      return (t) => {
+        let out = 0;
+        notes.forEach((f, k) => {
+          const start = k * 0.06;
+          if (t >= start) out += (Math.sin(2 * Math.PI * f * t) + 0.3 * Math.sin(4 * Math.PI * f * t)) * env(t - start, 0.003, 0.12);
+        });
+        return out;
+      };
     }),
 
     explosion: build(2.2, () => {
@@ -204,7 +245,7 @@ export class GameAudio {
   // Per-frame updates assign `.value` directly rather than scheduling automation events
   // (setValueAtTime etc.): queuing ~a dozen events per frame makes the audio thread's timelines
   // grow and the main thread contend with it, which shows up as periodic hitches.
-  update(camera: THREE.Camera, rockets: { id: number; pos: THREE.Vector3 }[]) {
+  update(camera: THREE.Camera, projectiles: readonly Flying[]) {
     const l = this.ctx.listener;
     const e = camera.matrixWorld.elements;
     // Camera looks down its local -Z; up is local +Y.
@@ -223,12 +264,14 @@ export class GameAudio {
       l.setOrientation(-e[8], -e[9], -e[10], e[4], e[5], e[6]);
     }
 
-    this.syncRocketLoops(rockets);
+    this.syncRocketLoops(projectiles);
   }
 
-  private syncRocketLoops(rockets: { id: number; pos: THREE.Vector3 }[]) {
+  /** Rockets hiss as they fly; grenades are silent until they hit something. */
+  private syncRocketLoops(projectiles: readonly Flying[]) {
     const frame = ++this.frameNo;
-    for (const r of rockets) {
+    for (const r of projectiles) {
+      if (r.kind !== 'rocket') continue;
       let loop = this.rocketLoops.get(r.id);
       if (!loop) {
         if (this.ctx.state !== 'running') continue;

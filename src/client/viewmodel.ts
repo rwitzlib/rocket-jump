@@ -1,9 +1,11 @@
 import * as THREE from 'three';
-import { buildGauntlet, buildLauncher, LAUNCHER } from './weapons';
+import type { WeaponId } from '../shared/types';
+import { buildGauntlet, buildGrenadeLauncher, buildLauncher, LAUNCHER, type LauncherModel } from './weapons';
 
 // First-person weapons, rendered in their own scene after the world so they never clip into walls.
 // The launcher rides on the right shoulder, as it does on the player models, its barrel running
 // out toward the crosshair with the right hand on the fore grip. The grapple is on the left forearm.
+// Picking up a different primary weapon dips the old one out of view and brings the new one up.
 
 const SHOULDER = new THREE.Vector3(0.36, -0.15, -0.2);
 const SHOULDER_TILT = new THREE.Euler(0.05, 0.1, 0); // barrel angled in toward the crosshair
@@ -15,6 +17,9 @@ const READY_GLOW = new THREE.Color(0x3cbf6a);
 const CHARGING = new THREE.Color(0xff5a3c);
 const CHARGING_GLOW = new THREE.Color(0x401008);
 
+const SWAP_TIME = 0.45; // seconds to lower one launcher and raise the other
+const CHAMBER = Math.PI / 3; // one turn of a six-shot drum
+
 const _p = new THREE.Vector3();
 
 export class ViewModel {
@@ -22,6 +27,10 @@ export class ViewModel {
   readonly camera: THREE.PerspectiveCamera;
   private launcher = new THREE.Group();
   private grappler = new THREE.Group();
+  private readonly launchers: Partial<Record<WeaponId, LauncherModel>>;
+  private shown: WeaponId = 'rocket'; // the launcher in hand
+  private wanted: WeaponId = 'rocket'; // the one being swapped to
+  private swap = 0; // 1 just picked up .. 0 settled
   private muzzle: THREE.Object3D;
   private hookTip: THREE.Object3D;
   private hookHead: THREE.Object3D;
@@ -29,6 +38,8 @@ export class ViewModel {
   private grappleStrip: THREE.MeshStandardMaterial;
   private flash: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>;
   private recoil = 0;
+  private drumTurn = 0; // where the drum is turning to, radians
+  private reloadPose = 0; // 0 aiming .. 1 tipped down and rolled over for a reload
   private grappleKick = 0;
   private bob = 0;
 
@@ -46,6 +57,9 @@ export class ViewModel {
 
     // Launcher, with the right hand wrapped around its fore grip and the forearm running off-screen.
     const launcher = buildLauncher();
+    const grenadeLauncher = buildGrenadeLauncher();
+    grenadeLauncher.root.visible = false;
+    this.launchers = { rocket: launcher, grenade: grenadeLauncher };
     this.muzzle = launcher.muzzle;
     this.launcherLight = launcher.light;
     this.flash = new THREE.Mesh(
@@ -62,7 +76,7 @@ export class ViewModel {
     knuckles.position.set(-0.01, 0.025, -0.045);
     const forearm = limb(new THREE.Vector3(0, -0.03, 0.02), new THREE.Vector3(0.1, -0.4, 0.42), 0.055, glove);
     hand.add(fist, knuckles, forearm);
-    this.launcher.add(launcher.root, hand);
+    this.launcher.add(launcher.root, grenadeLauncher.root, hand);
     this.launcher.position.copy(SHOULDER);
     this.launcher.rotation.copy(SHOULDER_TILT);
 
@@ -84,24 +98,58 @@ export class ViewModel {
 
   fire() {
     this.recoil = 1;
+    this.drumTurn += CHAMBER;
   }
 
   fireGrapple() {
     this.grappleKick = 1;
   }
 
-  /** `fireReady` and `grappleReady` run 0..1 as each weapon recharges; their status lights follow. */
-  update(dt: number, speed: number, grounded: boolean, grappling: boolean, fireReady = 1, grappleReady = 1) {
+  /** The primary weapon to hold. Changing it plays the swap. */
+  setPrimary(weapon: WeaponId) {
+    if (weapon === this.wanted || !this.launchers[weapon]) return;
+    this.wanted = weapon;
+    this.swap = 1;
+  }
+
+  private show(weapon: WeaponId) {
+    const model = this.launchers[weapon]!;
+    for (const m of Object.values(this.launchers)) m.root.visible = m === model;
+    this.shown = weapon;
+    this.muzzle = model.muzzle;
+    this.muzzle.add(this.flash);
+    this.launcherLight = model.light;
+  }
+
+  /**
+   * `fireReady` and `grappleReady` run 0..1 as each weapon recharges; their status lights follow.
+   * `reloading`: the grenade launcher's drum is being refilled.
+   */
+  update(dt: number, speed: number, grounded: boolean, grappling: boolean, fireReady = 1, grappleReady = 1, reloading = false) {
     this.recoil = Math.max(0, this.recoil - dt * 4);
     this.grappleKick = Math.max(0, this.grappleKick - dt * 7);
     this.bob += dt * (grounded ? Math.min(speed, 10) : 0);
     const bobX = Math.sin(this.bob) * 0.008;
     const bobY = Math.abs(Math.cos(this.bob)) * 0.008;
 
+    // Swapping: the old launcher drops out of view, the new one comes up in its place halfway through.
+    this.swap = Math.max(0, this.swap - dt / SWAP_TIME);
+    if (this.swap <= 0.5 && this.shown !== this.wanted) this.show(this.wanted);
+    const lowered = Math.sin(this.swap * Math.PI);
+
+    // Reloading tips the launcher down and rolls the drum toward you, spinning it as it's refilled.
+    // Afterwards the drum settles on the nearest chamber.
+    this.reloadPose += ((reloading ? 1 : 0) - this.reloadPose) * (1 - Math.exp(-dt * 10));
+    if (reloading) this.drumTurn += dt * 10;
+    else this.drumTurn = Math.ceil(this.drumTurn / CHAMBER - 0.01) * CHAMBER;
+    const drum = this.launchers.grenade?.drum;
+    if (drum) drum.rotation.z += (this.drumTurn - drum.rotation.z) * (1 - Math.exp(-dt * 25));
+    const tip = this.reloadPose;
+
     // Recoil shoves the launcher back along the shoulder and rocks the barrel up.
     const kick = this.recoil * this.recoil;
-    this.launcher.position.set(SHOULDER.x + bobX, SHOULDER.y + bobY - kick * 0.02, SHOULDER.z + kick * 0.14);
-    this.launcher.rotation.set(SHOULDER_TILT.x + kick * 0.12, SHOULDER_TILT.y, SHOULDER_TILT.z - kick * 0.03);
+    this.launcher.position.set(SHOULDER.x + bobX - tip * 0.08, SHOULDER.y + bobY - kick * 0.02 - lowered * 0.35 - tip * 0.06, SHOULDER.z + kick * 0.14);
+    this.launcher.rotation.set(SHOULDER_TILT.x + kick * 0.12 - lowered * 0.6 - tip * 0.35, SHOULDER_TILT.y + tip * 0.3, SHOULDER_TILT.z - kick * 0.03 + tip * 0.7);
     this.flash.material.opacity = this.recoil > 0.75 ? (this.recoil - 0.75) / 0.25 : 0;
     this.flash.visible = this.flash.material.opacity > 0;
 
