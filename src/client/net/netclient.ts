@@ -5,12 +5,14 @@ import {
   fromWireEvent,
   type ClientMessage,
   type InputFrame,
+  type MatchState,
   type ProjectileState,
   type ScoreEntry,
   type ServerMessage,
   type SnapshotMessage,
   type WireEvent,
 } from '../../shared/protocol';
+import { freeze } from '../../shared/server';
 import type { GameSim, PlayerSim, Projectile, SimEvent } from '../../shared/sim';
 import type { PlayerInput, WeaponId } from '../../shared/types';
 import type { VehicleSim } from '../../shared/vehicle';
@@ -72,8 +74,10 @@ export class NetClient {
   readonly renderProjectiles: Projectile[] = [];
   /** Latest kills/deaths for everyone. Not interpolated: the scoreboard just shows the newest. */
   scores: ScoreEntry[] = [];
+  /** The match as of the newest snapshot. */
+  match: MatchState | null = null;
 
-  private seq = 0;
+  private seq: number;
   private pending: InputFrame[] = [];
   private snapshots: SnapshotMessage[] = [];
   private latestTick = -1;
@@ -92,7 +96,10 @@ export class NetClient {
     readonly sim: GameSim,
     readonly id: string,
     private readonly send: (msg: ClientMessage) => void,
+    /** Input numbering carries on across map changes: the server remembers the last one it saw. */
+    startSeq = 0,
   ) {
+    this.seq = startSeq;
     this.me = sim.addPlayer(id);
     sim.remotePositions = this.alivePositions;
     sim.remoteProjectiles = this.remoteProjectiles;
@@ -101,7 +108,13 @@ export class NetClient {
   }
 
   /** Call once per fixed tick with the local input: sends it and predicts its result. */
+  get lastSeq() {
+    return this.seq;
+  }
+
   predict(input: PlayerInput): SimEvent[] {
+    // Between matches the server only lets everyone look around; predict the same.
+    if (this.match?.phase === 'intermission') input = freeze(input);
     // Tells the server what we were looking at, so it judges our hooks and rockets against that.
     if (this.renderTick >= 0) input.view = Math.round(this.renderTick * 100) / 100;
     this.pending.push({ seq: ++this.seq, input });
@@ -141,6 +154,7 @@ export class NetClient {
     this.stats.serverTick = msg.tick;
     this.stats.serverInput = msg.input;
     this.scores = msg.scores;
+    this.match = msg.match;
     msg.pickups.forEach((respawnIn, i) => {
       if (this.sim.pickups[i]) this.sim.pickups[i].respawnIn = respawnIn;
     });

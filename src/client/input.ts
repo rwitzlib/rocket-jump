@@ -1,6 +1,6 @@
 import type { PlayerInput } from '../shared/types';
 
-const SENSITIVITY = 0.0022;
+const BASE_SENSITIVITY = 0.0022; // radians per mouse count at sensitivity 1
 const MAX_PITCH = Math.PI / 2 - 0.01;
 
 /** Keyboard + pointer-locked mouse, sampled once per simulation tick. */
@@ -8,6 +8,10 @@ export class Input {
   yaw = 0;
   pitch = 0;
   locked = false;
+  sensitivity = 1;
+  invertY = false;
+  /** While false (menus, chat), keys and buttons don't reach the game. */
+  enabled = true;
   onLockChange: (locked: boolean) => void = () => {};
 
   private keys = new Set<string>();
@@ -15,6 +19,7 @@ export class Input {
 
   constructor(private readonly target: HTMLElement) {
     document.addEventListener('keydown', (e) => {
+      if (isTyping(e.target)) return;
       if (this.locked && e.code === 'Space') e.preventDefault();
       this.keys.add(e.code);
     });
@@ -29,8 +34,9 @@ export class Input {
 
     document.addEventListener('mousemove', (e) => {
       if (!this.locked) return;
-      this.yaw -= e.movementX * SENSITIVITY;
-      this.pitch = Math.max(-MAX_PITCH, Math.min(MAX_PITCH, this.pitch - e.movementY * SENSITIVITY));
+      const k = BASE_SENSITIVITY * this.sensitivity;
+      this.yaw -= e.movementX * k;
+      this.pitch = Math.max(-MAX_PITCH, Math.min(MAX_PITCH, this.pitch - e.movementY * k * (this.invertY ? -1 : 1)));
     });
 
     document.addEventListener('pointerlockchange', () => {
@@ -45,11 +51,16 @@ export class Input {
       // Raw mouse input (no OS acceleration) where supported.
       await this.target.requestPointerLock({ unadjustedMovement: true });
     } catch {
-      await this.target.requestPointerLock();
+      try {
+        await this.target.requestPointerLock();
+      } catch {
+        // Not allowed right now (no recent click, an embedded page): the pause screen asks for a click.
+      }
     }
   }
 
   sample(): PlayerInput {
+    if (!this.enabled) this.clear();
     const k = this.keys;
     return {
       forward: (k.has('KeyW') ? 1 : 0) - (k.has('KeyS') ? 1 : 0),
@@ -64,8 +75,13 @@ export class Input {
     };
   }
 
-  private clear() {
+  clear() {
     this.keys.clear();
     this.buttons.clear();
   }
+}
+
+/** Keys typed into a text box (the chat, the name field) aren't game controls. */
+export function isTyping(target: EventTarget | null): boolean {
+  return target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement;
 }

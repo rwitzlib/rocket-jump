@@ -4,18 +4,78 @@ A browser-based, physics-driven arena shooter: a grapple hook in one hand and a 
 
 Built with **Three.js** (rendering), **Rapier** (physics, WASM), **TypeScript** and **Vite**.
 
-## Running
+## Playing
+
+Rocket Jump is a free-for-all deathmatch for up to 12 people per server. Bots fill in so there's always someone to
+fight, and they step aside as people join. A match is first to 25 kills, or the most kills after 8 minutes. Then come
+15 seconds of results (a podium, plus awards for the most airshots, the longest streak and the best K/D), and the
+next map in the rotation (Arena, then Citadel, a 240 m fortress with vehicles).
+
+From the menu, pick a name, then **Play online** (the server this page came from) or **Practice vs bots** (runs a
+server inside the page, no network needed). **Settings** has mouse sensitivity, field of view, volume and invert Y,
+all remembered in the browser.
+
+The announcer rewards what the game is about: an **AIRSHOT** medal and bell for hitting someone in midair, multi kills
+(kills within 3 s of each other), sprees at 5/10/15/20/25 kills in one life, **SHUTDOWN** for ending someone's streak,
+**REVENGE**, **FIRST BLOOD**, and lead changes. Names float over players (hidden by walls), and a red arc points at
+whoever just hit you.
+
+## Running a server
 
 ```bash
 npm install
-npm run dev
+npm run build
+npm start
 ```
 
-Open http://localhost:5173 and click to play.
+Open http://localhost:8080. Others on your network join at `http://<your-ip>:8080`. One process serves the game page
+and runs the matches; players connect over WebSockets at `/ws`.
 
-Add `?map=citadel` for the big map: 240 m square with a ring deck around a central spire, bridges out to four corner
-towers and beams up top to swing from. The default is `arena`, the original 120 m map. It combines with the other
-options, e.g. `?map=citadel&net=loopback&bots=4`.
+Settings are environment variables:
+
+| Variable | Default | |
+|---|---|---|
+| `PORT` | 8080 | HTTP and WebSocket port |
+| `HOST` | 0.0.0.0 | interface to listen on |
+| `MAPS` | arena,citadel | map rotation |
+| `TIME_LIMIT` | 480 | seconds per match |
+| `FRAG_LIMIT` | 25 | kills to win |
+| `INTERMISSION` | 15 | seconds on the results screen |
+| `MIN_PLAYERS` | 4 | bots fill the game up to this many players (0 for no bots) |
+| `MAX_PLAYERS` | 12 | people allowed in at once |
+| `STATIC_DIR` | dist | where the built client is |
+
+`GET /status` returns the map, who's playing, the match state and the average tick time as JSON. `GET /health`
+answers `ok` for load balancers. The server logs one JSON line per event: join, leave, and a status line every minute
+while anyone is on.
+
+**Hosting publicly.** Anything that runs Node 20+ works, and a `Dockerfile` is included:
+
+```bash
+docker build -t rocket-jump .
+docker run -p 8080:8080 rocket-jump
+```
+
+Put it behind a TLS-terminating proxy (Caddy, nginx, or a platform load balancer) that forwards WebSocket upgrades.
+Served over HTTPS, the page uses `wss://` automatically. One process runs one match. The simulation takes about 1 ms
+of CPU per 60 Hz tick with 11 players on Citadel, so a small VM is plenty. Each player costs roughly 30-100 KB/s
+down (deflate-compressed JSON snapshots at 30 Hz). The server is authoritative: clients send only inputs, which are
+validated and clamped, and names and chat are sanitized and rate limited.
+
+If a change breaks the protocol between client and server, bump `PROTOCOL_VERSION` in `shared/config.ts`, and pages
+still running the old build are told to reload.
+
+## Developing
+
+```bash
+npm run dev          # the page with hot reload, at http://localhost:5173
+npm run dev:server   # the game server on :8080, restarting on changes; Vite proxies /ws and /status to it
+npm run typecheck
+```
+
+Practice needs only `npm run dev`. `?map=citadel` preselects the big map: 240 m square with a ring deck around a
+central spire, bridges out to four corner towers and beams up top to swing from. `?server=ws://host:port/ws` points
+Play online at a different server.
 
 | Control | Action |
 |---|---|
@@ -27,9 +87,10 @@ options, e.g. `?map=citadel&net=loopback&bots=4`.
 | E | Get in / out of a vehicle |
 | Space / C | Helicopter: climb / descend |
 | Tab (hold) | Scoreboard |
+| T / Enter | Chat |
 | M | Mute / unmute |
 | P | Frame-time overlay (long frames are also logged to the console) |
-| Esc | Release mouse |
+| Esc | Pause menu |
 
 Aim at your feet and fire while jumping to rocket jump. Your own rockets never hurt you and launch you harder than
 they push others, so rocket jumping is free. WASD steers you in the air. The arcs around the crosshair show weapon
@@ -99,15 +160,25 @@ corrections, and everyone else sees it interpolated.
 
 ```
 src/
-  shared/          # no DOM / rendering: runs in the browser now and on a Node server later
-    config.ts      # all gameplay tuning numbers
-    types.ts       # PlayerInput, what a client will send each tick
+  shared/          # no DOM / rendering: runs in the browser and on the Node server
+    config.ts      # all gameplay tuning numbers, match rules (MATCH), protocol version
+    types.ts       # PlayerInput, what a client sends each tick
     movement.ts    # Quake-style movement + grapple physics (pure functions)
-    map.ts         # arena as plain data (boxes, crates, spawns)
+    map.ts         # maps as plain data (boxes, crates, spawns, vehicles)
     sim.ts         # GameSim: fixed 60 Hz authoritative simulation (players, vehicles, projectiles, pickups, explosions)
     vehicle.ts     # VehicleSim and buggy / helicopter handling (velocity and heading, like movement.ts)
+    server.ts      # GameServer: joins, bots, matches, map rotation, snapshots (transport-agnostic)
+    protocol.ts    # messages, and validation of everything a client sends
+    bot.ts         # server-side bots
+  server/
+    main.ts        # the dedicated server: HTTP for the built client, WebSockets at /ws, the tick loop
   client/
-    main.ts        # bootstrap, fixed-timestep loop, interpolated camera
+    main.ts        # menus, settings, sessions (online or practice), the frame loop
+    game.ts        # one map's game: scene, prediction, event handling, HUD updates
+    announcer.ts   # medals, sprees, lead changes
+    chat.ts        # text chat
+    settings.ts    # saved player preferences
+    hud.ts         # health, weapons, match bar, kill feed, scoreboard, results
     input.ts       # keyboard + pointer lock
     level.ts       # meshes for the map and crates
     effects.ts     # rockets, grenades, trails, explosions (fireball, sparks, smoke, shockwave, scorch marks)
@@ -117,19 +188,22 @@ src/
     camerafx.ts    # screen shake, speed FOV, landing dip
     viewmodel.ts   # first-person weapons (rendered in a separate pass)
     weapons.ts     # weapon and projectile models
+    remoteview.ts  # other players' models and name tags
     pickups.ts     # mystery boxes
     vehicles.ts    # buggy and helicopter models
+    net/           # WebSocket and loopback transports, NetClient prediction + interpolation, debug overlay
 ```
 
-The simulation is kept separate from rendering on purpose. In multiplayer the server runs `GameSim`
-with every player's inputs, and each client runs the same code locally for prediction.
+The simulation is kept separate from rendering on purpose. The server runs `GameSim` with every player's inputs, and
+each client runs the same code locally for prediction.
 
-In dev builds the game is exposed as `window.game` (`game.sim`, `game.me`, `game.effects`, ...) for tweaking from
-the console. `game.frame(t)` advances one rendered frame manually, which is handy for stepping through effects.
+In dev builds the current game is exposed as `window.game` (`game.sim`, `game.me`, `game.effects`, ...) for tweaking
+from the console, and the page as `window.rj`. `game.frame(t)` advances one rendered frame manually, which is handy
+for stepping through effects.
 
 ## Netcode testing (loopback)
 
-Open http://localhost:5173/?net=loopback to run the real server inside the page, behind a fake network.
+Open http://localhost:5173/?net=loopback to practice behind a fake network (the real server, running in the page).
 Optional parameters: `ping` (round trip, ms, default 100), `jitter` (ms, default 10), `loss` (0..1), `bots` (default 2).
 
 Your player is predicted locally and corrected against the server. Bots, rockets and crates are interpolated about
@@ -143,7 +217,8 @@ Code: `shared/server.ts` (transport-agnostic `GameServer`), `shared/protocol.ts`
 
 1. ~~Single-player movement sandbox: rocket jumping, grappling, test arena~~
 2. ~~Weapon polish: sounds, better explosion VFX, rope visuals, hit feedback~~
-3. Basic multiplayer: Node server + WebSockets, players see each other
-4. Server-authoritative sim with client-side prediction and interpolation of remote players
+3. ~~Multiplayer: Node server + WebSockets~~
+4. ~~Server-authoritative sim with client-side prediction and interpolation~~
 5. ~~Combat loop: health, damage, kills, respawns, scoreboard~~
-6. Maps, polish, deployment
+6. ~~Matches, menus, announcer, deployment~~
+7. Next: team modes (CTF suits the grapple), more maps, a server browser, binary snapshots

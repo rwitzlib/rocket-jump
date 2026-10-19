@@ -1,21 +1,31 @@
 {
   "name": "rocket-jump",
   "private": true,
-  "version": "0.1.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "dev:server": "tsx watch src/server/main.ts",
+    "build": "npm run typecheck && vite build && vite build --ssr src/server/main.ts --outDir dist-server",
+    "start": "node dist-server/main.js",
     "preview": "vite preview",
-    "typecheck": "tsc"
+    "typecheck": "tsc && tsc -p tsconfig.server.json"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.21.0",
-    "three": "^0.186.1"
+    "three": "^0.186.1",
+    "ws": "^8.22.0"
   },
   "devDependencies": {
+    "@types/node": "^26.6.5",
     "@types/three": "^0.186.0",
+    "@types/ws": "^8.18.2",
+    "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vite": "^8.3.4"
+  },
+  "description": "A fast multiplayer browser arena shooter: rocket jump, grapple, land airshots.",
+  "engines": {
+    "node": ">=20"
   }
 }

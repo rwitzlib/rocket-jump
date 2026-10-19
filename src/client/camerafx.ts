@@ -14,7 +14,7 @@ export class CameraFX {
   private dip = 0;
   private dipVel = 0;
 
-  constructor(private readonly baseFov: number) {
+  constructor(public baseFov: number) {
     this.fov = baseFov;
   }
 

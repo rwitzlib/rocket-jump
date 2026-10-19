@@ -1,7 +1,9 @@
 import { COMBAT, WEAPONS } from '../shared/config';
-import type { ScoreEntry } from '../shared/protocol';
+import { MAPS } from '../shared/map';
+import type { MatchState, ScoreEntry } from '../shared/protocol';
 import type { DeathCause } from '../shared/sim';
 import type { WeaponId } from '../shared/types';
+import { isTyping } from './input';
 
 // Combat HUD: health, weapons, kill feed, death screen and the scoreboard (hold Tab).
 
@@ -22,6 +24,26 @@ const FEED_TIME = 6000; // ms a kill feed entry stays up
 const FEED_MAX = 5;
 
 const el = <T extends HTMLElement>(id: string) => document.querySelector<T>(`#${id}`)!;
+
+const MEDAL_TIME = 2200; // ms a medal stays up
+const DAMAGE_TIME = 1000; // ms a damage direction marker takes to fade
+
+export const mapTitle = (name: string) => MAPS[name]?.title ?? name;
+
+export function formatTime(seconds: number): string {
+  const s = Math.max(0, Math.ceil(seconds));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+const ordinal = (n: number) => {
+  const tens = n % 100;
+  if (tens >= 11 && tens <= 13) return `${n}th`;
+  return `${n}${['th', 'st', 'nd', 'rd'][n % 10] ?? 'th'}`;
+};
+
+/** Best first: most kills, then fewest deaths. */
+export const rankScores = (scores: readonly ScoreEntry[]) =>
+  [...scores].sort((a, b) => b.kills - a.kills || a.deaths - b.deaths || a.name.localeCompare(b.name));
 
 export class Hud {
   private readonly health = el('health');
@@ -61,11 +83,22 @@ export class Hud {
   private shownProtected = false;
   private shownTimer = '';
   private shownBoard = '';
+  private readonly boardTitle = el('scoreboard-title');
+  private readonly matchBar = el('match-bar');
+  private readonly matchTime = el('match-time');
+  private readonly matchRank = el('match-rank');
+  private readonly matchLeader = el('match-leader');
+  private shownMatch = '';
+  private readonly medals = el('medals');
+  private readonly damageDirs = el('damage-dirs');
+  private readonly results = el('results');
+  private shownResults = '';
+  private readonly names = new Map<string, string>();
   boardOpen = false; // Tab held
 
-  constructor(private readonly localId: string) {
+  constructor(private localId: string) {
     document.addEventListener('keydown', (e) => {
-      if (e.code !== 'Tab') return;
+      if (e.code !== 'Tab' || isTyping(e.target) || !document.pointerLockElement) return;
       e.preventDefault(); // keep focus (and pointer lock) on the game
       this.boardOpen = true;
       this.board.hidden = false;
@@ -75,6 +108,165 @@ export class Hud {
       this.boardOpen = false;
       this.board.hidden = true;
     });
+  }
+
+  setLocalId(id: string) {
+    this.localId = id;
+  }
+
+  /** Display names from the latest scores; also returned, for the name tags. */
+  setNames(scores: readonly ScoreEntry[]): ReadonlyMap<string, string> {
+    for (const s of scores) this.names.set(s.id, s.name);
+    return this.names;
+  }
+
+  /** Everything per-match goes: called when leaving a game. */
+  reset() {
+    this.feed.replaceChildren();
+    this.medals.replaceChildren();
+    this.damageDirs.replaceChildren();
+    this.results.hidden = true;
+    this.matchBar.hidden = true;
+    this.death.hidden = true;
+    this.shownMatch = this.shownResults = this.shownBoard = '';
+    this.names.clear();
+  }
+
+  /** The timer and standings at the top of the screen. */
+  setMatch(match: MatchState | null, scores: readonly ScoreEntry[]) {
+    if (!match) {
+      this.matchBar.hidden = true;
+      return;
+    }
+    const ranked = rankScores(scores);
+    const myIndex = ranked.findIndex((s) => s.id === this.localId);
+    const me = ranked[myIndex];
+    const leader = ranked[0];
+    const time = formatTime(match.phase === 'playing' ? match.timeLeft : 0);
+    const key = `${time}/${me?.kills}/${myIndex}/${leader?.name}/${leader?.kills}/${ranked[1]?.name}/${ranked[1]?.kills}/${match.fragLimit}`;
+    if (key === this.shownMatch) return;
+    this.shownMatch = key;
+    this.matchBar.hidden = false;
+    this.matchTime.textContent = time;
+    this.matchTime.classList.toggle('urgent', match.phase === 'playing' && match.timeLeft <= 30);
+    this.matchRank.textContent = me ? `${ordinal(myIndex + 1)} · ${me.kills} / ${match.fragLimit}` : '';
+    if (leader && leader.id !== this.localId && leader.kills > 0) this.matchLeader.textContent = `Leader: ${leader.name} ${leader.kills}`;
+    else if (ranked[1] && leader?.id === this.localId && leader.kills > 0) this.matchLeader.textContent = `Next: ${ranked[1].name} ${ranked[1].kills}`;
+    else this.matchLeader.textContent = '';
+  }
+
+  /**
+   * A medal under the crosshair: `medal` for your achievements, `notice` for match news,
+   * `big` for the start of a match. Newer ones replace older ones.
+   */
+  medal(title: string, sub: string, kind: 'medal' | 'notice' | 'big') {
+    const div = document.createElement('div');
+    div.className = `medal ${kind}`;
+    const t = document.createElement('div');
+    t.className = 'title';
+    t.textContent = title;
+    div.append(t);
+    if (sub) {
+      const s = document.createElement('div');
+      s.className = 'sub';
+      s.textContent = sub;
+      div.append(s);
+    }
+    this.medals.replaceChildren(div);
+    setTimeout(() => div.remove(), MEDAL_TIME);
+  }
+
+  /** A line in the kill feed that isn't a kill: sprees, shutdowns. */
+  feedNotice(text: string) {
+    const row = document.createElement('div');
+    row.className = 'notice';
+    row.textContent = text;
+    this.feed.prepend(row);
+    while (this.feed.childElementCount > FEED_MAX) this.feed.lastElementChild!.remove();
+    setTimeout(() => row.remove(), FEED_TIME);
+  }
+
+  /** A red arc toward whoever just hurt you. `angle`: radians clockwise from straight ahead. */
+  damageFrom(angle: number, amount: number) {
+    const arc = document.createElement('div');
+    arc.className = 'damage-dir';
+    arc.style.rotate = `${angle}rad`;
+    arc.style.setProperty('--strength', String(Math.min(1, 0.4 + amount / 80)));
+    this.damageDirs.append(arc);
+    while (this.damageDirs.childElementCount > 4) this.damageDirs.firstElementChild!.remove();
+    setTimeout(() => arc.remove(), DAMAGE_TIME);
+  }
+
+  /** The results screen between matches; hidden otherwise. */
+  setResults(match: MatchState | null, scores: readonly ScoreEntry[]) {
+    const show = match?.phase === 'intermission';
+    this.results.hidden = !show;
+    if (!show || !match) {
+      this.shownResults = '';
+      return;
+    }
+    // The server breaks ties; its winner heads the podium.
+    const ranked = rankScores(scores);
+    const w = ranked.findIndex((s) => s.id === match.winnerId);
+    if (w > 0) ranked.unshift(...ranked.splice(w, 1));
+    const key = `${match.id}/${Math.ceil(match.timeLeft)}/${JSON.stringify(ranked.map((s) => [s.id, s.kills, s.deaths, s.name]))}`;
+    if (key === this.shownResults) return;
+    this.shownResults = key;
+
+    const winner = ranked[0];
+    const youWon = winner?.id === this.localId && winner.kills > 0;
+    const title = el('results-title');
+    title.textContent = !winner || winner.kills === 0 ? 'DRAW' : youWon ? 'VICTORY' : `${winner.name.toUpperCase()} WINS`;
+    title.classList.toggle('victory', youWon);
+    const myPlace = ranked.findIndex((s) => s.id === this.localId);
+    el('results-sub').textContent = myPlace >= 0 ? `You placed ${ordinal(myPlace + 1)} of ${ranked.length}` : '';
+
+    el('results-podium').replaceChildren(
+      ...ranked.slice(0, 3).map((s, i) => {
+        const div = document.createElement('div');
+        div.className = `place p${i + 1}${s.id === this.localId ? ' mine' : ''}`;
+        const rank = document.createElement('div');
+        rank.className = 'rank';
+        rank.textContent = ordinal(i + 1);
+        const name = document.createElement('div');
+        name.className = 'name';
+        name.textContent = s.name;
+        const kills = document.createElement('div');
+        kills.className = 'kills';
+        kills.textContent = `${s.kills} kill${s.kills === 1 ? '' : 's'}`;
+        div.append(rank, name, kills);
+        return div;
+      }),
+    );
+
+    // Awards for what this game is about: airshots, streaks, staying alive.
+    const best = (score: (s: ScoreEntry) => number) => {
+      let top: ScoreEntry | undefined;
+      for (const s of ranked) if (score(s) > 0 && (!top || score(s) > score(top))) top = s;
+      return top;
+    };
+    const kdOf = (s: ScoreEntry) => (s.kills >= 3 ? s.kills / Math.max(1, s.deaths) : 0);
+    const awards: [string, ScoreEntry | undefined, string][] = [];
+    const air = best((s) => s.airshots);
+    const streak = best((s) => s.bestStreak);
+    const kd = best(kdOf);
+    if (air) awards.push(['Sky Hunter', air, `${air.airshots} airshot${air.airshots === 1 ? '' : 's'}`]);
+    if (streak) awards.push(['Unstoppable', streak, `${streak.bestStreak} kill streak`]);
+    if (kd) awards.push(['Survivor', kd, `${kdOf(kd).toFixed(1)} kills per death`]);
+    el('results-awards').replaceChildren(
+      ...awards.map(([name, s, what]) => {
+        const div = document.createElement('div');
+        div.className = `award${s?.id === this.localId ? ' mine' : ''}`;
+        const t = document.createElement('div');
+        t.className = 'award-title';
+        t.textContent = name;
+        const n = document.createElement('div');
+        n.textContent = `${s?.name} · ${what}`;
+        div.append(t, n);
+        return div;
+      }),
+    );
+    el('results-next').textContent = `Next up: ${mapTitle(match.nextMap)} in ${Math.ceil(match.timeLeft)}`;
   }
 
   setHealth(value: number) {
@@ -227,17 +419,19 @@ export class Hud {
   }
 
   /** Only rebuilt while the board is open and the numbers changed. */
-  setScores(scores: readonly ScoreEntry[]) {
+  setScores(scores: readonly ScoreEntry[], match: MatchState | null) {
     if (!this.boardOpen) return;
-    const sorted = [...scores].sort((a, b) => b.kills - a.kills || a.deaths - b.deaths || a.id.localeCompare(b.id));
-    const key = JSON.stringify(sorted);
+    const sorted = rankScores(scores);
+    const title = match ? `${mapTitle(match.map)}  ·  first to ${match.fragLimit}  ·  ${formatTime(match.phase === 'playing' ? match.timeLeft : 0)} left` : '';
+    const key = title + JSON.stringify(sorted);
     if (key === this.shownBoard) return;
     this.shownBoard = key;
+    this.boardTitle.textContent = title;
     this.boardBody.replaceChildren(
       ...sorted.map((s) => {
         const tr = document.createElement('tr');
         if (s.id === this.localId) tr.classList.add('mine');
-        for (const text of [this.name(s.id), String(s.kills), String(s.deaths)]) {
+        for (const text of [s.name, String(s.kills), String(s.deaths), String(s.airshots), s.bot ? 'bot' : String(s.ping)]) {
           const td = document.createElement('td');
           td.textContent = text;
           tr.append(td);
@@ -247,8 +441,9 @@ export class Hud {
     );
   }
 
-  private name(id: string): string {
-    return id === this.localId ? 'You' : id;
+  /** What to call a player: "You", or their name. */
+  name(id: string): string {
+    return id === this.localId ? 'You' : (this.names.get(id) ?? id);
   }
 
   private nameSpan(id: string): HTMLElement {

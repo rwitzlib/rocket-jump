@@ -4,8 +4,37 @@
     {
       "name": "dev",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev", "--", "--port", "5173", "--strictPort"],
+      "runtimeArgs": [
+        "run",
+        "dev",
+        "--",
+        "--port",
+        "5173",
+        "--strictPort"
+      ],
       "port": 5173
+    },
+    {
+      "name": "server",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "start"
+      ],
+      "port": 8080
+    },
+    {
+      "name": "server-short",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "dist-server/main.js"
+      ],
+      "port": 8095,
+      "env": {
+        "PORT": "8095",
+        "TIME_LIMIT": "20",
+        "INTERMISSION": "8",
+        "FRAG_LIMIT": "3"
+      }
     }
   ]
 }

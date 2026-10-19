@@ -312,8 +312,8 @@ export type SimEvent =
   | { type: 'landed'; playerId: string; impactSpeed: number }
   | { type: 'knockback'; playerId: string; strength: number; sourceId: string; shot: number } // strength 0..1
   | { type: 'respawn'; playerId: string; yaw: number }
-  | { type: 'damaged'; playerId: string; sourceId: string; amount: number }
-  | { type: 'killed'; playerId: string; killerId: string | null; cause: DeathCause } // killerId null: suicide
+  | { type: 'damaged'; playerId: string; sourceId: string; amount: number; midair: boolean }
+  | { type: 'killed'; playerId: string; killerId: string | null; cause: DeathCause; midair: boolean } // killerId null: suicide; midair: an airshot
   | { type: 'entered'; playerId: string; vehicle: number; seat: number }
   | { type: 'exited'; playerId: string; vehicle: number }
   | { type: 'vehicleHit'; vehicle: number; sourceId: string; amount: number }
@@ -334,6 +334,9 @@ const _segment = new Vector3();
 const _right = new Vector3();
 const _up = new Vector3();
 const _want = new Vector3();
+const _down = new Vector3();
+/** Meters of clear air under a victim (from its center) for a hit to count as an airshot. */
+const MIDAIR_HEIGHT = 3;
 /** How steeply a javelin aims to come down on its target. */
 const DIVE_ANGLE = 0.95; // about 55°
 
@@ -470,6 +473,19 @@ export class GameSim {
     if (p.vehicle >= 0) this.vehicles[p.vehicle].seats[p.seat] = null;
     this.world.removeRigidBody(p.body); // also removes its collider
     this.players.delete(id);
+  }
+
+  /** A clean slate for a new match on the same map: scores zeroed, everyone respawned, the map as it started. */
+  resetForMatch() {
+    for (const p of this.players.values()) if (p.vehicle >= 0) this.leaveSeat(p);
+    this.projectiles.length = 0;
+    for (const v of this.vehicles) v.reset();
+    for (const box of this.pickups) box.respawnIn = 0;
+    for (const p of this.players.values()) {
+      p.kills = 0;
+      p.deaths = 0;
+      this.respawn(p);
+    }
   }
 
   respawn(p: PlayerSim) {
@@ -1413,15 +1429,23 @@ export class GameSim {
       p.lastAttacker = sourceId;
       p.sinceAttacked = 0;
     }
-    events.push({ type: 'damaged', playerId: p.id, sourceId, amount });
-    if (p.health <= 0) this.kill(p, killer, cause, events);
+    const midair = sourceId !== p.id && this.isMidair(p, cause);
+    events.push({ type: 'damaged', playerId: p.id, sourceId, amount, midair });
+    if (p.health <= 0) this.kill(p, killer, cause, events, midair);
   }
 
   private recentAttacker(p: PlayerSim): string | null {
     return p.sinceAttacked < COMBAT.killCredit ? p.lastAttacker : null;
   }
 
-  private kill(p: PlayerSim, killerId: string | null, cause: DeathCause, events: SimEvent[]) {
+  /** Hit by a weapon while well clear of the ground and not riding anything: the airshot every rocket game rewards. */
+  private isMidair(p: PlayerSim, cause: DeathCause): boolean {
+    if (p.grounded || p.vehicle >= 0 || cause === 'fall' || cause === 'ram' || cause === 'vehicle') return false;
+    _down.set(0, -1, 0);
+    return this.clearDistance(p.pos, _down, MIDAIR_HEIGHT + 1) >= MIDAIR_HEIGHT;
+  }
+
+  private kill(p: PlayerSim, killerId: string | null, cause: DeathCause, events: SimEvent[], midair = false) {
     if (p.vehicle >= 0) this.leaveSeat(p);
     p.alive = false;
     p.health = 0;
@@ -1432,7 +1456,7 @@ export class GameSim {
     p.deaths++;
     const killer = killerId ? this.players.get(killerId) : undefined;
     if (killer) killer.kills++;
-    events.push({ type: 'killed', playerId: p.id, killerId, cause });
+    events.push({ type: 'killed', playerId: p.id, killerId, cause, midair });
   }
 
   private pushCrates(at: Vector3, blast: Blast, power: number) {

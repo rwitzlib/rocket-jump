@@ -18,7 +18,12 @@ type SoundName =
   | 'jump'
   | 'land'
   | 'hit'
-  | 'kill';
+  | 'kill'
+  | 'medal'
+  | 'airshot'
+  | 'lead'
+  | 'lostLead'
+  | 'blip';
 
 interface Flying {
   id: number;
@@ -204,6 +209,44 @@ function synthesize(ctx: BaseAudioContext): Record<SoundName | 'noise', AudioBuf
       const osc = sweep(sr);
       return (t) => osc(t < 0.09 ? 880 : 1320) * (t < 0.09 ? env(t, 0.002, 0.04) : env(t - 0.09, 0.002, 0.09));
     }),
+
+    // Medal fanfare: a quick rising major arpeggio with a shimmer on top.
+    medal: build(0.75, () => {
+      const notes = [523.25, 659.25, 783.99, 1046.5];
+      const oscs = notes.map(() => sweep(sr));
+      const shimmer = sweep(sr);
+      return (t) => {
+        let v = 0;
+        notes.forEach((f, i) => {
+          const start = i * 0.07;
+          if (t >= start) v += (oscs[i](f) + 0.3 * oscs[i](f * 2)) * env(t - start, 0.004, 0.18) * 0.5;
+        });
+        return v + shimmer(2093) * env(Math.max(0, t - 0.21), 0.01, 0.2) * 0.15;
+      };
+    }),
+
+    // Airshot: the satisfying high ding of hitting someone in midair, with a little ring.
+    airshot: build(0.9, () => {
+      const a = sweep(sr);
+      const b = sweep(sr);
+      return (t) => (a(1568) + 0.6 * b(2349 + 6 * Math.sin(t * 40))) * env(t, 0.002, 0.28);
+    }),
+
+    // Taking the lead: a bright chord; losing it: the same falling.
+    lead: build(0.6, () => {
+      const o = [sweep(sr), sweep(sr), sweep(sr)];
+      return (t) => (o[0](440) + o[1](554.37) + o[2](659.25 * (t < 0.12 ? 1 : 1.335))) * env(t, 0.01, 0.2);
+    }),
+    lostLead: build(0.6, () => {
+      const o = [sweep(sr), sweep(sr)];
+      return (t) => (o[0](392 - t * 120) + o[1](466.16 - t * 140)) * env(t, 0.01, 0.22);
+    }),
+
+    // Chat line and UI ticks.
+    blip: build(0.08, () => {
+      const osc = sweep(sr);
+      return (t) => osc(1400 - t * 4000) * env(t, 0.002, 0.02);
+    }),
   };
 }
 
@@ -216,6 +259,7 @@ export class GameAudio {
   private readonly rocketLoops = new Map<number, Loop>();
   private frameNo = 0;
   private muted = false;
+  private volume = 1;
 
   constructor() {
     try {
@@ -223,7 +267,7 @@ export class GameAudio {
     } catch {
       // storage unavailable (private mode etc.): just default to unmuted
     }
-    this.master.gain.value = this.muted ? 0 : 0.7;
+    this.master.gain.value = this.level();
 
     // A gentle compressor keeps stacked explosions from clipping.
     const comp = this.ctx.createDynamicsCompressor();
@@ -237,9 +281,19 @@ export class GameAudio {
     if (this.ctx.state !== 'running') void this.ctx.resume();
   }
 
+  private level() {
+    return this.muted ? 0 : 0.7 * this.volume;
+  }
+
+  /** Master volume, 0..1, from the settings. */
+  setVolume(volume: number) {
+    this.volume = volume;
+    this.master.gain.setTargetAtTime(this.level(), this.ctx.currentTime, 0.02);
+  }
+
   toggleMute(): boolean {
     this.muted = !this.muted;
-    this.master.gain.setTargetAtTime(this.muted ? 0 : 0.7, this.ctx.currentTime, 0.02);
+    this.master.gain.setTargetAtTime(this.level(), this.ctx.currentTime, 0.02);
     try {
       localStorage.setItem(MUTE_KEY, this.muted ? '1' : '0');
     } catch {

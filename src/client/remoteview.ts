@@ -12,6 +12,7 @@ import { buildGauntlet, buildHookHead, LAUNCHER, PRIMARY_MODELS } from './weapon
 
 const COLORS = [0x4fa3e0, 0xe0b04f, 0xb86fe0, 0x5fd08a, 0xe06f8a, 0x6fd6d6];
 
+const TAG_HEIGHT = 0.045; // with no size attenuation: about 2% of the screen height at a 90° FOV
 const HIP_Y = -0.05; // relative to the capsule center
 const SHOULDER_Y = 0.43; // relative to the hips
 const NECK_Y = 0.5;
@@ -56,6 +57,8 @@ interface Entry {
   hook: THREE.Object3D;
   hookHead: THREE.Object3D; // the one loaded in the gauntlet, hidden while it's out on the rope
   shell: THREE.Mesh;
+  tag: THREE.Sprite;
+  tagName: string;
   // Animation state
   lastPos: THREE.Vector3;
   vel: THREE.Vector3;
@@ -92,9 +95,16 @@ export class RemotePlayersView {
   private readonly teamProto = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.5, metalness: 0.2 });
   private readonly teamMats = COLORS.map((color) => new THREE.MeshStandardMaterial({ color, roughness: 0.5, metalness: 0.2 }));
   private readonly proto: THREE.Group;
+  /** Display names by player id, for the tags over their heads. */
+  names: ReadonlyMap<string, string> = new Map();
 
   constructor(private readonly scene: THREE.Scene) {
     this.proto = this.buildModel();
+  }
+
+  /** Releases every GPU resource; the scene itself is cleared by its owner. */
+  dispose() {
+    for (const id of [...this.entries.keys()]) this.remove(id);
   }
 
   /** Shows one dummy player so its shaders compile behind the start menu (see Effects.setWarmup). */
@@ -128,6 +138,7 @@ export class RemotePlayersView {
     for (const r of remotes.values()) {
       const e = this.entryFor(r.id);
       e.root.visible = r.alive && !r.hidden;
+      this.setTag(e, this.names.get(r.id) ?? '');
       e.shell.visible = r.protected;
       this.setPrimary(e, r.primary);
       this.animate(e, r, dt);
@@ -259,9 +270,16 @@ export class RemotePlayersView {
     const hook = this.hookProto.clone();
     hook.visible = false;
     this.scene.add(root, rope, hook);
+    // Name tag over the head. It's depth tested, so walls hide it: no seeing people through cover.
+    const tag = new THREE.Sprite(new THREE.SpriteMaterial({ transparent: true, depthWrite: false, opacity: 0.9, sizeAttenuation: false }));
+    tag.position.y = 1.35;
+    tag.visible = false;
+    root.add(tag);
 
     e = {
       root,
+      tag,
+      tagName: '',
       body: get('body'),
       legs: get('legs'),
       left: { thigh: get('thighL'), shin: get('shinL') },
@@ -291,12 +309,44 @@ export class RemotePlayersView {
     return e;
   }
 
+  private setTag(e: Entry, name: string) {
+    if (name === e.tagName) return;
+    e.tagName = name;
+    e.tag.visible = !!name;
+    e.tag.material.map?.dispose();
+    e.tag.material.map = null;
+    if (!name) return;
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d')!;
+    const font = '600 40px system-ui, sans-serif';
+    ctx.font = font;
+    const width = Math.ceil(ctx.measureText(name).width) + 28;
+    canvas.width = width;
+    canvas.height = 56;
+    ctx.font = font;
+    ctx.fillStyle = 'rgba(10, 14, 20, 0.55)';
+    ctx.beginPath();
+    ctx.roundRect(0, 0, width, 56, 12);
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(name, width / 2, 30);
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    e.tag.material.map = texture;
+    e.tag.material.needsUpdate = true;
+    e.tag.scale.set((width / 56) * TAG_HEIGHT, TAG_HEIGHT, 1); // a fixed size on screen, readable at any range
+  }
+
   private remove(id: string) {
     const e = this.entries.get(id);
     if (!e) return;
     this.scene.remove(e.root, e.rope, e.hook);
     e.rope.geometry.dispose();
     e.flash.material.dispose();
+    e.tag.material.map?.dispose();
+    e.tag.material.dispose();
     this.entries.delete(id);
   }
 

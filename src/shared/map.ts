@@ -25,6 +25,8 @@ export interface VehicleDef {
 }
 
 export interface MapDef {
+  title: string; // shown in menus and on the scoreboard
+  blurb: string; // a line about it for the menu
   boxes: BoxDef[];
   crates: Vec3Tuple[];
   spawns: SpawnDef[];
@@ -45,6 +47,8 @@ const HALF = 60;
 const WALL_H = 20;
 
 export const ARENA: MapDef = {
+  title: 'Arena',
+  blurb: 'Tight 120 m arena around a central tower. Fast, close and vertical.',
   boxes: [
     // floor + outer walls
     { pos: [0, -0.5, 0], size: [HALF * 2, 1, HALF * 2], color: FLOOR },
@@ -217,6 +221,8 @@ const citadelQuadrant: BoxDef[] = [
 ];
 
 export const CITADEL: MapDef = {
+  title: 'Citadel',
+  blurb: 'Huge 240 m fortress in three layers, with buggies and helicopters.',
   boxes: [
     { pos: [0, -0.5, 0], size: [C_HALF * 2, 1, C_HALF * 2], color: FLOOR },
     ...quad(citadelQuadrant, turnBox),

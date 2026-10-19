@@ -1,11 +1,12 @@
 import { DT } from '../../shared/config';
-import type { MapDef } from '../../shared/map';
 import type { ClientMessage, ServerMessage } from '../../shared/protocol';
-import { GameServer } from '../../shared/server';
+import { GameServer, type ServerOptions } from '../../shared/server';
+import type { Transport } from './transport';
 
 // Runs the real GameServer inside the page, with a fake network in between that adds latency,
 // jitter and packet loss. Messages are JSON-encoded on the way through, exactly like a real
-// transport would, so anything that isn't plain data breaks here first.
+// transport would, so anything that isn't plain data breaks here first. It's also how practice
+// games against bots run: the same server, with a perfect network.
 
 export interface NetConditions {
   ping: number; // round trip, ms
@@ -40,25 +41,32 @@ class Link {
   }
 }
 
-export class Loopback {
+export class Loopback implements Transport {
   readonly server: GameServer;
   readonly up: Link;
   readonly down: Link;
   onMessage: (msg: ServerMessage) => void = () => {};
+  onClose: (reason: string) => void = () => {};
   private accumulator = 0;
   private last = performance.now();
 
   constructor(
-    map: MapDef,
     readonly conditions: NetConditions,
     readonly clientId: string,
-    bots: number,
+    options: Partial<ServerOptions>,
   ) {
     this.up = new Link(conditions);
     this.down = new Link(conditions);
-    this.server = new GameServer(map, (_, msg) => this.down.send(JSON.stringify(msg)));
-    for (let i = 0; i < bots; i++) this.server.addBot(`bot${i + 1}`);
-    this.server.connect(clientId);
+    this.server = new GameServer((_, msg) => this.down.send(JSON.stringify(msg)), options);
+  }
+
+  get received() {
+    return this.down.bytes;
+  }
+
+  close() {
+    this.server.disconnect(this.clientId);
+    this.server.sim.world.free();
   }
 
   send(msg: ClientMessage) {

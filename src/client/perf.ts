@@ -1,3 +1,5 @@
+import { isTyping } from './input';
+
 // Frame-time overlay (toggle with P) plus console logging of long frames, for tracking down hitches.
 // Frame times come from rAF timestamps, so they include GPU/compositor stalls, not just our JS.
 
@@ -43,7 +45,7 @@ export class PerfOverlay {
     document.body.append(this.el);
 
     document.addEventListener('keydown', (e) => {
-      if (e.code !== 'KeyP') return;
+      if (e.code !== 'KeyP' || isTyping(e.target)) return;
       this.visible = !this.visible;
       this.el.hidden = !this.visible;
     });

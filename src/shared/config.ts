@@ -179,6 +179,23 @@ export const NET = {
   eventWindow: 6, // ticks of past events repeated in each snapshot, so one lost snapshot loses no explosions
 };
 
+/** Bump whenever client and server stop understanding each other; mismatched clients are told to reload. */
+export const PROTOCOL_VERSION = 2;
+
+/**
+ * A match is free-for-all deathmatch: first to the frag limit, or the most kills when time runs out.
+ * Then everyone gets the results for `intermission` seconds and the next map in the rotation starts.
+ * The server can override all of these (see src/server/main.ts).
+ */
+export const MATCH = {
+  timeLimit: 8 * 60, // seconds
+  fragLimit: 25,
+  intermission: 15, // seconds on the results screen
+  minPlayers: 4, // bots fill in up to this many while at least one person is playing
+  maxPlayers: 12, // people, not counting bots (who leave to make room)
+  multiKillWindow: 3, // seconds between kills for a double / multi kill
+};
+
 export const COMBAT = {
   maxHealth: 100,
   rocketDamage: 100, // at the center of the blast, falling off linearly like knockback

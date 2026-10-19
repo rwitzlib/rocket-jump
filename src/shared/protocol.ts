@@ -18,7 +18,25 @@ export interface InputMessage {
   frames: InputFrame[]; // the newest few inputs, oldest first
 }
 
-export type ClientMessage = InputMessage;
+/** The first thing a client sends. The server answers with `welcome`, or `rejected`. */
+export interface JoinMessage {
+  type: 'join';
+  name: string;
+  version: number; // PROTOCOL_VERSION
+}
+
+/** Answers the server's ping, so it can measure each player's round trip. */
+export interface PongMessage {
+  type: 'pong';
+  t: number;
+}
+
+export interface ChatSendMessage {
+  type: 'chat';
+  text: string;
+}
+
+export type ClientMessage = InputMessage | JoinMessage | PongMessage | ChatSendMessage;
 
 export interface RemotePlayerState {
   id: string;
@@ -36,8 +54,25 @@ export interface RemotePlayerState {
 
 export interface ScoreEntry {
   id: string;
+  name: string;
   kills: number;
   deaths: number;
+  ping: number; // ms round trip; 0 for bots
+  bot: boolean;
+  airshots: number; // kills on players in midair, this match
+  bestStreak: number; // most kills in one life, this match
+}
+
+export type MatchPhase = 'playing' | 'intermission';
+
+export interface MatchState {
+  id: number; // goes up by one every match
+  phase: MatchPhase;
+  timeLeft: number; // seconds left in this phase
+  fragLimit: number;
+  map: string;
+  nextMap: string;
+  winnerId: string | null; // set during intermission
 }
 
 export interface ProjectileState {
@@ -62,10 +97,31 @@ export type CrateState = number[];
 type WireOf<E> = E extends { pos: Vector3; normal: Vector3 } ? Omit<E, 'pos' | 'normal'> & { pos: Vec3Tuple; normal: Vec3Tuple } : E;
 export type WireEvent = WireOf<SimEvent> & { tick: number };
 
+/** Sent on joining, and again whenever the server changes map. */
 export interface WelcomeMessage {
   type: 'welcome';
   id: string;
   tick: number;
+  map: string;
+  match: MatchState;
+}
+
+export interface RejectedMessage {
+  type: 'rejected';
+  reason: string;
+}
+
+export interface PingMessage {
+  type: 'ping';
+  t: number;
+}
+
+/** A player's chat line, or (no `id`) a server notice like someone joining. */
+export interface ChatMessage {
+  type: 'chat';
+  id: string | null;
+  name: string;
+  text: string;
 }
 
 export interface SnapshotMessage {
@@ -79,11 +135,69 @@ export interface SnapshotMessage {
   vehicles: VehicleState[];
   pickups: number[]; // each mystery box's respawnIn: 0 while it's there to take
   scores: ScoreEntry[]; // everyone, including the recipient
+  match: MatchState;
   events: WireEvent[]; // the last NET.eventWindow ticks of events; clients skip ones they've seen
   input: { queued: number; starved: number; dropped: number }; // the recipient's input stream health, for debugging
 }
 
-export type ServerMessage = WelcomeMessage | SnapshotMessage;
+export type ServerMessage = WelcomeMessage | SnapshotMessage | RejectedMessage | PingMessage | ChatMessage;
+
+export const MAX_NAME = 16;
+export const MAX_CHAT = 120;
+
+/** Printable, trimmed, no runs of spaces, at most `max` characters. */
+export function cleanText(text: unknown, max: number): string {
+  if (typeof text !== 'string') return '';
+  return text
+    .replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2066-\u2069]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, max);
+}
+
+const finite = (v: unknown, lo: number, hi: number, fallback = 0) => (typeof v === 'number' && Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : fallback);
+
+/**
+ * Whatever a client sent, as a well-formed message, or null. The server never trusts the wire:
+ * a modified client could send anything, and one NaN in an input would poison the physics.
+ */
+export function parseClientMessage(data: unknown): ClientMessage | null {
+  if (!data || typeof data !== 'object') return null;
+  const m = data as Record<string, unknown>;
+  switch (m.type) {
+    case 'join':
+      return { type: 'join', name: cleanText(m.name, MAX_NAME), version: finite(m.version, 0, 1e6) };
+    case 'pong':
+      return { type: 'pong', t: finite(m.t, 0, Number.MAX_SAFE_INTEGER) };
+    case 'chat': {
+      const text = cleanText(m.text, MAX_CHAT);
+      return text ? { type: 'chat', text } : null;
+    }
+    case 'input': {
+      if (!Array.isArray(m.frames)) return null;
+      const frames: InputFrame[] = [];
+      for (const f of m.frames.slice(0, 8)) {
+        if (!f || typeof f !== 'object' || !Number.isSafeInteger(f.seq) || f.seq < 0) continue;
+        const i = (f.input ?? {}) as Record<string, unknown>;
+        const input: PlayerInput = {
+          forward: finite(i.forward, -1, 1),
+          right: finite(i.right, -1, 1),
+          jump: i.jump === true,
+          fire: i.fire === true,
+          grapple: i.grapple === true,
+          use: i.use === true,
+          down: i.down === true,
+          yaw: finite(i.yaw, -1e6, 1e6) % (Math.PI * 2),
+          pitch: finite(i.pitch, -Math.PI / 2, Math.PI / 2),
+        };
+        if (i.view !== undefined) input.view = finite(i.view, 0, 1e12);
+        frames.push({ seq: f.seq, input });
+      }
+      return { type: 'input', frames };
+    }
+  }
+  return null;
+}
 
 const tuple = (v: Vector3): Vec3Tuple => [v.x, v.y, v.z];
 

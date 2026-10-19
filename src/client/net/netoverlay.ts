@@ -14,7 +14,7 @@ export class NetOverlay {
 
   constructor(
     private readonly loopback: Loopback,
-    private readonly client: NetClient,
+    public client: NetClient,
   ) {
     this.el = document.createElement('div');
     this.el.id = 'net';

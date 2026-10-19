@@ -4,62 +4,158 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Rocket Jump</title>
-    <link rel="icon" href="data:," />
+    <meta name="description" content="A fast multiplayer arena shooter in your browser: rocket jump, grapple and land airshots." />
+    <meta name="theme-color" content="#0b0f16" />
+    <meta property="og:title" content="Rocket Jump" />
+    <meta property="og:description" content="Rocket jump, grapple and land airshots in a fast browser arena shooter." />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230b0f16'/%3E%3Cpath d='M32 8c7 6 10 15 10 24l-4 10H26l-4-10c0-9 3-18 10-24z' fill='%23ffb347'/%3E%3Ccircle cx='32' cy='26' r='4' fill='%230b0f16'/%3E%3Cpath d='M26 42h12l-6 14z' fill='%23ff5a36'/%3E%3C/svg%3E" />
     <link rel="stylesheet" href="/src/client/style.css" />
   </head>
   <body>
     <canvas id="game"></canvas>
 
-    <div id="hit-flash"></div>
-    <div id="crosshair"></div>
-    <!-- Weapon cooldowns around the crosshair: grapple on the left, rocket on the right. They fill bottom to top. -->
-    <svg id="cooldowns" viewBox="-24 -24 48 48" aria-hidden="true">
-      <path class="track" d="M -5.56 17.12 A 18 18 0 0 1 -5.56 -17.12" />
-      <path id="cd-grapple" class="fill grapple" pathLength="1" d="M -5.56 17.12 A 18 18 0 0 1 -5.56 -17.12" />
-      <path class="track" d="M 5.56 17.12 A 18 18 0 0 0 5.56 -17.12" />
-      <path id="cd-rocket" class="fill rocket" pathLength="1" d="M 5.56 17.12 A 18 18 0 0 0 5.56 -17.12" />
-    </svg>
-    <div id="speed">0.0 m/s</div>
-    <div id="pickup-notice"></div>
-    <!-- Seeker launchers: hold a target in the box until it locks. -->
-    <div id="lock-box" hidden><div id="lock-fill"></div></div>
-    <div id="lock-marker" hidden></div>
-    <div id="missile-warning" hidden>MISSILE LOCK</div>
-    <div id="prompt" hidden></div>
-    <div id="vehicle-status" hidden><span id="vehicle-name"></span><div class="bar"><div id="vehicle-bar"></div></div></div>
-    <div id="weapons"><div><kbd>LMB</kbd><span id="weapon-primary">Rocket Launcher</span><span id="weapon-ammo"></span></div><div><kbd>RMB</kbd><span id="weapon-secondary">Grapple</span></div></div>
-    <div id="mute"></div>
+    <div id="hud" hidden>
+      <div id="hit-flash"></div>
+      <div id="damage-dirs"></div>
+      <div id="crosshair"></div>
+      <!-- Weapon cooldowns around the crosshair: grapple on the left, rocket on the right. They fill bottom to top. -->
+      <svg id="cooldowns" viewBox="-24 -24 48 48" aria-hidden="true">
+        <path class="track" d="M -5.56 17.12 A 18 18 0 0 1 -5.56 -17.12" />
+        <path id="cd-grapple" class="fill grapple" pathLength="1" d="M -5.56 17.12 A 18 18 0 0 1 -5.56 -17.12" />
+        <path class="track" d="M 5.56 17.12 A 18 18 0 0 0 5.56 -17.12" />
+        <path id="cd-rocket" class="fill rocket" pathLength="1" d="M 5.56 17.12 A 18 18 0 0 0 5.56 -17.12" />
+      </svg>
+      <div id="match-bar" hidden>
+        <div id="match-rank"></div>
+        <div id="match-time">0:00</div>
+        <div id="match-leader"></div>
+      </div>
+      <div id="medals"></div>
+      <div id="speed">0.0 m/s</div>
+      <div id="pickup-notice"></div>
+      <!-- Seeker launchers: hold a target in the box until it locks. -->
+      <div id="lock-box" hidden><div id="lock-fill"></div></div>
+      <div id="lock-marker" hidden></div>
+      <div id="missile-warning" hidden>MISSILE LOCK</div>
+      <div id="prompt" hidden></div>
+      <div id="vehicle-status" hidden><span id="vehicle-name"></span><div class="bar"><div id="vehicle-bar"></div></div></div>
+      <div id="weapons"><div><kbd>LMB</kbd><span id="weapon-primary">Rocket Launcher</span><span id="weapon-ammo"></span></div><div><kbd>RMB</kbd><span id="weapon-secondary">Grapple</span></div></div>
+      <div id="mute"></div>
 
-    <div id="health"><span id="health-value">100</span><span class="shield">Spawn protection</span><div class="bar"><div id="health-bar"></div></div></div>
-    <div id="killfeed"></div>
-    <div id="death" hidden>
-      <div id="death-title"></div>
-      <div id="death-timer"></div>
-    </div>
-    <div id="scoreboard" hidden>
-      <table>
-        <thead><tr><th>Player</th><th>Kills</th><th>Deaths</th></tr></thead>
-        <tbody id="scoreboard-body"></tbody>
-      </table>
-    </div>
-
-    <div id="overlay">
-      <div class="panel">
-        <h1>ROCKET JUMP</h1>
-        <p class="start">Click to play</p>
+      <div id="health"><span id="health-value">100</span><span class="shield">Spawn protection</span><div class="bar"><div id="health-bar"></div></div></div>
+      <div id="killfeed"></div>
+      <div id="chat"><div id="chat-log"></div><input id="chat-input" type="text" autocomplete="off" placeholder="Say something, Enter to send" hidden /></div>
+      <div id="death" hidden>
+        <div id="death-title"></div>
+        <div id="death-timer"></div>
+      </div>
+      <div id="scoreboard" hidden>
+        <div id="scoreboard-title"></div>
         <table>
-          <tr><td>WASD</td><td>Move</td></tr>
-          <tr><td>Mouse</td><td>Look</td></tr>
-          <tr><td>Space</td><td>Jump (hold to bunny-hop)</td></tr>
-          <tr><td>Left click</td><td>Fire primary weapon</td></tr>
-          <tr><td>Right click / Shift</td><td>Grapple (hold)</td></tr>
-          <tr><td>E</td><td>Get in / out of a vehicle</td></tr>
-          <tr><td>Space / C</td><td>Helicopter: climb / descend</td></tr>
-          <tr><td>Tab (hold)</td><td>Scoreboard</td></tr>
-          <tr><td>M</td><td>Mute / unmute</td></tr>
-          <tr><td>Esc</td><td>Release mouse</td></tr>
+          <thead><tr><th>Player</th><th>Kills</th><th>Deaths</th><th title="Kills on players in midair">Air</th><th>Ping</th></tr></thead>
+          <tbody id="scoreboard-body"></tbody>
         </table>
-        <p class="tip">Tip: aim at your feet and fire while jumping to rocket jump. Crosshair turns green when the grapple can reach. Walk into a floating ? box to swap a weapon.</p>
+      </div>
+      <div id="results" hidden>
+        <div id="results-title"></div>
+        <div id="results-sub"></div>
+        <div id="results-podium"></div>
+        <div id="results-awards"></div>
+        <div id="results-next"></div>
+      </div>
+    </div>
+
+    <!-- Main menu -->
+    <div id="menu" class="screen">
+      <div class="menu-panel">
+        <h1 class="logo">ROCKET<span>JUMP</span></h1>
+        <p class="tagline">Rocket jump. Grapple. Land the airshot.</p>
+        <label class="field">
+          <span>Name</span>
+          <input id="name-input" type="text" maxlength="16" autocomplete="nickname" spellcheck="false" placeholder="Pick a name" />
+        </label>
+        <button id="play-online" class="primary" disabled>
+          <span class="label">Play online</span>
+          <small id="online-status">Checking server…</small>
+        </button>
+        <div class="practice">
+          <button id="play-practice" disabled>Practice vs bots</button>
+          <select id="practice-map" aria-label="Practice map"></select>
+          <select id="practice-bots" aria-label="Number of bots">
+            <option value="1">1 bot</option>
+            <option value="3" selected>3 bots</option>
+            <option value="5">5 bots</option>
+            <option value="7">7 bots</option>
+          </select>
+        </div>
+        <div class="menu-row">
+          <button id="open-settings" class="ghost">Settings</button>
+          <button id="open-controls" class="ghost">How to play</button>
+        </div>
+        <p id="menu-error" class="error" hidden></p>
+        <p id="touch-warning" class="error" hidden>Rocket Jump needs a mouse and keyboard.</p>
+      </div>
+    </div>
+
+    <!-- Shown while in a game with the mouse released -->
+    <div id="pause" class="screen" hidden>
+      <div class="menu-panel small">
+        <h2 id="pause-title">Paused</h2>
+        <p class="hint" id="pause-hint">The match keeps going while you're away.</p>
+        <button id="resume" class="primary">Click to play</button>
+        <div class="menu-row">
+          <button id="pause-settings" class="ghost">Settings</button>
+          <button id="pause-controls" class="ghost">How to play</button>
+          <button id="leave" class="ghost">Leave match</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="connecting" class="screen" hidden>
+      <div class="menu-panel small">
+        <h2 id="connecting-title">Connecting…</h2>
+        <button id="connecting-cancel" class="ghost">Cancel</button>
+      </div>
+    </div>
+
+    <div id="settings" class="screen modal" hidden>
+      <div class="menu-panel">
+        <h2>Settings</h2>
+        <label class="slider"><span>Mouse sensitivity</span><input id="set-sensitivity" type="range" /><output id="out-sensitivity"></output></label>
+        <label class="slider"><span>Field of view</span><input id="set-fov" type="range" /><output id="out-fov"></output></label>
+        <label class="slider"><span>Volume</span><input id="set-volume" type="range" /><output id="out-volume"></output></label>
+        <label class="check"><input id="set-invert" type="checkbox" /><span>Invert mouse Y</span></label>
+        <button id="settings-done" class="primary">Done</button>
+      </div>
+    </div>
+
+    <div id="controls" class="screen modal" hidden>
+      <div class="menu-panel wide">
+        <h2>How to play</h2>
+        <div class="columns">
+          <table>
+            <tr><td>WASD</td><td>Move</td></tr>
+            <tr><td>Mouse</td><td>Look</td></tr>
+            <tr><td>Space</td><td>Jump (hold to bunny-hop)</td></tr>
+            <tr><td>Left click</td><td>Fire</td></tr>
+            <tr><td>Right click / Shift</td><td>Grapple (hold)</td></tr>
+            <tr><td>E</td><td>Get in / out of a vehicle</td></tr>
+            <tr><td>Space / C</td><td>Helicopter climb / descend</td></tr>
+            <tr><td>Tab (hold)</td><td>Scoreboard</td></tr>
+            <tr><td>T / Enter</td><td>Chat</td></tr>
+            <tr><td>M</td><td>Mute</td></tr>
+            <tr><td>Esc</td><td>Pause menu</td></tr>
+          </table>
+          <ul class="tips">
+            <li><b>Rocket jump:</b> look down, jump and fire at your feet. Your own rockets never hurt you.</li>
+            <li><b>Grapple</b> walls, crates, vehicles, other players, even rockets in flight. The crosshair turns green in range.</li>
+            <li><b>Airshots:</b> hitting someone in midair rings a bell and counts toward the Sky Hunter award.</li>
+            <li><b>Knock people off the map</b>: a fall within 5 seconds of your hit is your kill.</li>
+            <li><b>? boxes</b> swap your launcher for a random one: grenades, the Hypersonic, or heat seekers.</li>
+            <li>First to the frag limit wins. Streaks, multi kills and shutdowns earn medals.</li>
+          </ul>
+        </div>
+        <button id="controls-done" class="primary">Got it</button>
       </div>
     </div>
 
