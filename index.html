@@ -79,13 +79,18 @@
           <small id="online-status">Checking server…</small>
         </button>
         <div class="practice">
-          <button id="play-practice" disabled>Practice vs bots</button>
+          <button id="play-practice" disabled title="Practice against bots, offline">Practice</button>
           <select id="practice-map" aria-label="Practice map"></select>
           <select id="practice-bots" aria-label="Number of bots">
             <option value="1">1 bot</option>
             <option value="3" selected>3 bots</option>
             <option value="5">5 bots</option>
             <option value="7">7 bots</option>
+          </select>
+          <select id="practice-skill" aria-label="Bot difficulty">
+            <option value="easy" selected>Easy</option>
+            <option value="normal">Normal</option>
+            <option value="hard">Hard</option>
           </select>
         </div>
         <div class="menu-row">

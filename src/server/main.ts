@@ -20,6 +20,7 @@ import { GameServer } from '../shared/server';
 //   INTERMISSION=15       seconds on the results screen
 //   MIN_PLAYERS=4         bots fill in up to this many players (0: no bots)
 //   MAX_PLAYERS=12        people allowed in at once
+//   BOT_SKILL=auto        easy, normal or hard; auto follows how the people on the server are doing
 //   STATIC_DIR=dist       where the built client is
 
 const env = (name: string, fallback: number) => {
@@ -63,6 +64,7 @@ const game = new GameServer(
     intermission: env('INTERMISSION', MATCH.intermission),
     minPlayers: env('MIN_PLAYERS', MATCH.minPlayers),
     maxPlayers: env('MAX_PLAYERS', MATCH.maxPlayers),
+    botSkill: (['easy', 'normal', 'hard'] as const).find((s) => s === process.env.BOT_SKILL) ?? 'auto',
   },
 );
 

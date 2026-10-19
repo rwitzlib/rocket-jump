@@ -1,5 +1,5 @@
 import { DT, MATCH, NET, PROTOCOL_VERSION } from './config';
-import { Bot } from './bot';
+import { Bot, type BotSkill } from './bot';
 import { MAPS } from './map';
 import {
   MAX_NAME,
@@ -53,10 +53,14 @@ export interface ServerOptions {
   /** Bots fill the game up to this many players while anyone is connected. 0 for no bots. */
   minPlayers: number;
   maxPlayers: number;
+  /** How good bots are. 'auto' starts easy and follows how the people on the server are doing. */
+  botSkill: BotSkill | 'auto';
 }
 
 const BOT_NAMES = ['Rocko', 'Splash', 'Boomer', 'Hookshot', 'Gibs', 'Strafe', 'Kaboom', 'Ricochet', 'Nitro', 'Zipline', 'Frag', 'Dropkick', 'Skyhook', 'Blastoff'];
 const PING_INTERVAL = 2000; // ms
+const SKILL_CHECK = 20; // seconds between bot skill adjustments
+const SKILL_LADDER: BotSkill[] = ['easy', 'normal', 'hard'];
 const CHAT_INTERVAL = 600; // ms a player must wait between chat lines
 
 const now = () => performance.now();
@@ -72,6 +76,8 @@ export class GameServer {
   private mapIndex = 0;
   private nextBot = 1;
   private lastPing = 0;
+  private skill: BotSkill = 'easy';
+  private nextSkillCheck = SKILL_CHECK;
   private match: MatchState;
 
   constructor(
@@ -85,12 +91,14 @@ export class GameServer {
       intermission: MATCH.intermission,
       minPlayers: MATCH.minPlayers,
       maxPlayers: MATCH.maxPlayers,
+      botSkill: 'auto',
       ...options,
     };
     this.options.maps = this.options.maps.filter((m) => MAPS[m]);
     if (!this.options.maps.length) this.options.maps = ['arena'];
     this.sim = new GameSim(MAPS[this.mapName]);
     this.match = this.newMatch(1);
+    if (this.options.botSkill !== 'auto') this.skill = this.options.botSkill;
   }
 
   get mapName(): string {
@@ -107,6 +115,7 @@ export class GameServer {
       map: this.mapName,
       players: [...this.connections.values()].map((c) => c.name),
       bots: this.bots.size,
+      botSkill: this.skill,
       maxPlayers: this.options.maxPlayers,
       match: { ...this.match, timeLeft: Math.round(this.match.timeLeft) },
     };
@@ -170,7 +179,10 @@ export class GameServer {
       return;
     }
     // Someone arriving at an empty server gets a fresh match rather than the tail of an old one.
-    if (this.connections.size === 0) this.startMatch(false);
+    if (this.connections.size === 0) {
+      this.startMatch(false);
+      if (this.options.botSkill === 'auto') this.skill = 'easy';
+    }
 
     const name = this.uniqueName(rawName || `Player ${Math.floor(Math.random() * 900 + 100)}`);
     this.connections.set(id, {
@@ -211,12 +223,12 @@ export class GameServer {
     for (const id of this.connections.keys()) this.send(id, { type: 'chat', id: null, name: '', text });
   }
 
-  addBot(): string {
+  addBot(skill: BotSkill = this.skill): string {
     const id = `bot${this.nextBot++}`;
     const used = new Set([...this.bots.values()].map((b) => b.name));
     const free = BOT_NAMES.filter((n) => !used.has(n) && ![...this.connections.values()].some((c) => c.name === n));
     const name = free.length ? free[Math.floor(Math.random() * free.length)] : `Bot ${this.nextBot}`;
-    this.bots.set(id, { bot: new Bot(), name });
+    this.bots.set(id, { bot: new Bot(skill), name });
     this.stats.set(id, { streak: 0, bestStreak: 0, airshots: 0 });
     this.sim.addPlayer(id);
     return id;
@@ -315,7 +327,34 @@ export class GameServer {
     }
 
     this.updateMatch();
+    this.adaptBots();
     if (this.sim.tick % NET.snapshotInterval === 0) this.broadcast();
+  }
+
+  /**
+   * With botSkill 'auto', bots get better while the people here are winning and ease off while
+   * they're losing: someone new still gets kills, and someone good still gets a fight.
+   */
+  private adaptBots() {
+    if (this.options.botSkill !== 'auto' || this.match.phase !== 'playing') return;
+    this.nextSkillCheck -= DT;
+    if (this.nextSkillCheck > 0) return;
+    this.nextSkillCheck = SKILL_CHECK;
+    let kills = 0;
+    let deaths = 0;
+    for (const id of this.connections.keys()) {
+      const p = this.sim.players.get(id);
+      if (!p) continue;
+      kills += p.kills;
+      deaths += p.deaths;
+    }
+    if (kills + deaths < 4) return; // too early to tell
+    const ratio = (kills + 1) / (deaths + 1);
+    const level = SKILL_LADDER.indexOf(this.skill);
+    const next = ratio < 0.6 ? Math.max(0, level - 1) : ratio > 1.6 ? Math.min(SKILL_LADDER.length - 1, level + 1) : level;
+    if (next === level) return;
+    this.skill = SKILL_LADDER[next];
+    for (const b of this.bots.values()) b.bot.skill = this.skill;
   }
 
   /** Kill streaks and airshots, for the scoreboard and the end-of-match awards. */

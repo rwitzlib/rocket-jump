@@ -43,6 +43,7 @@ Settings are environment variables:
 | `INTERMISSION` | 15 | seconds on the results screen |
 | `MIN_PLAYERS` | 4 | bots fill the game up to this many players (0 for no bots) |
 | `MAX_PLAYERS` | 12 | people allowed in at once |
+| `BOT_SKILL` | auto | easy, normal or hard. Auto starts easy and steps up while people are winning, down while they're losing |
 | `STATIC_DIR` | dist | where the built client is |
 
 `GET /status` returns the map, who's playing, the match state and the average tick time as JSON. `GET /health`

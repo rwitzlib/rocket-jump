@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import { PROTOCOL_VERSION } from '../shared/config';
 import { MAPS } from '../shared/map';
 import { cleanText, MAX_NAME, type ServerMessage } from '../shared/protocol';
+import type { BotSkill } from '../shared/bot';
 import type { ServerOptions } from '../shared/server';
 import { Announcer } from './announcer';
 import { GameAudio } from './audio';
@@ -53,6 +54,7 @@ async function main() {
   const practiceButton = $<HTMLButtonElement>('play-practice');
   const practiceMap = $<HTMLSelectElement>('practice-map');
   const practiceBots = $<HTMLSelectElement>('practice-bots');
+  const practiceSkill = $<HTMLSelectElement>('practice-skill');
 
   if (matchMedia('(pointer: coarse)').matches && !matchMedia('(pointer: fine)').matches) $('touch-warning').hidden = false;
 
@@ -277,7 +279,7 @@ async function main() {
   });
 
   const startPractice = (conditions: NetConditions, bots: number) => {
-    const options: Partial<ServerOptions> = { maps: [practiceMap.value], minPlayers: bots + 1, maxPlayers: 1 };
+    const options: Partial<ServerOptions> = { maps: [practiceMap.value], minPlayers: bots + 1, maxPlayers: 1, botSkill: practiceSkill.value as BotSkill };
     const loopback = new Loopback(conditions, 'player', options);
     if (params.get('net') === 'loopback') ctx.netOverlay ??= new NetOverlay(loopback, null!);
     begin(loopback, true);

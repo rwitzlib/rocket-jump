@@ -9,15 +9,29 @@ import type { PlayerInput } from './types';
 // jumps and grapples now and then, so it keeps moving.
 
 const ORBIT_RADIUS = 28;
-const SIGHT_RANGE = 50;
-const REACTION = 0.45; // seconds between spotting someone and the first shot
-const AIM_ERROR = 0.07; // radians, re-rolled every shot
+
+/**
+ * How good a bot is. Bots fill in for people, so they should be beatable by someone new and still
+ * worth fighting for someone good: the server picks a level, or adapts it to how its people are doing.
+ * reaction: seconds between spotting someone and the first shot. aimError: radians, re-rolled every
+ * shot. hesitate: average extra seconds before each shot once the weapon is ready. sight: meters it
+ * notices people from. splash: aims at the feet of people on the ground, the expert rocket habit.
+ */
+export const BOT_SKILLS = {
+  novice: { reaction: 1.0, aimError: 0.2, hesitate: 0.5, sight: 35, splash: false }, // stands in for a new player in scripts/balance.ts
+  easy: { reaction: 0.8, aimError: 0.12, hesitate: 0.6, sight: 35, splash: false },
+  normal: { reaction: 0.5, aimError: 0.08, hesitate: 0.15, sight: 45, splash: true },
+  hard: { reaction: 0.3, aimError: 0.045, hesitate: 0, sight: 55, splash: true },
+};
+export type BotSkill = keyof typeof BOT_SKILLS;
 
 const _eye = new Vector3();
 const _aim = new Vector3();
 const _targetEye = new Vector3();
 
 export class Bot {
+  constructor(public skill: BotSkill = 'normal') {}
+
   private t = Math.random() * 100;
   private readonly orbitSpeed = (0.15 + Math.random() * 0.1) * (Math.random() < 0.5 ? -1 : 1);
   private nextRocketJump = 2 + Math.random() * 2;
@@ -55,10 +69,11 @@ export class Bot {
       this.aimAt(p, target, input);
       input.forward = 0.3; // strafe around them rather than running into its own splash
       this.reaction -= DT;
-      if (this.reaction <= 0 && p.fireCooldown === 0) {
+      const skill = BOT_SKILLS[this.skill];
+      if (this.reaction <= 0 && p.fireCooldown === 0 && Math.random() < DT / (DT + skill.hesitate)) {
         input.fire = true;
-        this.errYaw = (Math.random() * 2 - 1) * AIM_ERROR;
-        this.errPitch = (Math.random() * 2 - 1) * AIM_ERROR;
+        this.errYaw = (Math.random() * 2 - 1) * skill.aimError;
+        this.errPitch = (Math.random() * 2 - 1) * skill.aimError;
       }
       return input;
     }
@@ -92,7 +107,7 @@ export class Bot {
 
     p.eye(_eye);
     let best: PlayerSim | null = null;
-    let bestDist = SIGHT_RANGE;
+    let bestDist = BOT_SKILLS[this.skill].sight;
     for (const o of sim.players.values()) {
       if (o === p || !o.alive) continue;
       const dist = o.pos.distanceTo(p.pos);
@@ -101,7 +116,7 @@ export class Bot {
         bestDist = dist;
       }
     }
-    if (best && best.id !== this.targetId) this.reaction = REACTION;
+    if (best && best.id !== this.targetId) this.reaction = BOT_SKILLS[this.skill].reaction;
     this.targetId = best?.id ?? null;
     return best;
   }
@@ -113,7 +128,7 @@ export class Bot {
     const speed = grenade ? GRENADE.speed : p.primary === 'hypersonic' ? HYPERSONIC.speed : ROCKET.speed;
     const flight = isSeeker(p.primary) ? 0 : target.pos.distanceTo(_eye) / speed;
     _aim.copy(target.pos).addScaledVector(target.vel, flight);
-    if (target.grounded) _aim.y -= 0.8; // the floor at their feet: splash is easier to land than a direct hit
+    if (target.grounded && BOT_SKILLS[this.skill].splash) _aim.y -= 0.8; // the floor at their feet: splash is easier to land than a direct hit
     if (grenade) _aim.y += 0.5 * GRAVITY * flight * flight; // lob it: aim above by as much as it will drop
     _aim.sub(_eye);
     input.yaw = Math.atan2(-_aim.x, -_aim.z) + this.errYaw;
