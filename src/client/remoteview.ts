@@ -25,6 +25,7 @@ const RECOIL_TIME = 0.35;
 const CORPSE_TIME = 1.15; // seconds from the hit to the pop
 const CORPSE_SWELL = 0.14; // seconds it puffs up before popping
 const CORPSE_GRAVITY = 16;
+const CORPSE_RADIUS = 0.45; // how close the body's center gets to a wall
 const BLAST_MEMORY = 400; // ms an explosion is remembered for, to blame for a death that shows up a little later // a little floatier than real gravity, for the cartoon arc
 const Y = new THREE.Vector3(0, 1, 0);
 const FORWARD = new THREE.Vector3(0, 0, -1);
@@ -32,6 +33,7 @@ const GAUNTLET_REST = new THREE.Quaternion().setFromEuler(new THREE.Euler(-0.2, 
 
 const _a = new THREE.Vector3();
 const _b = new THREE.Vector3();
+const _n = new THREE.Vector3();
 const _vel = new THREE.Vector3();
 const _q = new THREE.Quaternion();
 const _m = new THREE.Matrix4();
@@ -119,8 +121,8 @@ export class RemotePlayersView {
   private readonly blasts: { pos: THREE.Vector3; radius: number; time: number }[] = [];
   /** Called when a corpse pops: where, and in whose color. */
   onPoof: ((at: THREE.Vector3, color: number) => void) | null = null;
-  /** Height of the ground under a point, or null if there's none (for corpses to bounce on). */
-  groundAt: ((at: THREE.Vector3) => number | null) | null = null;
+  /** Ray against the level (see GameSim.castLevel), for corpses to bounce off walls and floors. */
+  castLevel: ((from: THREE.Vector3, dir: THREE.Vector3, max: number, outNormal: THREE.Vector3) => number | null) | null = null;
   /** Display names by player id, for the tags over their heads. */
   names: ReadonlyMap<string, string> = new Map();
 
@@ -211,23 +213,45 @@ export class RemotePlayersView {
     return null;
   }
 
+  /**
+   * Moves a corpse along its velocity, sweeping a ray ahead of it so it can't pass through walls
+   * however fast it's going: it stops at whatever it hits and bounces off, losing most of the speed
+   * into the surface and some along it, and some of its spin.
+   */
+  private moveCorpse(c: Corpse, dt: number) {
+    const pos = c.root.position;
+    let left = dt;
+    for (let k = 0; k < 3 && left > 0; k++) {
+      const speed = c.vel.length();
+      if (speed < 1e-3) return;
+      _b.copy(c.vel).divideScalar(speed);
+      const step = speed * left;
+      const hit = this.castLevel?.(pos, _b, step + CORPSE_RADIUS, _n) ?? null;
+      if (hit === null) {
+        pos.addScaledVector(c.vel, left);
+        return;
+      }
+      const travel = Math.max(hit - CORPSE_RADIUS, 0);
+      pos.addScaledVector(_b, travel);
+      left *= 1 - travel / step;
+      const into = c.vel.dot(_n);
+      if (into < 0) {
+        // Split into along-the-surface and into-it, keep a little of each, and send the second back out.
+        c.vel.addScaledVector(_n, -into).multiplyScalar(0.7).addScaledVector(_n, -into * 0.4);
+        c.spin *= 0.6;
+      }
+      pos.addScaledVector(_n, 0.01);
+    }
+  }
+
   private updateCorpses(dt: number) {
     for (let i = this.corpses.length - 1; i >= 0; i--) {
       const c = this.corpses[i];
       if (!c.launched) this.launch(c);
       c.age += dt;
       c.vel.y -= CORPSE_GRAVITY * dt;
-      c.root.position.addScaledVector(c.vel, dt);
+      this.moveCorpse(c, dt);
       c.root.quaternion.premultiply(_q.setFromAxisAngle(c.axis, c.spin * dt));
-      const floor = this.groundAt?.(c.root.position) ?? null;
-      if (floor !== null && c.root.position.y < floor + 0.5 && c.vel.y < 0) {
-        // Bounce: lose most of the speed, and some of the spin.
-        c.root.position.y = floor + 0.5;
-        c.vel.y = -c.vel.y * 0.45;
-        c.vel.x *= 0.7;
-        c.vel.z *= 0.7;
-        c.spin *= 0.6;
-      }
       // Arms and legs windmilling, each on its own beat, wilder at first.
       const wild = 1.2 - Math.min(c.age / CORPSE_TIME, 1) * 0.6;
       c.limbs.forEach((limb, k) => {

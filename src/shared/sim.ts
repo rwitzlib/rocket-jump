@@ -555,6 +555,21 @@ export class GameSim {
     return hit ? Math.max(0.5, hit.timeOfImpact - 0.3) : max;
   }
 
+  /**
+   * Distance along a ray to the static level (walls, floors, ramps), or null if nothing is within
+   * `max`. `outNormal` gets the surface's normal at the hit. For purely visual things that should
+   * bump into the level, like a knocked-out player's body.
+   */
+  castLevel(from: Vector3, dir: Vector3, max: number, outNormal: Vector3): number | null {
+    _rayOrigin.copy(from);
+    _rayDir.copy(dir);
+    const flags = RAPIER.QueryFilterFlags.EXCLUDE_DYNAMIC | RAPIER.QueryFilterFlags.EXCLUDE_KINEMATIC;
+    const hit = this.world.castRayAndGetNormal(_ray, max, true, flags);
+    if (!hit) return null;
+    outNormal.set(hit.normal.x, hit.normal.y, hit.normal.z);
+    return hit.timeOfImpact;
+  }
+
   /** True if nothing static (walls, floor, tower) blocks the straight line between two points. */
   canSee(from: Vector3, to: Vector3): boolean {
     _rayOrigin.copy(from);

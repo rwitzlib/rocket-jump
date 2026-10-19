@@ -83,7 +83,7 @@ export function startGame(ctx: GameContext, mapName: string, localId: string, tr
   };
   const rope = new Rope(scene);
   const remoteView = new RemotePlayersView(scene);
-  remoteView.groundAt = effects.groundAt;
+  remoteView.castLevel = (from, dir, max, normal) => sim.castLevel(from, dir, max, normal);
   remoteView.onPoof = (at, color) => {
     effects.burst(at, color);
     audio.play('bounce', { at, volume: 1, rate: 0.6 });
