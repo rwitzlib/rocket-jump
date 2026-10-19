@@ -22,6 +22,9 @@ const SHIN = 0.38;
 const STRIDE = 2.6; // gait radians per meter traveled
 const MAX_LEG_TURN = 0.9; // radians the legs turn toward a sideways run
 const RECOIL_TIME = 0.35;
+const CORPSE_TIME = 1.15; // seconds from the hit to the pop
+const CORPSE_SWELL = 0.14; // seconds it puffs up before popping
+const CORPSE_GRAVITY = 16; // a little floatier than real gravity, for the cartoon arc
 const Y = new THREE.Vector3(0, 1, 0);
 const FORWARD = new THREE.Vector3(0, 0, -1);
 const GAUNTLET_REST = new THREE.Quaternion().setFromEuler(new THREE.Euler(-0.2, -0.1, 0));
@@ -67,6 +70,21 @@ interface Entry {
   air: number; // 0 grounded .. 1 airborne pose
   recoil: number;
   fresh: boolean;
+  alive: boolean; // as of the last sync, to catch the moment they die
+}
+
+/**
+ * A knocked-out player: a copy of their model thrown into the air, tumbling with its limbs flailing,
+ * bouncing off the ground, until it swells and pops.
+ */
+interface Corpse {
+  id: string;
+  root: THREE.Group;
+  vel: THREE.Vector3;
+  axis: THREE.Vector3;
+  spin: number; // radians per second about `axis`
+  age: number;
+  limbs: THREE.Object3D[]; // thighs, shins, aim, gauntlet, head: each flails on its own beat
 }
 
 export class RemotePlayersView {
@@ -94,6 +112,11 @@ export class RemotePlayersView {
     glow: new THREE.MeshStandardMaterial({ color: 0x000000, emissive: color, emissiveIntensity: 2.4 }),
   }));
   private readonly proto: THREE.Group;
+  private readonly corpses: Corpse[] = [];
+  /** Called when a corpse pops: where, and in whose color. */
+  onPoof: ((at: THREE.Vector3, color: number) => void) | null = null;
+  /** Height of the ground under a point, or null if there's none (for corpses to bounce on). */
+  groundAt: ((at: THREE.Vector3) => number | null) | null = null;
   /** Display names by player id, for the tags over their heads. */
   names: ReadonlyMap<string, string> = new Map();
 
@@ -104,6 +127,72 @@ export class RemotePlayersView {
   /** Releases every GPU resource; the scene itself is cleared by its owner. */
   dispose() {
     for (const id of [...this.entries.keys()]) this.remove(id);
+    for (const c of this.corpses) this.scene.remove(c.root);
+    this.corpses.length = 0;
+  }
+
+  /**
+   * Knocks a player out: their model is thrown from where they stood (carrying `vel`, plus a kick
+   * up and a random shove), tumbling and flailing, and pops after a second or so.
+   */
+  spawnCorpse(id: string, pos: THREE.Vector3, vel: THREE.Vector3, yaw: number, primary: WeaponId) {
+    const root = this.dress(this.proto.clone(), id);
+    for (const weapon of Object.keys(PRIMARY_MODELS)) {
+      const launcher = root.getObjectByName(`${weapon}Launcher`);
+      if (launcher) launcher.visible = weapon === primary;
+    }
+    root.position.copy(pos);
+    root.rotation.y = yaw;
+    this.scene.add(root);
+    const shove = new THREE.Vector3(Math.random() * 2 - 1, 0, Math.random() * 2 - 1).multiplyScalar(3);
+    this.corpses.push({
+      id,
+      root,
+      vel: vel.clone().multiplyScalar(0.7).add(shove).setY(Math.max(vel.y * 0.7, 0) + 6 + Math.random() * 3),
+      axis: new THREE.Vector3(Math.random() * 2 - 1, 0.3, Math.random() * 2 - 1).normalize(),
+      spin: (7 + Math.random() * 5) * (Math.random() < 0.5 ? -1 : 1),
+      age: 0,
+      limbs: ['thighL', 'thighR', 'shinL', 'shinR', 'aim', 'gauntlet', 'head'].map((name) => root.getObjectByName(name)!),
+    });
+  }
+
+  /** Where someone's corpse is right now, if they have one in the air. */
+  corpsePosition(id: string): THREE.Vector3 | null {
+    for (const c of this.corpses) if (c.id === id) return c.root.position;
+    return null;
+  }
+
+  private updateCorpses(dt: number) {
+    for (let i = this.corpses.length - 1; i >= 0; i--) {
+      const c = this.corpses[i];
+      c.age += dt;
+      c.vel.y -= CORPSE_GRAVITY * dt;
+      c.root.position.addScaledVector(c.vel, dt);
+      c.root.quaternion.premultiply(_q.setFromAxisAngle(c.axis, c.spin * dt));
+      const floor = this.groundAt?.(c.root.position) ?? null;
+      if (floor !== null && c.root.position.y < floor + 0.5 && c.vel.y < 0) {
+        // Bounce: lose most of the speed, and some of the spin.
+        c.root.position.y = floor + 0.5;
+        c.vel.y = -c.vel.y * 0.45;
+        c.vel.x *= 0.7;
+        c.vel.z *= 0.7;
+        c.spin *= 0.6;
+      }
+      // Arms and legs windmilling, each on its own beat, wilder at first.
+      const wild = 1.2 - Math.min(c.age / CORPSE_TIME, 1) * 0.6;
+      c.limbs.forEach((limb, k) => {
+        limb.rotation.x = Math.sin(c.age * (16 + k * 3) + k * 1.7) * wild;
+        limb.rotation.z = Math.cos(c.age * (13 + k * 2) + k) * wild * 0.4;
+      });
+      // Swell for the last moment, then pop.
+      const left = CORPSE_TIME - c.age;
+      c.root.scale.setScalar(left < CORPSE_SWELL ? 1 + (1 - left / CORPSE_SWELL) * 0.35 : 1);
+      if (left <= 0) {
+        this.onPoof?.(c.root.position, this.colorOf(c.id));
+        this.scene.remove(c.root);
+        this.corpses.splice(i, 1);
+      }
+    }
   }
 
   /** Shows one dummy player so its shaders compile behind the start menu (see Effects.setWarmup). */
@@ -139,8 +228,12 @@ export class RemotePlayersView {
   }
 
   sync(remotes: ReadonlyMap<string, RemotePlayer>, dt: number) {
+    this.updateCorpses(dt);
     for (const r of remotes.values()) {
       const e = this.entryFor(r.id);
+      // They just died where we could see them: leave a corpse in their place.
+      if (e.alive && !r.alive && e.root.visible && !e.fresh) this.spawnCorpse(r.id, e.root.position, e.vel, e.root.rotation.y, e.primary);
+      e.alive = r.alive;
       e.root.visible = r.alive && !r.hidden;
       this.setTag(e, this.names.get(r.id) ?? '');
       e.shell.visible = r.protected;
@@ -252,14 +345,7 @@ export class RemotePlayersView {
   private entryFor(id: string): Entry {
     let e = this.entries.get(id);
     if (e) return e;
-    const team = this.teamMats[teamIndex(id)];
-
-    const root = this.proto.clone();
-    root.traverse((o) => {
-      if (!(o instanceof THREE.Mesh)) return;
-      if (o.material === this.teamProto) o.material = team.team;
-      else if (o.material === this.glowProto) o.material = team.glow;
-    });
+    const root = this.dress(this.proto.clone(), id);
     const get = (name: string) => root.getObjectByName(name)!;
     // Each model gets its own flash material so one player's shot doesn't light up everyone's barrel.
     const flash = get('flash') as THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>;
@@ -308,9 +394,21 @@ export class RemotePlayersView {
       air: 0,
       recoil: 0,
       fresh: true,
+      alive: true,
     };
     this.entries.set(id, e);
     return e;
+  }
+
+  /** Swaps the stand-in team materials on a copy of the rig for this player's own. */
+  private dress(root: THREE.Group, id: string): THREE.Group {
+    const team = this.teamMats[teamIndex(id)];
+    root.traverse((o) => {
+      if (!(o instanceof THREE.Mesh)) return;
+      if (o.material === this.teamProto) o.material = team.team;
+      else if (o.material === this.glowProto) o.material = team.glow;
+    });
+    return root;
   }
 
   private setTag(e: Entry, name: string) {

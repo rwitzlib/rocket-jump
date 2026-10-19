@@ -83,6 +83,11 @@ export function startGame(ctx: GameContext, mapName: string, localId: string, tr
   };
   const rope = new Rope(scene);
   const remoteView = new RemotePlayersView(scene);
+  remoteView.groundAt = effects.groundAt;
+  remoteView.onPoof = (at, color) => {
+    effects.burst(at, color);
+    audio.play('bounce', { at, volume: 1, rate: 0.6 });
+  };
   const pickupView = new PickupView(scene, sim.pickups);
   const vehicleView = new VehicleView(scene, sim.vehicles);
   let fov = settings.fov;
@@ -100,6 +105,9 @@ export function startGame(ctx: GameContext, mapName: string, localId: string, tr
   hud.setLocalId(localId);
   announcer.setLocalId(localId);
   let death: { killerId: string | null; cause: DeathCause } | null = null;
+  // After we die: the camera backs off into third person to watch our body fly.
+  let deathCam: { from: THREE.Vector3; yaw: number; age: number; target: THREE.Vector3 } | null = null;
+  const camGoal = new THREE.Vector3();
 
   const resize = () => {
     const w = window.innerWidth;
@@ -212,6 +220,7 @@ export function startGame(ctx: GameContext, mapName: string, localId: string, tr
           input.pitch = 0;
           rope.release();
           death = null;
+          deathCam = null;
         }
         break;
       }
@@ -265,11 +274,14 @@ export function startGame(ctx: GameContext, mapName: string, localId: string, tr
         break;
       case 'killed': {
         const at = playerPos(e.playerId);
-        if (at) effects.burst(fxAt.copy(at).setY(at.y + 0.2), remoteView.colorOf(e.playerId));
+        if (at) effects.hit(fxAt.copy(at).setY(at.y + 0.3));
+        // Our own body goes flying too, for the death camera to watch (others' are thrown by remoteView).
+        if (mine && me.vehicle < 0) remoteView.spawnCorpse(localId, me.pos, me.vel, input.yaw, me.primary);
         hud.killed(e.playerId, e.killerId, e.cause);
         announcer.killed(e.playerId, e.killerId, e.cause, e.midair, (id) => hud.name(id));
         if (mine) {
           death = { killerId: e.killerId, cause: e.cause };
+          deathCam = { from: camera.position.clone(), yaw: input.yaw, age: 0, target: me.pos.clone() };
           rope.release();
         } else if (e.killerId === localId) {
           hud.hitMarker(true);
@@ -343,6 +355,17 @@ export function startGame(ctx: GameContext, mapName: string, localId: string, tr
     }
     camera.position.add(client.visualOffset);
     camera.rotation.set(input.pitch, input.yaw, 0);
+    if (deathCam && !me.alive) {
+      deathCam.age += dt;
+      const corpse = remoteView.corpsePosition(localId);
+      if (corpse) deathCam.target.copy(corpse);
+      // Behind and above where we were looking, eased in, and kept out of walls.
+      aimDirection(deathCam.yaw, -0.38, lookBack).negate();
+      camGoal.copy(deathCam.target).addScaledVector(lookBack, sim.clearDistance(deathCam.target, lookBack, 4.5));
+      const t = Math.min(deathCam.age / 0.5, 1);
+      camera.position.lerpVectors(deathCam.from, camGoal, t * t * (3 - 2 * t));
+      camera.lookAt(deathCam.target);
+    }
     fov = cameraFx.apply(camera, dt, speed);
 
     crates.sync();

@@ -387,14 +387,16 @@ export class Effects {
   /** Someone blown apart: armor chunks in their color, a puff of smoke and a spray of sparks. */
   burst(at: THREE.Vector3, color: number) {
     const floor = this.groundAt?.(at) ?? at.y - 0.9;
-    this.debris.throw(at, 14, 9, [color, 0xeef0f3, 0x39404e, color], 0.2, floor);
+    this.debris.throw(at, 16, 9, [color, 0xeef0f3, 0x39404e, color], 0.24, floor);
     this.fire.emit({ pos: at, life: 0.12, size: [2.2, 3], color: [0xffffff, color], alpha: 0.9 });
-    for (let i = 0; i < 10; i++) {
+    // A big cartoon "poof": a ring of puffs bursting outward round a fat one in the middle.
+    for (let i = 0; i < 16; i++) {
       randomInSphere(_rand);
-      _vel.copy(_rand).multiplyScalar(3).setY(_rand.y * 2 + 1.5);
-      _pos.copy(at).addScaledVector(_rand, 0.5);
-      this.smoke.emit({ pos: _pos, vel: _vel, life: 0.9 + Math.random() * 0.6, size: [0.9, 2.2], color: [0xf0f0f0, 0xb8b8c0], alpha: 0.75, drag: 3, gravity: -0.8 });
+      _vel.copy(_rand).normalize().multiplyScalar(4 + Math.random() * 2).setY(_rand.y * 2 + 1.5);
+      _pos.copy(at).addScaledVector(_rand, 0.4);
+      this.smoke.emit({ pos: _pos, vel: _vel, life: 0.8 + Math.random() * 0.5, size: [1.4, 3], color: [0xffffff, 0xc8c8d0], alpha: 0.9, drag: 4, gravity: -0.8 });
     }
+    this.smoke.emit({ pos: at, life: 0.6, size: [2.2, 3.6], color: [0xffffff, 0xe0e0e8], alpha: 0.9, gravity: -0.5 });
     for (let i = 0; i < 18; i++) {
       randomInSphere(_rand).normalize();
       _vel.copy(_rand).multiplyScalar(6 + Math.random() * 8);
