@@ -34,8 +34,9 @@ export class Bot {
 
     // Head for a point that slides around a circle, strafing side to side like an air-strafer.
     const a = this.t * this.orbitSpeed;
-    const dx = Math.cos(a) * ORBIT_RADIUS - p.pos.x;
-    const dz = Math.sin(a) * ORBIT_RADIUS - p.pos.z;
+    const orbit = sim.map.botOrbit ?? ORBIT_RADIUS;
+    const dx = Math.cos(a) * orbit - p.pos.x;
+    const dz = Math.sin(a) * orbit - p.pos.z;
 
     const input: PlayerInput = {
       forward: 1,

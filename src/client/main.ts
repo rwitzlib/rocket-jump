@@ -1,7 +1,7 @@
 import RAPIER from '@dimforge/rapier3d-compat';
 import * as THREE from 'three';
 import { DT, GRAPPLE, GRENADE, HYPERSONIC, ROCKET, SEEKERS, WEAPONS } from '../shared/config';
-import { ARENA } from '../shared/map';
+import { MAPS } from '../shared/map';
 import { GameSim, isSeeker, lockedOn, type DeathCause, type PlayerSim, type SimEvent } from '../shared/sim';
 import { GameAudio } from './audio';
 import { CameraFX } from './camerafx';
@@ -27,6 +27,8 @@ const LOCAL_ID = 'local';
 const params = new URLSearchParams(location.search);
 const LOOPBACK = params.get('net') === 'loopback';
 const numParam = (name: string, fallback: number) => Number(params.get(name) ?? fallback) || 0;
+// `?map=citadel` picks a map by name (see MAPS in shared/map.ts).
+const MAP = MAPS[params.get('map') ?? 'arena'] ?? MAPS.arena;
 
 async function main() {
   await RAPIER.init();
@@ -51,13 +53,13 @@ async function main() {
   const camera = new THREE.PerspectiveCamera(FOV, 1, 0.05, 500);
   camera.rotation.order = 'YXZ';
 
-  const sim = new GameSim(ARENA);
+  const sim = new GameSim(MAP);
   let me: PlayerSim;
   let loopback: Loopback | null = null;
   let client: NetClient | null = null;
   if (LOOPBACK) {
     const conditions: NetConditions = { ping: numParam('ping', 100), jitter: numParam('jitter', 10), loss: numParam('loss', 0) };
-    const lb = (loopback = new Loopback(ARENA, conditions, 'player', numParam('bots', 2)));
+    const lb = (loopback = new Loopback(MAP, conditions, 'player', numParam('bots', 2)));
     const nc = (client = new NetClient(sim, lb.clientId, (msg) => lb.send(msg)));
     lb.onMessage = (msg) => nc.receive(msg);
     me = nc.me;
@@ -67,7 +69,7 @@ async function main() {
   const localId = me.id;
   const playerPos = (id: string) => sim.players.get(id)?.pos ?? client?.remotes.get(id)?.pos;
 
-  const levelMeshes = buildLevel(scene, ARENA);
+  const levelMeshes = buildLevel(scene, MAP);
   const crates = new CrateView(scene, sim);
   const effects = new Effects(scene, levelMeshes);
   const rope = new Rope(scene);

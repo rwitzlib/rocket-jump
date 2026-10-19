@@ -41,19 +41,31 @@ function worldScaledBox(w: number, h: number, d: number): THREE.BoxGeometry {
 
 /** Builds the static level and returns its meshes (scorch marks get projected onto them). */
 export function buildLevel(scene: THREE.Scene, map: MapDef): THREE.Mesh[] {
+  // Everything below is sized from the map's footprint, so bigger maps keep their shadows and stay visible.
+  const bounds = new THREE.Box3();
+  for (const box of map.boxes) {
+    bounds.union(new THREE.Box3().setFromCenterAndSize(new THREE.Vector3(...box.pos), new THREE.Vector3(...box.size)));
+  }
+  const extent = Math.max(-bounds.min.x, bounds.max.x, -bounds.min.z, bounds.max.z);
+
   scene.background = new THREE.Color(0x9ec9f0);
-  scene.fog = new THREE.Fog(0x9ec9f0, 60, 180);
+  scene.fog = new THREE.Fog(0x9ec9f0, Math.max(60, extent * 0.6), Math.max(180, extent * 2.2));
 
   scene.add(new THREE.HemisphereLight(0xdfefff, 0x5a5048, 1.6));
   const sun = new THREE.DirectionalLight(0xfff2dd, 2.4);
-  sun.position.set(30, 60, 20);
+  // One shadow map over the whole level: the light sits outside a sphere around it, looking at its center.
+  const center = bounds.getCenter(new THREE.Vector3());
+  const radius = bounds.getBoundingSphere(new THREE.Sphere()).radius;
+  sun.position.copy(center).addScaledVector(new THREE.Vector3(30, 60, 20).normalize(), radius + 10);
+  sun.target.position.copy(center);
   sun.castShadow = true;
   sun.shadow.mapSize.set(4096, 4096);
-  sun.shadow.camera.left = sun.shadow.camera.bottom = -75;
-  sun.shadow.camera.right = sun.shadow.camera.top = 75;
-  sun.shadow.camera.far = 200;
-  sun.shadow.bias = -0.0005;
-  scene.add(sun);
+  sun.shadow.camera.left = sun.shadow.camera.bottom = -radius;
+  sun.shadow.camera.right = sun.shadow.camera.top = radius;
+  sun.shadow.camera.near = 1;
+  sun.shadow.camera.far = radius * 2 + 20;
+  sun.shadow.bias = -0.1 / sun.shadow.camera.far; // about 10 cm in world units, whatever the map size
+  scene.add(sun, sun.target);
 
   const grid = gridTexture();
   const materials = new Map<number, THREE.MeshStandardMaterial>();

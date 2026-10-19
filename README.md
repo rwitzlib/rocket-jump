@@ -13,6 +13,10 @@ npm run dev
 
 Open http://localhost:5173 and click to play.
 
+Add `?map=citadel` for the big map: 240 m square with a ring deck around a central spire, bridges out to four corner
+towers and beams up top to swing from. The default is `arena`, the original 120 m map. It combines with the other
+options, e.g. `?map=citadel&net=loopback&bots=4`.
+
 | Control | Action |
 |---|---|
 | WASD | Move |
