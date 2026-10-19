@@ -1,8 +1,8 @@
 import RAPIER from '@dimforge/rapier3d-compat';
 import * as THREE from 'three';
-import { DT, GRAPPLE, GRENADE, ROCKET } from '../shared/config';
+import { DT, GRAPPLE, GRENADE, HYPERSONIC, ROCKET, SEEKERS, WEAPONS } from '../shared/config';
 import { ARENA } from '../shared/map';
-import { GameSim, type DeathCause, type PlayerSim, type SimEvent } from '../shared/sim';
+import { GameSim, isSeeker, lockedOn, type DeathCause, type PlayerSim, type SimEvent } from '../shared/sim';
 import { GameAudio } from './audio';
 import { CameraFX } from './camerafx';
 import { Effects } from './effects';
@@ -138,15 +138,17 @@ async function main() {
         break;
       }
       case 'fired': {
-        const sound = e.weapon === 'grenade' ? 'grenadeFire' : 'fire';
+        const sound = e.weapon === 'grenade' ? 'grenadeFire' : e.weapon === 'hypersonic' ? 'hypersonicFire' : 'fire';
+        // Missiles share the rocket's launch sound: a deep one for the javelin, a sharp one for the stinger.
+        const rate = e.weapon === 'javelin' ? 0.75 : e.weapon === 'stinger' ? 1.35 : 1;
         if (mine) {
           viewModel.fire();
-          audio.play(sound, { volume: 0.8 });
-          cameraFx.shake(e.weapon === 'grenade' ? 0.08 : 0.12);
+          audio.play(sound, { volume: 0.8, rate });
+          cameraFx.shake(e.weapon === 'grenade' ? 0.08 : e.weapon === 'javelin' || e.weapon === 'hypersonic' ? 0.18 : 0.12);
         } else {
           remoteView.fired(e.playerId);
           const at = playerPos(e.playerId);
-          if (at) audio.play(sound, { at });
+          if (at) audio.play(sound, { at, rate });
         }
         break;
       }
@@ -236,6 +238,8 @@ async function main() {
   let accumulator = 0;
   let last = performance.now();
   let shownFlash = '';
+  let toneIn = 0; // seconds until the next lock-on or missile-warning beep
+  const lockPoint = new THREE.Vector3();
   let shownSpeed = '';
 
   // Fixed-timestep simulation (60 Hz, same as a server would run) with interpolated rendering.
@@ -279,13 +283,17 @@ async function main() {
     const projectiles = client ? client.renderProjectiles : sim.projectiles;
     // The grenade launcher's arc shows what's left in the drum, then the reload filling it back up.
     const grenades = me.primary === 'grenade';
+    const seeker = isSeeker(me.primary) ? SEEKERS[me.primary] : null;
     const reloading = grenades && me.reloading;
     const reloaded = 1 - me.fireCooldown / GRENADE.reload;
-    const fireReady = grenades ? (reloading ? reloaded : 1) : 1 - me.fireCooldown / ROCKET.cooldown;
+    const cooldown = seeker ? seeker.cooldown : me.primary === 'hypersonic' ? HYPERSONIC.cooldown : ROCKET.cooldown;
+    const fireReady = grenades ? (reloading ? reloaded : 1) : 1 - me.fireCooldown / cooldown;
     const fireCharge = grenades ? (reloading ? reloaded : me.drum / GRENADE.drum) : fireReady;
     const grappleReady = 1 - me.grappleCooldown / GRAPPLE.cooldown;
+    // A seeker loads its next missile once the launch kick has settled.
+    const loading = reloading || (!!seeker && me.fireCooldown > 0 && me.fireCooldown < seeker.cooldown - 0.35);
     viewModel.setPrimary(me.primary);
-    viewModel.update(dt, horizontalSpeed, me.grounded, !!me.grapple, fireReady, grappleReady, reloading);
+    viewModel.update(dt, horizontalSpeed, me.grounded, !!me.grapple, fireReady, grappleReady, loading);
     effects.update(projectiles, alpha, dt);
     pickupView.update(dt);
     if (me.grapple) rope.follow(me.grapple.anchor, me.grapple.normal);
@@ -298,12 +306,55 @@ async function main() {
     if (flashText !== shownFlash) hitFlash.style.opacity = shownFlash = flashText;
     const speedText = `${horizontalSpeed.toFixed(1)} m/s`;
     if (speedText !== shownSpeed) speedEl.textContent = shownSpeed = speedText;
-    crosshair.classList.toggle('can-grapple', !me.grapple && sim.grappleTarget(me, target) !== null);
+    const grappleStowed = !!WEAPONS[me.primary].twoHanded;
+    crosshair.classList.toggle('can-grapple', !me.grapple && !grappleStowed && sim.grappleTarget(me, target) !== null);
     crosshair.classList.toggle('grappling', !!me.grapple);
     hud.setHealth(me.health);
     hud.setProtected(me.alive && me.protectedFor > 0);
-    hud.setCooldowns(fireCharge, grappleReady);
-    hud.setWeapons(me.primary, me.secondary, grenades ? (reloading ? 'reloading' : me.drum) : null);
+    hud.setCooldowns(fireCharge, grappleStowed ? 0 : grappleReady);
+    const locked = lockedOn(me);
+    if (grenades) hud.setWeapons(me.primary, me.secondary, reloading ? 'Reloading' : `${me.drum}/${GRENADE.drum}`, reloading || me.drum === 0, grappleStowed);
+    else if (seeker) {
+      const status = me.fireCooldown > 0 ? 'Reloading' : locked ? 'Locked' : me.lockTarget ? 'Locking' : '';
+      hud.setWeapons(me.primary, me.secondary, status, status === 'Reloading' || status === 'Locked', grappleStowed);
+    } else hud.setWeapons(me.primary, me.secondary, '', false, grappleStowed);
+
+    // Seeker lock box: the sim's lock box, scaled to the current FOV, plus a marker on whoever it's locking onto.
+    if (seeker && me.alive) {
+      const pxPerUnit = window.innerHeight / 2 / Math.tan((fov * Math.PI) / 360);
+      const at = me.lockTarget ? playerPos(me.lockTarget) : undefined;
+      let marker: { x: number; y: number } | null = null;
+      if (at) {
+        camera.updateMatrixWorld();
+        lockPoint.copy(at).project(camera);
+        if (lockPoint.z < 1) marker = { x: ((lockPoint.x + 1) / 2) * window.innerWidth, y: ((1 - lockPoint.y) / 2) * window.innerHeight };
+      }
+      hud.setLock({
+        halfWidth: Math.tan(seeker.lockBox[0]) * pxPerUnit,
+        halfHeight: Math.tan(seeker.lockBox[1]) * pxPerUnit,
+        progress: me.lockTarget ? me.lockProgress / seeker.lockTime : 0,
+        locked,
+        marker,
+      });
+    } else hud.setLock(null);
+
+    // Beeps: slow while locking, fast once locked, and a low warble when a missile is after you.
+    let incoming = false;
+    if (me.alive) for (const p of projectiles) if (p.target === localId && p.ownerId !== localId) incoming = true;
+    hud.setMissileWarning(incoming);
+    toneIn -= dt;
+    if (toneIn <= 0) {
+      if (incoming) {
+        audio.play('lockTone', { rate: 0.6, volume: 0.6 });
+        toneIn = 0.22;
+      } else if (seeker && me.alive && locked) {
+        audio.play('lockTone', { rate: 1.5, volume: 0.3 });
+        toneIn = 0.08;
+      } else if (seeker && me.alive && me.lockTarget) {
+        audio.play('lockTone', { volume: 0.3 });
+        toneIn = 0.18;
+      }
+    }
     hud.setDeath(me.alive ? null : (death ?? { killerId: null, cause: 'rocket' }), me.respawnIn);
     if (hud.boardOpen) {
       hud.setScores(client ? client.scores : [...sim.players.values()].map((p) => ({ id: p.id, kills: p.kills, deaths: p.deaths })));

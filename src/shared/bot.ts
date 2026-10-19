@@ -1,6 +1,6 @@
 import { Vector3 } from 'three';
-import { DT, GRAVITY, GRENADE, ROCKET } from './config';
-import type { GameSim, PlayerSim } from './sim';
+import { DT, GRAVITY, GRENADE, HYPERSONIC, ROCKET } from './config';
+import { isSeeker, type GameSim, type PlayerSim } from './sim';
 import type { PlayerInput } from './types';
 
 // A simple server-side opponent. It circles the tower bunny-hopping, and when it can see another
@@ -106,7 +106,9 @@ export class Bot {
   private aimAt(p: PlayerSim, target: PlayerSim, input: PlayerInput) {
     p.eye(_eye);
     const grenade = p.primary === 'grenade';
-    const flight = target.pos.distanceTo(_eye) / (grenade ? GRENADE.speed : ROCKET.speed);
+    // Seekers steer themselves: just keep the target centered in the lock box.
+    const speed = grenade ? GRENADE.speed : p.primary === 'hypersonic' ? HYPERSONIC.speed : ROCKET.speed;
+    const flight = isSeeker(p.primary) ? 0 : target.pos.distanceTo(_eye) / speed;
     _aim.copy(target.pos).addScaledVector(target.vel, flight);
     if (target.grounded) _aim.y -= 0.8; // the floor at their feet: splash is easier to land than a direct hit
     if (grenade) _aim.y += 0.5 * GRAVITY * flight * flight; // lob it: aim above by as much as it will drop

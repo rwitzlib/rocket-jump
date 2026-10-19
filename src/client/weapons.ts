@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import type { ProjectileKind } from '../shared/sim';
 
 // Weapon and projectile models, shared by the first-person view, other players and the rockets in
 // flight, so everyone's launcher looks the same up close and across the map. All face -Z. Built from
@@ -349,5 +350,169 @@ export function buildRocket(): THREE.Group {
   plume.position.z = 0.5;
   plume.rotation.y = Math.PI; // wide end at the nozzle
   root.add(core, plume);
+  return root;
+}
+
+// --- Seeker launchers ------------------------------------------------------------------------
+
+const tubeOlive = new THREE.MeshStandardMaterial({ color: 0x55603a, metalness: 0.15, roughness: 0.7 });
+const tubeSand = new THREE.MeshStandardMaterial({ color: 0x8b8f6e, metalness: 0.15, roughness: 0.6 });
+const lensMat = new THREE.MeshStandardMaterial({ color: 0x10161c, emissive: 0x3a1c10, metalness: 0.8, roughness: 0.1 });
+
+/** Muzzle positions for the seeker launchers. Both share the rocket launcher's grips. */
+export const SEEKER_MUZZLE_Z = { javelin: -0.64, stinger: -0.72 };
+
+/** Shared by both seekers: grips, trigger guard, status light, bore and muzzle. */
+function finishLauncher(root: THREE.Group, muzzleZ: number, boreRadius: number, lightAt: THREE.Vector3): LauncherModel {
+  const light = new THREE.MeshStandardMaterial({ color: 0x7cf0a0, emissive: 0x3cbf6a });
+  root.add(part(launcherGeo.light, light, lightAt.x, lightAt.y, lightAt.z));
+  const fore = part(launcherGeo.grip, dark, LAUNCHER.foreGrip.x, LAUNCHER.foreGrip.y + 0.04, LAUNCHER.foreGrip.z);
+  fore.rotation.x = -0.15;
+  const rear = part(launcherGeo.grip, dark, LAUNCHER.rearGrip.x, LAUNCHER.rearGrip.y + 0.04, LAUNCHER.rearGrip.z);
+  rear.rotation.x = 0.3;
+  root.add(fore, rear, part(launcherGeo.guard, gunmetal, 0, -0.17, 0.02));
+  const muzzleBore = part(new THREE.CircleGeometry(boreRadius, 16), bore, 0, 0, muzzleZ + 0.015);
+  muzzleBore.rotation.y = Math.PI;
+  root.add(muzzleBore);
+  const muzzle = new THREE.Object3D();
+  muzzle.name = 'muzzle';
+  muzzle.position.z = muzzleZ;
+  root.add(muzzle);
+  return { root, muzzle, light };
+}
+
+const javelinGeo = {
+  tube: lathe([
+    [0.1, -0.5],
+    [0.135, -0.48],
+    [0.135, -0.4],
+    [0.118, -0.38],
+    [0.118, 0.5],
+    [0.135, 0.52],
+    [0.135, 0.63],
+    [0.1, 0.64],
+  ]),
+  clu: new THREE.BoxGeometry(0.2, 0.22, 0.26),
+  cluHood: new THREE.BoxGeometry(0.17, 0.05, 0.3),
+  eyepiece: new THREE.BoxGeometry(0.11, 0.07, 0.06),
+  lens: new THREE.CircleGeometry(0.045, 14),
+  battery: new THREE.CylinderGeometry(0.05, 0.05, 0.2, 12).rotateX(Math.PI / 2),
+  band: new THREE.CylinderGeometry(0.122, 0.122, 0.05, 20).rotateX(Math.PI / 2),
+};
+
+/** Javelin: a fat olive tube with the boxy command launch unit (sight and seeker) clamped to its inner side. */
+export function buildJavelin(accent: THREE.Material = DEFAULT_ACCENT): LauncherModel {
+  const g = javelinGeo;
+  const root = new THREE.Group();
+  root.add(part(g.tube, tubeOlive), part(g.band, accent, 0, 0, -0.25), part(g.band, accent, 0, 0, 0.25));
+  root.add(part(g.clu, dark, -0.21, 0.02, 0.04), part(g.cluHood, gunmetal, -0.21, 0.15, 0.02), part(g.eyepiece, dark, -0.21, 0.05, 0.2));
+  const lensL = part(g.lens, lensMat, -0.25, 0.04, -0.091);
+  const lensR = part(g.lens, lensMat, -0.17, 0.04, -0.091);
+  lensL.rotation.y = lensR.rotation.y = Math.PI;
+  root.add(lensL, lensR, part(g.battery, gunmetal, 0, -0.15, 0.28));
+  return finishLauncher(root, SEEKER_MUZZLE_Z.javelin, 0.1, new THREE.Vector3(-0.311, -0.04, 0.04));
+}
+
+const stingerGeo = {
+  tube: lathe([
+    [0.07, -0.55],
+    [0.082, -0.53],
+    [0.082, -0.46],
+    [0.075, -0.44],
+    [0.075, 0.6],
+    [0.095, 0.62],
+    [0.095, 0.72],
+    [0.07, 0.725],
+  ]),
+  gripstock: new THREE.BoxGeometry(0.07, 0.09, 0.42),
+  antennaArm: new THREE.BoxGeometry(0.015, 0.14, 0.015),
+  antenna: new THREE.BoxGeometry(0.012, 0.13, 0.17),
+  sightPost: new THREE.BoxGeometry(0.012, 0.09, 0.012),
+  sightBar: new THREE.BoxGeometry(0.1, 0.012, 0.012),
+  band: new THREE.CylinderGeometry(0.079, 0.079, 0.04, 18).rotateX(Math.PI / 2),
+  seeker: new THREE.CylinderGeometry(0.05, 0.05, 0.08, 12).rotateX(Math.PI / 2),
+};
+
+/** Stinger: a long slim tube on a gripstock, with the fold-out IFF antenna and an open frame sight. */
+export function buildStinger(accent: THREE.Material = DEFAULT_ACCENT): LauncherModel {
+  const g = stingerGeo;
+  const root = new THREE.Group();
+  root.add(part(g.tube, tubeSand), part(g.band, accent, 0, 0, -0.5), part(g.band, accent, 0, 0, 0.35));
+  root.add(part(g.gripstock, dark, 0, -0.11, -0.12), part(g.seeker, gunmetal, 0, -0.11, 0.12));
+  // IFF antenna, folded out to the inner side on a short arm.
+  const arm = part(g.antennaArm, gunmetal, -0.09, 0.1, -0.3);
+  arm.rotation.z = 0.7;
+  root.add(arm, part(g.antenna, dark, -0.15, 0.15, -0.3));
+  // Open sight frame above the tube.
+  root.add(part(g.sightPost, gunmetal, -0.05, 0.12, -0.05), part(g.sightPost, gunmetal, 0.05, 0.12, -0.05), part(g.sightBar, gunmetal, 0, 0.165, -0.05));
+  return finishLauncher(root, SEEKER_MUZZLE_Z.stinger, 0.068, new THREE.Vector3(-0.036, -0.1, 0.04));
+}
+
+// --- Hypersonic launcher ---------------------------------------------------------------------
+
+const coilGlow = new THREE.MeshStandardMaterial({ color: 0x9ff4ff, emissive: 0x2ad0ff, emissiveIntensity: 1.2 });
+
+const hypersonicGeo = {
+  body: new THREE.BoxGeometry(0.13, 0.15, 0.46),
+  rail: new THREE.BoxGeometry(0.028, 0.032, 0.86),
+  spine: new THREE.BoxGeometry(0.05, 0.03, 0.86),
+  coil: new THREE.TorusGeometry(0.072, 0.012, 6, 18),
+  stripe: new THREE.BoxGeometry(0.005, 0.04, 0.2),
+  vent: new THREE.BoxGeometry(0.14, 0.012, 0.03),
+};
+
+/** Hypersonic launcher: a slim twin-rail barrel ringed with glowing coils over a compact receiver. */
+export function buildHypersonic(accent: THREE.Material = DEFAULT_ACCENT): LauncherModel {
+  const g = hypersonicGeo;
+  const root = new THREE.Group();
+  root.add(part(g.body, dark, 0, -0.01, 0.05));
+  root.add(part(g.rail, gunmetal, 0.045, 0.02, -0.33), part(g.rail, gunmetal, -0.045, 0.02, -0.33), part(g.spine, dark, 0, -0.04, -0.33));
+  for (let k = 0; k < 4; k++) root.add(part(g.coil, coilGlow, 0, 0, -0.26 - k * 0.12));
+  for (let k = 0; k < 4; k++) root.add(part(g.vent, gunmetal, 0, 0.065, 0.2 - k * 0.04));
+  root.add(part(g.stripe, accent, -0.066, 0.02, 0.05), part(g.stripe, accent, 0.066, 0.02, 0.05));
+  return finishLauncher(root, -0.76, 0.03, new THREE.Vector3(-0.066, -0.04, 0.22));
+}
+
+/** The hypersonic round: a thin steel dart with a glowing tail, pointing -Z. */
+export function buildDart(): THREE.Group {
+  const root = new THREE.Group();
+  root.add(part(new THREE.CylinderGeometry(0.025, 0.025, 0.5, 8).rotateX(Math.PI / 2), steel));
+  root.add(part(new THREE.ConeGeometry(0.025, 0.14, 8).rotateX(-Math.PI / 2), DEFAULT_ACCENT, 0, 0, -0.32));
+  const tail = new THREE.Mesh(
+    new THREE.SphereGeometry(0.05, 8, 6),
+    new THREE.MeshBasicMaterial({ color: 0xbff8ff, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false }),
+  );
+  tail.position.z = 0.32;
+  tail.scale.set(1, 1, 4);
+  root.add(tail);
+  return root;
+}
+
+/** Every primary weapon's model, by weapon. */
+export const PRIMARY_MODELS: Record<ProjectileKind, (accent?: THREE.Material) => LauncherModel> = {
+  rocket: buildLauncher,
+  grenade: buildGrenadeLauncher,
+  hypersonic: buildHypersonic,
+  javelin: buildJavelin,
+  stinger: buildStinger,
+};
+
+// --- Missiles --------------------------------------------------------------------------------
+
+const missileWhite = new THREE.MeshStandardMaterial({ color: 0xd8dcd4, metalness: 0.2, roughness: 0.45 });
+
+/** Seeker missiles are restyled rockets: a big olive javelin, a slim white stinger. Both point -Z. */
+export function buildMissile(kind: 'javelin' | 'stinger'): THREE.Group {
+  const root = buildRocket();
+  const javelin = kind === 'javelin';
+  const body = javelin ? olive : missileWhite;
+  const nose = javelin ? dark : DEFAULT_ACCENT;
+  root.traverse((o) => {
+    if (!(o instanceof THREE.Mesh)) return;
+    if (o.material === steel) o.material = body;
+    else if (o.material === DEFAULT_ACCENT) o.material = nose;
+  });
+  if (javelin) root.scale.set(1.3, 1.3, 1.25);
+  else root.scale.set(0.7, 0.7, 1.1);
   return root;
 }

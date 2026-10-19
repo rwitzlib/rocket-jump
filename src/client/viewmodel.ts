@@ -1,6 +1,7 @@
 import * as THREE from 'three';
+import { WEAPONS } from '../shared/config';
 import type { WeaponId } from '../shared/types';
-import { buildGauntlet, buildGrenadeLauncher, buildLauncher, LAUNCHER, type LauncherModel } from './weapons';
+import { buildGauntlet, LAUNCHER, PRIMARY_MODELS, type LauncherModel } from './weapons';
 
 // First-person weapons, rendered in their own scene after the world so they never clip into walls.
 // The launcher rides on the right shoulder, as it does on the player models, its barrel running
@@ -31,6 +32,7 @@ export class ViewModel {
   private shown: WeaponId = 'rocket'; // the launcher in hand
   private wanted: WeaponId = 'rocket'; // the one being swapped to
   private swap = 0; // 1 just picked up .. 0 settled
+  private stowed = 0; // 0 grapple arm up .. 1 lowered out of view, for a two-handed weapon
   private muzzle: THREE.Object3D;
   private hookTip: THREE.Object3D;
   private hookHead: THREE.Object3D;
@@ -56,10 +58,21 @@ export class ViewModel {
     const knuckle = new THREE.MeshStandardMaterial({ color: 0x3a4250, metalness: 0.6, roughness: 0.35 });
 
     // Launcher, with the right hand wrapped around its fore grip and the forearm running off-screen.
-    const launcher = buildLauncher();
-    const grenadeLauncher = buildGrenadeLauncher();
-    grenadeLauncher.root.visible = false;
-    this.launchers = { rocket: launcher, grenade: grenadeLauncher };
+    this.launchers = {};
+    for (const [id, build] of Object.entries(PRIMARY_MODELS)) {
+      const model = build();
+      model.root.visible = id === 'rocket';
+      this.launchers[id as WeaponId] = model;
+    }
+    const launcher = this.launchers.rocket!;
+    // The Javelin is two-handed: the left hand holds its sight unit (the grapple arm is lowered).
+    const leftHand = new THREE.Group();
+    leftHand.position.set(-0.2, -0.13, 0.06);
+    leftHand.add(
+      new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.09, 0.1), glove),
+      limb(new THREE.Vector3(0, -0.02, 0.03), new THREE.Vector3(-0.18, -0.4, 0.4), 0.055, glove),
+    );
+    this.launchers.javelin?.root.add(leftHand);
     this.muzzle = launcher.muzzle;
     this.launcherLight = launcher.light;
     this.flash = new THREE.Mesh(
@@ -76,7 +89,7 @@ export class ViewModel {
     knuckles.position.set(-0.01, 0.025, -0.045);
     const forearm = limb(new THREE.Vector3(0, -0.03, 0.02), new THREE.Vector3(0.1, -0.4, 0.42), 0.055, glove);
     hand.add(fist, knuckles, forearm);
-    this.launcher.add(launcher.root, grenadeLauncher.root, hand);
+    this.launcher.add(...Object.values(this.launchers).map((m) => m.root), hand);
     this.launcher.position.copy(SHOULDER);
     this.launcher.rotation.copy(SHOULDER_TILT);
 
@@ -123,7 +136,7 @@ export class ViewModel {
 
   /**
    * `fireReady` and `grappleReady` run 0..1 as each weapon recharges; their status lights follow.
-   * `reloading`: the grenade launcher's drum is being refilled.
+   * `reloading`: the grenade launcher's drum is being refilled, or a seeker is loading its next missile.
    */
   update(dt: number, speed: number, grounded: boolean, grappling: boolean, fireReady = 1, grappleReady = 1, reloading = false) {
     this.recoil = Math.max(0, this.recoil - dt * 4);
@@ -136,6 +149,7 @@ export class ViewModel {
     this.swap = Math.max(0, this.swap - dt / SWAP_TIME);
     if (this.swap <= 0.5 && this.shown !== this.wanted) this.show(this.wanted);
     const lowered = Math.sin(this.swap * Math.PI);
+    this.stowed += ((WEAPONS[this.shown].twoHanded ? 1 : 0) - this.stowed) * (1 - Math.exp(-dt * 8));
 
     // Reloading tips the launcher down and rolls the drum toward you, spinning it as it's refilled.
     // Afterwards the drum settles on the nearest chamber.
@@ -154,7 +168,8 @@ export class ViewModel {
     this.flash.visible = this.flash.material.opacity > 0;
 
     const reach = grappling ? -0.06 : 0;
-    this.grappler.position.set(LEFT_ARM.x - bobX * 1.4, LEFT_ARM.y + bobY, LEFT_ARM.z + reach + this.grappleKick * 0.06);
+    this.grappler.position.set(LEFT_ARM.x - bobX * 1.4, LEFT_ARM.y + bobY - this.stowed * 0.45, LEFT_ARM.z + reach + this.grappleKick * 0.06);
+    this.grappler.visible = this.stowed < 0.98;
     this.grappler.rotation.set(LEFT_TILT.x + this.grappleKick * 0.2, LEFT_TILT.y, LEFT_TILT.z);
     this.hookHead.visible = !grappling;
 

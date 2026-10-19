@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import { DecalGeometry } from 'three/examples/jsm/geometries/DecalGeometry.js';
-import { GRENADE, ROCKET } from '../shared/config';
+import { GRENADE, HYPERSONIC, ROCKET, SEEKERS } from '../shared/config';
 import { isArmed, type Projectile, type ProjectileKind } from '../shared/sim';
 import { ParticleSystem } from './particles';
-import { buildGrenade, buildRocket, GRENADE_LIGHT } from './weapons';
+import { buildDart, buildGrenade, buildMissile, buildRocket, GRENADE_LIGHT } from './weapons';
 
 const _pos = new THREE.Vector3();
 const _vel = new THREE.Vector3();
@@ -16,10 +16,17 @@ const Z = new THREE.Vector3(0, 0, 1);
 
 const TRAIL_SPACING = 0.3; // meters between smoke puffs, so trails look the same at any frame rate
 const GRENADE_TRAIL_SPACING = 0.45;
+const STREAK_SPACING = 0.6; // a hypersonic dart covers ~2 m a tick: a sparse, quick-fading streak keeps the particle count sane
 const GRENADE_SPIN = 14; // radians per second of tumble
 const GRENADE_UNARMED = new THREE.Color(0x7cf0a0);
 const GRENADE_ARMED = new THREE.Color(0xff3c28);
-const LIFETIME: Record<ProjectileKind, number> = { rocket: ROCKET.lifetime, grenade: GRENADE.lifetime };
+const LIFETIME: Record<ProjectileKind, number> = {
+  rocket: ROCKET.lifetime,
+  grenade: GRENADE.lifetime,
+  hypersonic: HYPERSONIC.lifetime,
+  javelin: SEEKERS.javelin.lifetime,
+  stinger: SEEKERS.stinger.lifetime,
+};
 const MUZZLE_BLEND_TIME = 0.2; // seconds for a rocket drawn from a barrel to merge onto its simulated path
 const RING_TIME = 0.3;
 const LIGHT_TIME = 0.35;
@@ -124,7 +131,13 @@ export class Effects {
    */
   muzzleOffset: ((ownerId: string, out: THREE.Vector3) => THREE.Vector3 | null) | null = null;
   private frameNo = 0;
-  private readonly protos: Record<ProjectileKind, THREE.Object3D> = { rocket: buildRocket(), grenade: buildGrenade() };
+  private readonly protos: Record<ProjectileKind, THREE.Object3D> = {
+    rocket: buildRocket(),
+    grenade: buildGrenade(),
+    hypersonic: buildDart(),
+    javelin: buildMissile('javelin'),
+    stinger: buildMissile('stinger'),
+  };
   private lights: Timed<THREE.PointLight>[] = [];
   // Rings and decals are pooled and never disposed: disposing the last user of a material makes
   // three.js delete its shader program, so the next explosion would recompile it (a visible hitch).
@@ -408,9 +421,14 @@ export class Effects {
       const blend = Math.min(entry.age / MUZZLE_BLEND_TIME, 1);
       mesh.position.lerpVectors(r.prevPos, r.pos, alpha).addScaledVector(entry.offset, 1 - blend * blend * (3 - 2 * blend));
       // A grenade rolling to a stop jitters in direction: it keeps the pose it had while still moving.
-      if (r.kind === 'rocket' || r.vel.lengthSq() > 4) mesh.lookAt(_pos.copy(mesh.position).sub(r.vel));
+      if (r.kind !== 'grenade' || r.vel.lengthSq() > 4) mesh.lookAt(_pos.copy(mesh.position).sub(r.vel));
       if (r.kind === 'grenade') {
         this.updateGrenade(r, entry, dt);
+        continue;
+      }
+
+      if (r.kind === 'hypersonic') {
+        this.layStreak(lastTrail, mesh.position);
         continue;
       }
 
@@ -440,6 +458,19 @@ export class Effects {
         entry.light?.dispose();
         this.projectileMeshes.delete(id);
       }
+    }
+  }
+
+  /** A hypersonic dart's trail: a thin, bright cyan streak over a faint vapor line that fades fast. */
+  private layStreak(lastTrail: THREE.Vector3, to: THREE.Vector3) {
+    let gap = lastTrail.distanceTo(to);
+    _step.subVectors(to, lastTrail).normalize();
+    while (gap >= STREAK_SPACING) {
+      lastTrail.addScaledVector(_step, STREAK_SPACING);
+      gap -= STREAK_SPACING;
+      this.fire.emit({ pos: lastTrail, life: 0.18, size: [0.35, 0.08], color: [0xe0fcff, 0x2ad0ff], alpha: 0.9 });
+      randomInSphere(_rand).multiplyScalar(0.15);
+      this.smoke.emit({ pos: lastTrail, vel: _rand, life: 0.45, size: [0.12, 0.45], color: [0xf0f4f8, 0xc0c8d0], alpha: 0.35, drag: 2 });
     }
   }
 

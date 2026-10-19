@@ -6,8 +6,10 @@ import type * as THREE from 'three';
 type SoundName =
   | 'fire'
   | 'grenadeFire'
+  | 'hypersonicFire'
   | 'bounce'
   | 'pickup'
+  | 'lockTone'
   | 'explosion'
   | 'grappleFire'
   | 'grappleAttach'
@@ -99,6 +101,17 @@ function synthesize(ctx: BaseAudioContext): Record<SoundName | 'noise', AudioBuf
         osc(70 + 220 * Math.exp(-t * 30)) * env(t, 0.001, 0.07) * 1.2 + lp(noise(), 600 + 1800 * Math.exp(-t * 25)) * env(t, 0.001, 0.05) * 0.8;
     }),
 
+    // Hypersonic launch: a sharp supersonic crack over a falling electric whine and a short thump.
+    hypersonicFire: build(0.5, () => {
+      const lp = lowpass(sr);
+      const whine = sweep(sr);
+      const thump = sweep(sr);
+      return (t) =>
+        lp(noise(), 9000) * env(t, 0.0005, 0.02) * 1.6 +
+        whine(600 + 3400 * Math.exp(-t * 9)) * env(t, 0.002, 0.12) * 0.35 +
+        thump(55 + 110 * Math.exp(-t * 30)) * env(t, 0.002, 0.06) * 0.9;
+    }),
+
     // An unarmed grenade hitting something: a dull knock with a short metallic ring.
     bounce: build(0.25, () => {
       const lp = lowpass(sr);
@@ -175,6 +188,12 @@ function synthesize(ctx: BaseAudioContext): Record<SoundName | 'noise', AudioBuf
     }),
 
     // Hit confirmation for the shooter: a short, bright tick that cuts through explosions.
+    // Seeker lock-on beep; played faster and higher once locked, low for an incoming-missile warning.
+    lockTone: build(0.07, () => {
+      const osc = sweep(sr);
+      return (t) => osc(1050) * env(t, 0.003, 0.025);
+    }),
+
     hit: build(0.12, () => {
       const osc = sweep(sr);
       return (t) => osc(1750) * env(t, 0.001, 0.025) + osc(3500) * env(t, 0.001, 0.012) * 0.3;
@@ -267,11 +286,11 @@ export class GameAudio {
     this.syncRocketLoops(projectiles);
   }
 
-  /** Rockets hiss as they fly; grenades are silent until they hit something. */
+  /** Rockets and missiles hiss as they fly; grenades are silent until they hit something. */
   private syncRocketLoops(projectiles: readonly Flying[]) {
     const frame = ++this.frameNo;
     for (const r of projectiles) {
-      if (r.kind !== 'rocket') continue;
+      if (r.kind === 'grenade') continue;
       let loop = this.rocketLoops.get(r.id);
       if (!loop) {
         if (this.ctx.state !== 'running') continue;

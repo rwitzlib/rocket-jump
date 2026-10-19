@@ -2,11 +2,11 @@ import * as THREE from 'three';
 import { PLAYER } from '../shared/config';
 import type { WeaponId } from '../shared/types';
 import type { RemotePlayer } from './net/netclient';
-import { buildGauntlet, buildGrenadeLauncher, buildHookHead, buildLauncher, LAUNCHER } from './weapons';
+import { buildGauntlet, buildHookHead, LAUNCHER, PRIMARY_MODELS } from './weapons';
 
 // Other players: an armored figure built from primitives, sized to the hit capsule (feet at -0.9,
 // eyes at +0.6 from its center). It carries the same two weapons you do, a shoulder-mounted rocket
-// (or grenade) launcher on the right and a grapple gauntlet on the left, both following where the player aims,
+// (or whichever primary they're carrying) launcher on the right and a grapple gauntlet on the left, both following where the player aims,
 // so you can read their aim and see shots leave the barrel. Legs walk, strafe and tuck mid-air
 // from the interpolated movement; the gauntlet swings to point along the rope while grappling.
 
@@ -270,10 +270,7 @@ export class RemotePlayersView {
       head: get('head'),
       aim: get('aim'),
       launcher: get('launcher'),
-      primaries: {
-        rocket: { root: get('rocketLauncher'), muzzle: get('rocketMuzzle') },
-        grenade: { root: get('grenadeLauncher'), muzzle: get('grenadeMuzzle') },
-      },
+      primaries: Object.fromEntries(Object.keys(PRIMARY_MODELS).map((id) => [id, { root: get(`${id}Launcher`), muzzle: get(`${id}Muzzle`) }])),
       primary: 'rocket',
       muzzle: get('rocketMuzzle'),
       flash,
@@ -361,20 +358,22 @@ export class RemotePlayersView {
     head.position.y = NECK_Y;
 
     // Weapons and arms, pivoting with the aim at shoulder height. Forward is -Z.
-    const launcherModel = buildLauncher(team);
+    // One of each primary weapon, named `<weapon>Launcher` / `<weapon>Muzzle`; only the one carried is shown.
+    const models = Object.entries(PRIMARY_MODELS).map(([id, build]) => {
+      const model = build(team);
+      model.root.name = `${id}Launcher`;
+      model.muzzle.name = `${id}Muzzle`;
+      model.root.visible = id === 'rocket';
+      return model;
+    });
+    const launcherModel = models[0];
     const flash = mesh(new THREE.SphereGeometry(0.16, 10, 8), this.flashMat, 0, 0, -0.06);
     flash.castShadow = false;
     flash.visible = false;
     flash.name = 'flash';
     flash.scale.set(1, 1, 1.5);
     launcherModel.muzzle.add(flash);
-    launcherModel.root.name = 'rocketLauncher';
-    launcherModel.muzzle.name = 'rocketMuzzle';
-    const grenadeModel = buildGrenadeLauncher(team);
-    grenadeModel.root.name = 'grenadeLauncher';
-    grenadeModel.muzzle.name = 'grenadeMuzzle';
-    grenadeModel.root.visible = false;
-    const launcher = named('launcher', launcherModel.root, grenadeModel.root);
+    const launcher = named('launcher', ...models.map((m) => m.root));
     const launcherMount = named('launcherMount', launcher);
     launcherMount.position.set(0.31, 0.13, 0);
 

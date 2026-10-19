@@ -1,4 +1,4 @@
-import type { WeaponId, WeaponSlot } from './types';
+import type { SeekerId, WeaponId, WeaponSlot } from './types';
 
 // All gameplay tuning lives here. Units are meters and seconds.
 // This file is shared so a future server simulates with identical numbers.
@@ -37,6 +37,23 @@ export const ROCKET = {
   hookRadius: 0.6, // how close a grapple ray has to pass to a rocket to hook it: a bit bigger than it looks
 };
 
+// The precision weapon: a near-hitscan dart with a tiny blast. A direct hit always lands its full
+// damage and a huge shove (enough to launch people off ledges); a near miss barely scratches. It's
+// also the best jumping weapon: your own blast reaches further and launches you higher than a rocket.
+export const HYPERSONIC = {
+  speed: 110, // about 4x a rocket: crosses the arena in a second
+  cooldown: 1.6,
+  lifetime: 1.5,
+  blastRadius: 1.5,
+  damage: 90,
+  knockback: 26,
+  lift: 0.35, // knockback always angles at least this far upward, so a flat hit launches people instead of sliding them
+  // Your own darts reach further and push harder, so shooting your feet is a big jump: about 1.5x a rocket jump.
+  selfRadius: 3,
+  selfKnockback: 1.1,
+  crateKnockback: 20,
+};
+
 // The burst and area-denial weapon: empty a six-shot drum fast, then wait out a long reload. Each
 // grenade hits for less than a rocket but over a wider area, and they bounce off walls, so they can
 // be banked around corners or left rolling in a doorway until the fuse goes.
@@ -57,6 +74,82 @@ export const GRENADE = {
   damage: 55, // at the center of the blast, falling off linearly. Two close ones kill
   impactDamage: 35, // an unarmed grenade hitting someone point blank: it bounces off them instead of exploding
   impactKnockback: 4, // velocity change from that hit, along the grenade's flight
+};
+
+/**
+ * Heat-seeking launchers. Hold a player inside the lock box (an area around the crosshair) for
+ * `lockTime` to lock on; only then will it fire, and the missile steers after them. Every shot
+ * spends the lock, and a new one can't start building until the launcher has reloaded.
+ */
+export interface SeekerConfig {
+  lockTime: number; // seconds a target has to stay in the box
+  lockBox: [number, number]; // half-width, half-height of the box, radians off the aim
+  lockRange: number;
+  lockDecay: number; // lock progress drains this many times faster than it builds while they're out of the box
+  cooldown: number; // reload after each shot
+  speed: number; // cruising speed
+  launchSpeed: number; // speed leaving the tube; the motor brings it up to `speed`
+  boost: number; // m/s² the motor adds until it reaches `speed`
+  turnRate: number; // radians per second it can steer: lower is easier to dodge
+  /**
+   * Half-angle of the missile's seeker cone, radians. On its final approach, a target that gets
+   * further off the missile's nose than this (a sharp grapple yank when it's close) is lost for
+   * good, and the missile flies straight on.
+   */
+  gimbal: number;
+  lifetime: number;
+  blastRadius: number;
+  damage: number;
+  knockback: number;
+  selfKnockback: number;
+  crateKnockback: number;
+}
+
+export const SEEKERS: Record<SeekerId, SeekerConfig & { climb?: number; climbAngle?: number; turnOverRate?: number }> = {
+  // Fire and forget, top attack: pops out of the tube slowly, then climbs steeply (`climbAngle`)
+  // toward the target to `climb` meters above it (less for close targets), arcs over and dives on
+  // them from above, over cover. Long lock, long reload, kills on a clean hit.
+  javelin: {
+    lockTime: 1.4,
+    lockBox: [0.2, 0.14],
+    lockRange: 90,
+    lockDecay: 2,
+    cooldown: 4,
+    speed: 24,
+    launchSpeed: 7,
+    boost: 45,
+    turnRate: 3.5,
+    gimbal: 0.35,
+    lifetime: 7,
+    blastRadius: 3.5, // tight: a direct hit kills, but a late grapple out of the dive gets you clear
+    damage: 130, // a top-down hit lands near their head, ~1 m off center: still a kill
+    knockback: 16,
+    selfKnockback: 1.4,
+    crateKnockback: 14,
+    climb: 16,
+    climbAngle: 1.1, // about 63° up
+    turnOverRate: 6, // radians per second while arcing over the top: tighter than its turns in the dive
+  },
+  // Quick lock, quick reload, light hit. Flies straight at the target, fast but wide-turning, so hard
+  // strafing or a grapple swing at the last moment can shake it.
+  stinger: {
+    lockTime: 0.6,
+    lockBox: [0.16, 0.11],
+    lockRange: 70,
+    lockDecay: 3,
+    cooldown: 1.2,
+    speed: 34,
+    launchSpeed: 34,
+    boost: 0,
+    turnRate: 2.2,
+    gimbal: 0.7,
+    lifetime: 4,
+    blastRadius: 3.5,
+    damage: 50,
+    knockback: 11,
+    selfKnockback: 1.4,
+    crateKnockback: 10,
+  },
 };
 
 export const GRAPPLE = {
@@ -97,9 +190,13 @@ export const COMBAT = {
   killCredit: 5, // falling off the map within this many seconds of being hit counts as a kill for the hitter
 };
 
-export const WEAPONS: Record<WeaponId, { slot: WeaponSlot; name: string }> = {
+/** `twoHanded`: takes both hands, so the secondary (the grapple) can't be used while carrying it. */
+export const WEAPONS: Record<WeaponId, { slot: WeaponSlot; name: string; twoHanded?: boolean }> = {
   rocket: { slot: 'primary', name: 'Rocket Launcher' },
   grenade: { slot: 'primary', name: 'Grenade Launcher' },
+  hypersonic: { slot: 'primary', name: 'Hypersonic' },
+  javelin: { slot: 'primary', name: 'Javelin', twoHanded: true },
+  stinger: { slot: 'primary', name: 'Stinger' },
   grapple: { slot: 'secondary', name: 'Grapple' },
 };
 

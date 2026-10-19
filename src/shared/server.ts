@@ -141,6 +141,9 @@ export class GameServer {
       vel: [r.vel.x, r.vel.y, r.vel.z],
       life: r.life,
       traveled: r.traveled,
+      target: r.target,
+      phase: r.phase,
+      apex: r.apex,
     }));
     const pickups = sim.pickups.map((b) => b.respawnIn);
     const crates: CrateState[] = sim.crates.map((c) => {

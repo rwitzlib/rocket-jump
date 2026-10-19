@@ -104,6 +104,10 @@ body {
   color: #aab4c4;
 }
 
+#weapons .stowed {
+  opacity: 0.45;
+}
+
 #weapon-ammo {
   margin-left: 8px;
   color: #ffe680;
@@ -112,6 +116,88 @@ body {
 
 #weapon-ammo.reloading {
   color: #ff8a5c;
+}
+
+#lock-box {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  border: 1.5px solid rgba(255, 255, 255, 0.45);
+  border-radius: 4px;
+  box-shadow: 0 0 2px rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+}
+
+#lock-box.locking {
+  border-color: #ffd860;
+}
+
+#lock-box.locked {
+  border: 2px solid #ff4a3c;
+  box-shadow: 0 0 10px rgba(255, 74, 60, 0.6);
+}
+
+#lock-fill {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -9px;
+  height: 3px;
+  border-radius: 2px;
+  background: #ffd860;
+  transform-origin: left;
+  transform: scaleX(0);
+}
+
+#lock-box.locked #lock-fill {
+  background: #ff4a3c;
+}
+
+#lock-marker {
+  position: fixed;
+  width: 26px;
+  height: 26px;
+  margin: -13px 0 0 -13px;
+  border: 2px solid #ffd860;
+  transform: rotate(45deg);
+  pointer-events: none;
+}
+
+#lock-marker.locked {
+  border-color: #ff4a3c;
+  animation: lock-pulse 300ms ease-in-out infinite alternate;
+}
+
+@keyframes lock-pulse {
+  to {
+    transform: rotate(45deg) scale(0.75);
+  }
+}
+
+#missile-warning {
+  position: fixed;
+  left: 50%;
+  top: 22%;
+  transform: translateX(-50%);
+  color: #ff4a3c;
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: 3px;
+  text-shadow: 0 0 8px rgba(255, 74, 60, 0.7), 0 1px 3px rgba(0, 0, 0, 0.9);
+  pointer-events: none;
+  animation: warning-blink 500ms steps(2, jump-none) infinite;
+}
+
+@keyframes warning-blink {
+  to {
+    opacity: 0.25;
+  }
+}
+
+#lock-box[hidden],
+#lock-marker[hidden],
+#missile-warning[hidden] {
+  display: none;
 }
 
 #pickup-notice {

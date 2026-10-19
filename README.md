@@ -18,7 +18,7 @@ Open http://localhost:5173 and click to play.
 | WASD | Move |
 | Mouse | Look |
 | Space | Jump (hold to bunny-hop) |
-| Left click | Fire primary weapon (rocket or grenade launcher) |
+| Left click | Fire primary weapon (seekers: hold a target in the lock box first) |
 | Right click / E / Shift | Grapple (hold) |
 | Tab (hold) | Scoreboard |
 | M | Mute / unmute |
@@ -41,8 +41,28 @@ The rocket launcher is the precise, mobile weapon: fast, straight, and the one t
 to reload. Each grenade does less damage than a rocket (55) over a wider blast (5 m). Grenades fall under gravity and
 always bounce off walls and floors, so you can bank them around corners or leave them rolling in a doorway. After
 6 m of flight they're armed and explode on any player they touch. Closer than that they bounce off players too,
-for 35 damage. Anything that doesn't hit a player goes off when the 2.5 s fuse runs out. Tuning is in `GRENADE`,
-`WEAPONS` and `PICKUP` in `shared/config.ts`.
+for 35 damage. Anything that doesn't hit a player goes off when the 2.5 s fuse runs out.
+
+The **Hypersonic** launcher is the precision weapon. Its dart flies at 110 m/s (nearly hitscan) with a tiny 1.5 m
+blast, so a near miss does next to nothing. A direct hit always lands its full 90 damage and a huge upward shove that
+launches people across the map, or off a ledge for a fall kill. It reloads in 1.6 s. It's also the best jumping
+weapon: your own darts reach further (3 m), so shooting your feet launches you about 1.5x as high as a rocket jump.
+
+Two **heat-seeking launchers** show a lock box around the crosshair. Hold an enemy (in sight) inside it until the
+lock fills, and only then will it fire; the missile steers after them. Letting them slip out of the box drains the
+lock. Each shot spends the lock, and a new one only starts building once the launcher has reloaded. Whoever is
+being targeted gets a MISSILE LOCK warning and a beep.
+- **Javelin**: 1.4 s lock, 4 s reload. Soft launch, then a steep climb toward the target, an arc over the top and a
+  dive onto them from above, over cover. A direct hit kills, but the blast is tight (3.5 m). It's two-handed, so you
+  can't grapple while carrying it.
+- **Stinger**: 0.6 s lock, 1.2 s reload, 50 damage. Fast, but it turns wide.
+
+Missiles can be shaken off. On its final approach a missile that loses you outside its seeker cone gives up and flies
+straight on, and your warning goes away. Grapple sideways about a third of a second before impact: against a Stinger
+that's a clean dodge, and against a Javelin it turns a kill into a wound. Too early and the missile turns back onto you;
+too late and it hits.
+
+Tuning is in `GRENADE`, `HYPERSONIC`, `SEEKERS`, `WEAPONS` and `PICKUP` in `shared/config.ts`.
 
 The grapple hooks players and crates as well as walls. Hooking a player is a tug of war: you're pulled in and they get
 dragged toward you. A hooked crate is reeled in with a fixed force, so loose crates fly at you while stacked or wedged

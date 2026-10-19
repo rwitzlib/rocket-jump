@@ -1,10 +1,10 @@
 import RAPIER from '@dimforge/rapier3d-compat';
 import { Euler, Quaternion, Vector3 } from 'three';
-import { COMBAT, CRATE, DT, GRAPPLE, GRAVITY, GRENADE, LOADOUT, PICKUP, PLAYER, ROCKET, WEAPONS } from './config';
+import { COMBAT, CRATE, DT, GRAPPLE, GRAVITY, GRENADE, HYPERSONIC, LOADOUT, PICKUP, PLAYER, ROCKET, SEEKERS, WEAPONS, type SeekerConfig } from './config';
 import type { MapDef, SpawnDef, Vec3Tuple } from './map';
 import { capsuleNormal, PositionHistory, rayCapsule, REWIND_TICKS } from './hits';
 import { aimDirection, applyGrapple, updateVelocity, type GrappleState, type Hook } from './movement';
-import { EMPTY_INPUT, type PlayerInput, type WeaponId } from './types';
+import { EMPTY_INPUT, type PlayerInput, type SeekerId, type WeaponId } from './types';
 
 // The authoritative game simulation. It has no rendering or DOM code, so the same class can run
 // in the browser (single-player / client prediction) or in Node (the multiplayer server).
@@ -30,6 +30,8 @@ export interface PlayerState {
   reloading: boolean; // the drum is being refilled; fireCooldown counts it down
   grappleCooldown: number;
   grappleUsed: boolean;
+  lockTarget: string | null; // who a seeker launcher is locking onto
+  lockProgress: number; // seconds they've been held in the lock box; locked at the weapon's lockTime
   yaw: number;
   pitch: number;
   health: number;
@@ -40,7 +42,14 @@ export interface PlayerState {
   secondary: WeaponId;
 }
 
-export type DeathCause = 'rocket' | 'grenade' | 'fall';
+export type DeathCause = ProjectileKind | 'fall';
+
+export const isSeeker = (w: WeaponId): w is SeekerId => w in SEEKERS;
+
+/** True once a seeker launcher has held its target long enough to fire. */
+export function lockedOn(p: { primary: WeaponId; lockTarget: string | null; lockProgress: number }): boolean {
+  return isSeeker(p.primary) && p.lockTarget !== null && p.lockProgress >= SEEKERS[p.primary].lockTime;
+}
 
 export type HookState =
   | { kind: 'player'; id: string; offset: Vec3Tuple }
@@ -96,6 +105,8 @@ export class PlayerSim {
   reloading = false;
   grappleCooldown = 0;
   grappleUsed = false; // this press of the grapple button already fired; cleared on release
+  lockTarget: string | null = null;
+  lockProgress = 0;
   yaw = 0;
   pitch = 0;
   /** Seq of the input being simulated (0 offline). Tags fired rockets so a client can match its predictions. */
@@ -137,6 +148,8 @@ export class PlayerSim {
       reloading: this.reloading,
       grappleCooldown: this.grappleCooldown,
       grappleUsed: this.grappleUsed,
+      lockTarget: this.lockTarget,
+      lockProgress: this.lockProgress,
       yaw: this.yaw,
       pitch: this.pitch,
       health: this.health,
@@ -166,6 +179,8 @@ export class PlayerSim {
     this.reloading = s.reloading;
     this.grappleCooldown = s.grappleCooldown;
     this.grappleUsed = s.grappleUsed;
+    this.lockTarget = s.lockTarget;
+    this.lockProgress = s.lockProgress;
     this.yaw = s.yaw;
     this.pitch = s.pitch;
     this.health = s.health;
@@ -182,7 +197,10 @@ export class PlayerSim {
   }
 }
 
-export type ProjectileKind = 'rocket' | 'grenade';
+export type MissilePhase = 'climb' | 'turn' | 'terminal';
+
+/** Every primary weapon fires a projectile of the same name. */
+export type ProjectileKind = Exclude<WeaponId, 'grapple'>;
 
 /**
  * Rockets fly straight at a constant speed and explode on anything. Grenades fall and bounce off
@@ -200,14 +218,25 @@ export interface Projectile {
   traveled: number; // meters flown: a grenade arms (explodes on players) at GRENADE.armDistance
   lag: number; // ticks to rewind other players by when testing hits: how far behind the shooter was seeing
   struck: string | null; // the last player an unarmed grenade bounced off, so one hit only hurts once
+  target: string | null; // the player a seeker missile is steering for
+  /**
+   * A seeker's flight: a javelin climbs, turns over at the top, then makes its terminal dive. Only
+   * in the terminal phase can the target slip out of its seeker cone. Everything else is terminal.
+   */
+  phase: MissilePhase;
+  apex: number; // the height a javelin climbs to before turning over
 }
 
-export const isArmed = (p: Projectile) => p.kind === 'rocket' || p.traveled >= GRENADE.armDistance;
+export const isArmed = (p: Projectile) => p.kind !== 'grenade' || p.traveled >= GRENADE.armDistance;
 
 /** A mystery box. Server-side state, mirrored to clients from snapshots. */
 export interface Pickup {
   pos: Vector3;
   respawnIn: number; // 0 while it's there to take
+}
+
+function seekerBlast(s: SeekerConfig): Blast {
+  return { radius: s.blastRadius, knockback: s.knockback, selfKnockback: s.selfKnockback, crateKnockback: s.crateKnockback, damage: s.damage };
 }
 
 interface Blast {
@@ -216,11 +245,26 @@ interface Blast {
   selfKnockback: number;
   crateKnockback: number;
   damage: number;
+  directFull?: boolean; // the player it hits directly takes full damage and knockback, however far from their center
+  lift?: number; // minimum upward component of the knockback direction
+  selfRadius?: number; // how far the blast reaches the player who fired it, if not `radius`
 }
 
 const BLASTS: Record<ProjectileKind, Blast> = {
   rocket: { radius: ROCKET.blastRadius, knockback: ROCKET.knockback, selfKnockback: ROCKET.selfKnockback, crateKnockback: ROCKET.crateKnockback, damage: COMBAT.rocketDamage },
   grenade: { radius: GRENADE.blastRadius, knockback: GRENADE.knockback, selfKnockback: GRENADE.selfKnockback, crateKnockback: GRENADE.crateKnockback, damage: GRENADE.damage },
+  javelin: seekerBlast(SEEKERS.javelin),
+  stinger: seekerBlast(SEEKERS.stinger),
+  hypersonic: {
+    radius: HYPERSONIC.blastRadius,
+    knockback: HYPERSONIC.knockback,
+    selfKnockback: HYPERSONIC.selfKnockback,
+    crateKnockback: HYPERSONIC.crateKnockback,
+    damage: HYPERSONIC.damage,
+    directFull: true,
+    lift: HYPERSONIC.lift,
+    selfRadius: HYPERSONIC.selfRadius,
+  },
 };
 
 export type SimEvent =
@@ -248,6 +292,11 @@ const _aimOrigin = new Vector3();
 const _aimDir = new Vector3();
 const _step = new Vector3();
 const _segment = new Vector3();
+const _right = new Vector3();
+const _up = new Vector3();
+const _want = new Vector3();
+/** How steeply a javelin aims to come down on its target. */
+const DIVE_ANGLE = 0.95; // about 55°
 
 type AimKind = 'none' | 'world' | 'player' | 'crate' | 'rocket';
 
@@ -372,6 +421,8 @@ export class GameSim {
     p.secondary = LOADOUT.secondary;
     p.drum = GRENADE.drum;
     p.reloading = false;
+    p.lockTarget = null;
+    p.lockProgress = 0;
     p.body.setTranslation(p.pos, true);
     p.body.setNextKinematicTranslation(p.pos);
     this.pendingEvents.push({ type: 'respawn', playerId: p.id, yaw: spawn.yaw });
@@ -641,7 +692,8 @@ export class GameSim {
     // Grapple: fires on press, or the moment its cooldown ends if the button is still held.
     // Releases on let go.
     // The grapple is the only secondary weapon so far: without it the button does nothing.
-    const grappleHeld = input.grapple && p.secondary === 'grapple';
+    // A two-handed primary leaves no hand free for it.
+    const grappleHeld = input.grapple && p.secondary === 'grapple' && !WEAPONS[p.primary].twoHanded;
     p.grappleCooldown = Math.max(0, p.grappleCooldown - DT);
     if (!grappleHeld) p.grappleUsed = false;
     if (grappleHeld && !p.grappleUsed && !p.grapple && p.grappleCooldown === 0) {
@@ -725,30 +777,131 @@ export class GameSim {
       p.reloading = false;
       p.drum = GRENADE.drum;
     }
-    if (input.fire && p.fireCooldown === 0 && (p.primary === 'rocket' || p.primary === 'grenade')) {
-      const grenade = p.primary === 'grenade';
-      p.fireCooldown = grenade ? GRENADE.cooldown : ROCKET.cooldown;
-      if (grenade && --p.drum === 0) {
-        p.reloading = true;
-        p.fireCooldown = GRENADE.reload;
+    this.updateLock(p, input.view);
+    const kind = p.primary;
+    // Seekers only fire with a lock.
+    if (input.fire && p.fireCooldown === 0 && kind !== 'grapple' && (!isSeeker(kind) || lockedOn(p))) {
+      const vel = aimDirection(p.yaw, p.pitch, new Vector3());
+      let life: number;
+      if (kind === 'grenade') {
+        p.fireCooldown = GRENADE.cooldown;
+        if (--p.drum === 0) {
+          p.reloading = true;
+          p.fireCooldown = GRENADE.reload;
+        }
+        vel.multiplyScalar(GRENADE.speed);
+        life = GRENADE.lifetime;
+      } else if (kind === 'rocket') {
+        p.fireCooldown = ROCKET.cooldown;
+        vel.multiplyScalar(ROCKET.speed);
+        life = ROCKET.lifetime;
+      } else if (kind === 'hypersonic') {
+        p.fireCooldown = HYPERSONIC.cooldown;
+        vel.multiplyScalar(HYPERSONIC.speed);
+        life = HYPERSONIC.lifetime;
+      } else {
+        const seeker = SEEKERS[kind];
+        p.fireCooldown = seeker.cooldown;
+        if (seeker.climb) vel.y += 0.4; // a javelin leaves the tube nose-up, already starting its climb
+        vel.normalize().multiplyScalar(seeker.launchSpeed);
+        life = seeker.lifetime;
       }
       const pos = p.eye(new Vector3());
+      // A javelin's climb tops out above the higher of it and its target: lower for close targets,
+      // so it still has room to turn over and dive.
+      let phase: MissilePhase = 'terminal';
+      let apex = 0;
+      const climb = isSeeker(kind) ? SEEKERS[kind].climb : undefined;
+      const aimed = p.lockTarget ? this.playerPosition(p.lockTarget) : undefined;
+      if (climb && aimed) {
+        const horizontal = Math.hypot(aimed.x - pos.x, aimed.z - pos.z);
+        phase = 'climb';
+        apex = Math.max(pos.y, aimed.y) + Math.min(Math.max(horizontal * 0.7, 6), climb);
+      }
       this.projectiles.push({
         // A predicted projectile's id must survive replays so its mesh and trail stay put: derive it from the input.
         id: mode === 'authority' ? this.nextRocketId++ : -p.seq,
-        kind: p.primary,
+        kind,
         ownerId: p.id,
         shot: p.seq,
         pos,
         prevPos: pos.clone(),
-        vel: aimDirection(p.yaw, p.pitch, new Vector3()).multiplyScalar(grenade ? GRENADE.speed : ROCKET.speed),
-        life: grenade ? GRENADE.lifetime : ROCKET.lifetime,
+        vel,
+        life,
         traveled: 0,
         lag: mode === 'authority' && input.view !== undefined ? Math.min(Math.max(this.tick - input.view, 0), REWIND_TICKS) : 0,
         struck: null,
+        target: isSeeker(kind) ? p.lockTarget : null,
+        phase,
+        apex,
       });
-      events.push({ type: 'fired', playerId: p.id, weapon: p.primary });
+      // The lock is spent: the next missile needs a fresh one.
+      p.lockTarget = null;
+      p.lockProgress = 0;
+      events.push({ type: 'fired', playerId: p.id, weapon: kind });
     }
+  }
+
+  /**
+   * Seeker lock-on, once the launcher is loaded. The player nearest the crosshair inside the
+   * weapon's lock box (and in sight) becomes the target; holding them there fills the lock. Losing them drains it, faster, and a
+   * new target only takes over once it's empty. Other players are judged where the shooter saw them.
+   */
+  private updateLock(p: PlayerSim, view: number | undefined) {
+    // Nothing locks while the launcher is reloading, so a lock always takes its full time after a shot.
+    if (!isSeeker(p.primary) || p.fireCooldown > 0) {
+      p.lockTarget = null;
+      p.lockProgress = 0;
+      return;
+    }
+    const seeker = SEEKERS[p.primary];
+    if (p.lockTarget && !this.playerPosition(p.lockTarget)) {
+      p.lockTarget = null; // died or left
+      p.lockProgress = 0;
+    }
+    const candidate = this.lockCandidate(p, seeker, view);
+    if (candidate !== null && candidate === p.lockTarget) {
+      p.lockProgress = Math.min(seeker.lockTime, p.lockProgress + DT);
+    } else if (p.lockTarget && p.lockProgress > 0) {
+      p.lockProgress = Math.max(0, p.lockProgress - DT * seeker.lockDecay);
+      if (p.lockProgress === 0) p.lockTarget = null;
+    } else {
+      p.lockTarget = candidate;
+      p.lockProgress = 0;
+    }
+  }
+
+  /** The player to lock onto: the current target while they're still in the box, else the one nearest the crosshair. */
+  private lockCandidate(p: PlayerSim, seeker: SeekerConfig, view: number | undefined): string | null {
+    const eye = p.eye(_aimOrigin);
+    const forward = aimDirection(p.yaw, p.pitch, _aimDir);
+    _right.set(Math.cos(p.yaw), 0, -Math.sin(p.yaw));
+    _up.crossVectors(_right, forward);
+    const maxX = Math.tan(seeker.lockBox[0]);
+    const maxY = Math.tan(seeker.lockBox[1]);
+    let best: string | null = null;
+    let bestScore = Infinity;
+    this.forEachTarget(p.id, view, (id, center) => {
+      _toTarget.subVectors(center, eye);
+      const z = _toTarget.dot(forward);
+      if (z <= 0 || _toTarget.length() > seeker.lockRange) return;
+      const x = _toTarget.dot(_right) / z / maxX;
+      const y = _toTarget.dot(_up) / z / maxY;
+      if (Math.abs(x) > 1 || Math.abs(y) > 1 || !this.canSee(eye, _want.copy(center))) return;
+      const score = id === p.lockTarget ? -1 : x * x + y * y;
+      if (score < bestScore) {
+        best = id;
+        bestScore = score;
+      }
+    });
+    return best;
+  }
+
+  /** Where a living player is now (on a client, where it's drawing them), or undefined. */
+  private playerPosition(id: string): Vector3 | undefined {
+    if (this.remotePositions) return this.remotePositions.get(id);
+    const p = this.players.get(id);
+    return p?.alive ? p.pos : undefined;
   }
 
   /** Mystery boxes, server only: walking into one swaps a weapon for one you aren't carrying. */
@@ -780,6 +933,8 @@ export class GameSim {
     const weapon = options[Math.floor(Math.random() * options.length)];
     if (WEAPONS[weapon].slot === 'primary') {
       p.primary = weapon;
+      p.lockTarget = null;
+      p.lockProgress = 0;
       p.drum = GRENADE.drum; // a fresh weapon comes loaded
       if (p.reloading) p.fireCooldown = 0;
       p.reloading = false;
@@ -794,14 +949,60 @@ export class GameSim {
     for (let i = this.projectiles.length - 1; i >= 0; i--) {
       const r = this.projectiles[i];
       r.prevPos.copy(r.pos);
-      const exploded = r.kind === 'rocket' ? this.stepRocket(r, events, mode) : this.stepGrenade(r, events, mode);
+      const exploded =
+        r.kind === 'grenade'
+          ? this.stepGrenade(r, events, mode)
+          : r.kind === 'rocket' || r.kind === 'hypersonic'
+            ? this.stepRocket(r, events, mode)
+            : this.stepMissile(r, r.kind, events, mode);
       if (exploded) this.projectiles.splice(i, 1);
     }
   }
 
-  /** Straight line at a constant speed until it hits something. True once it has exploded. */
+  /**
+   * Seeker missiles: the motor brings them up to speed, then they steer for their target at a
+   * limited turn rate. A javelin first climbs steeply toward its target until it reaches its apex
+   * (or gets so close it has to come down now), turns over, then dives. On the final approach a
+   * target that gets outside the seeker cone is lost, and the missile flies straight on, as it does
+   * when its target dies. True once it has exploded.
+   */
+  private stepMissile(m: Projectile, kind: SeekerId, events: SimEvent[], mode: StepMode): boolean {
+    const seeker = SEEKERS[kind];
+    const dir = _step.copy(m.vel).normalize();
+    const speed = Math.min(seeker.speed, m.vel.length() + seeker.boost * DT);
+    const target = m.target ? this.playerPosition(m.target) : undefined;
+    if (target) {
+      if (m.phase === 'climb') {
+        const dx = target.x - m.pos.x;
+        const dz = target.z - m.pos.z;
+        const horizontal = Math.hypot(dx, dz);
+        // Turn over at the apex, or sooner if the target is close: arcing over takes some distance,
+        // and the dive should still come down steeply rather than overshoot.
+        const radius = speed / (seeker.turnOverRate ?? seeker.turnRate);
+        const arc = radius * (Math.sin(seeker.climbAngle ?? 1) + Math.sin(DIVE_ANGLE));
+        const dive = Math.max(0, m.pos.y - target.y) / Math.tan(DIVE_ANGLE);
+        if (m.pos.y >= m.apex || horizontal < arc + dive) m.phase = 'turn';
+        else {
+          // Nose up at the climb angle, heading for the target.
+          const c = Math.cos(seeker.climbAngle ?? 1);
+          if (horizontal > 1e-3) _want.set((dx / horizontal) * c, Math.sin(seeker.climbAngle ?? 1), (dz / horizontal) * c);
+          else _want.set(0, 1, 0);
+        }
+      }
+      if (m.phase !== 'climb') _want.copy(target).sub(m.pos).normalize();
+      const angle = Math.acos(Math.min(1, Math.max(-1, dir.dot(_want))));
+      if (m.phase === 'turn' && angle < seeker.gimbal) m.phase = 'terminal';
+      else if (m.phase === 'terminal' && angle > seeker.gimbal) m.target = null; // shaken off
+      const maxTurn = (m.phase === 'turn' ? (seeker.turnOverRate ?? seeker.turnRate) : seeker.turnRate) * DT;
+      if (m.target && angle > 1e-4) dir.lerp(_want, Math.min(1, maxTurn / angle)).normalize();
+    }
+    m.vel.copy(dir).multiplyScalar(speed);
+    return this.stepRocket(m, events, mode);
+  }
+
+  /** Straight line at its current speed until it hits something. True once it has exploded. */
   private stepRocket(r: Projectile, events: SimEvent[], mode: StepMode): boolean {
-    const travel = ROCKET.speed * DT;
+    const travel = r.vel.length() * DT;
     const dir = _step.copy(r.vel).normalize();
     const normal = new Vector3();
     // Other players are rewound by the shooter's lag, so a rocket that hits someone on the
@@ -901,10 +1102,17 @@ export class GameSim {
       // Judge a direct hit where it landed, not where the target has moved on to since.
       const center = direct?.id === p.id ? direct.center : p.pos;
       const dist = center.distanceTo(at);
-      if (dist >= radius) continue;
-      const falloff = 1 - dist / radius;
+      const reach = p.id === r.ownerId ? (blast.selfRadius ?? radius) : radius;
+      if (dist >= reach) continue;
+      const falloff = blast.directFull && direct?.id === p.id ? 1 : 1 - dist / reach;
       if (dist < 1e-3) _dir.set(0, 1, 0);
       else _dir.subVectors(center, at).divideScalar(dist);
+      if (blast.lift && _dir.y < blast.lift) {
+        // Keep the horizontal heading, tilted up to the minimum lift.
+        const flat = Math.hypot(_dir.x, _dir.z);
+        const scale = flat > 1e-6 ? Math.sqrt(1 - blast.lift * blast.lift) / flat : 0;
+        _dir.set(_dir.x * scale, blast.lift, _dir.z * scale);
+      }
       const boost = p.id === r.ownerId ? blast.selfKnockback : 1;
       p.vel.addScaledVector(_dir, blast.knockback * boost * falloff);
       p.grounded = false;

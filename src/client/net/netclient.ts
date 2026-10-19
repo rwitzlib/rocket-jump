@@ -194,7 +194,7 @@ export class NetClient {
     for (const r of msg.projectiles) {
       if (r.ownerId !== this.id) continue;
       const pos = new Vector3(...r.pos);
-      projectiles.push({ id: -r.shot, kind: r.kind, ownerId: r.ownerId, shot: r.shot, pos, prevPos: pos.clone(), vel: new Vector3(...r.vel), life: r.life, traveled: r.traveled, lag: 0, struck: null });
+      projectiles.push({ id: -r.shot, kind: r.kind, ownerId: r.ownerId, shot: r.shot, pos, prevPos: pos.clone(), vel: new Vector3(...r.vel), life: r.life, traveled: r.traveled, lag: 0, struck: null, target: r.target, phase: r.phase, apex: r.apex });
     }
   }
 
@@ -284,6 +284,8 @@ export class NetClient {
         r.traveled = rb.traveled;
       }
       r.life = rb.life;
+      r.target = rb.target; // a missile can lose its target mid-flight
+      r.phase = rb.phase;
       r.prevPos.copy(r.pos);
       this.renderProjectiles.push(r);
       this.remoteProjectiles.push(r);
@@ -296,7 +298,7 @@ export class NetClient {
   private projectileFor(s: ProjectileState): Projectile {
     let r = this.projectileCache.get(s.id);
     if (!r) {
-      r = { id: s.id, kind: s.kind, ownerId: s.ownerId, shot: s.shot, pos: new Vector3(), prevPos: new Vector3(), vel: new Vector3(...s.vel), life: s.life, traveled: s.traveled, lag: 0, struck: null };
+      r = { id: s.id, kind: s.kind, ownerId: s.ownerId, shot: s.shot, pos: new Vector3(), prevPos: new Vector3(), vel: new Vector3(...s.vel), life: s.life, traveled: s.traveled, lag: 0, struck: null, target: s.target, phase: s.phase, apex: s.apex };
       this.projectileCache.set(s.id, r);
     }
     return r;

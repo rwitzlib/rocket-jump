@@ -1,11 +1,18 @@
-import { COMBAT, GRENADE, WEAPONS } from '../shared/config';
+import { COMBAT, WEAPONS } from '../shared/config';
 import type { ScoreEntry } from '../shared/protocol';
 import type { DeathCause } from '../shared/sim';
 import type { WeaponId } from '../shared/types';
 
 // Combat HUD: health, weapons, kill feed, death screen and the scoreboard (hold Tab).
 
-const KILL_VERB: Record<DeathCause, string> = { rocket: ' rocketed ', grenade: ' fragged ', fall: ' knocked off ' };
+const KILL_VERB: Record<DeathCause, string> = {
+  rocket: ' rocketed ',
+  grenade: ' fragged ',
+  hypersonic: ' smoked ',
+  javelin: ' javelined ',
+  stinger: ' stung ',
+  fall: ' knocked off ',
+};
 const NOTICE_TIME = 2000; // ms a pickup notice stays up
 // Every setter compares against what's already shown, so calling them each frame is cheap.
 
@@ -32,6 +39,12 @@ export class Hud {
   private readonly primaryName = el('weapon-primary');
   private readonly secondaryName = el('weapon-secondary');
   private readonly ammo = el('weapon-ammo');
+  private readonly lockBox = el('lock-box');
+  private readonly lockFill = el('lock-fill');
+  private readonly lockMarker = el('lock-marker');
+  private readonly missileWarning = el('missile-warning');
+  private shownLock = '';
+  private shownWarning = false;
   private readonly notice = el('pickup-notice');
   private noticeTimer = 0;
   private shownWeapons = '';
@@ -71,15 +84,53 @@ export class Hud {
     this.health.classList.toggle('protected', on);
   }
 
-  /** `ammo`: rounds left for a weapon that has a magazine, 'reloading', or null for none. */
-  setWeapons(primary: WeaponId, secondary: WeaponId, ammo: number | 'reloading' | null) {
-    const key = `${primary}/${secondary}/${ammo}`;
+  /**
+   * `status`: shown after the primary's name (ammo, reloading, lock state); `alert` colors it as a
+   * warning. `stowed`: the primary is two-handed, so the secondary can't be used.
+   */
+  setWeapons(primary: WeaponId, secondary: WeaponId, status: string, alert: boolean, stowed: boolean) {
+    const key = `${primary}/${secondary}/${status}/${alert}/${stowed}`;
     if (key === this.shownWeapons) return;
     this.shownWeapons = key;
     this.primaryName.textContent = WEAPONS[primary].name;
-    this.secondaryName.textContent = WEAPONS[secondary].name;
-    this.ammo.textContent = ammo === null ? '' : ammo === 'reloading' ? 'Reloading' : `${ammo}/${GRENADE.drum}`;
-    this.ammo.classList.toggle('reloading', ammo === 'reloading' || ammo === 0);
+    this.secondaryName.textContent = WEAPONS[secondary].name + (stowed ? ' (stowed)' : '');
+    this.secondaryName.parentElement!.classList.toggle('stowed', stowed);
+    this.ammo.textContent = status;
+    this.ammo.classList.toggle('reloading', alert);
+  }
+
+  /**
+   * The seeker lock box around the crosshair (half sizes in CSS pixels), how full the lock is (0..1),
+   * and a marker on the target, in CSS pixels. Pass null when no seeker is in hand.
+   */
+  setLock(lock: { halfWidth: number; halfHeight: number; progress: number; locked: boolean; marker: { x: number; y: number } | null } | null) {
+    const key = lock
+      ? [Math.round(lock.halfWidth), Math.round(lock.halfHeight), Math.round(lock.progress * 50), lock.locked, lock.marker ? `${Math.round(lock.marker.x)},${Math.round(lock.marker.y)}` : ''].join('/')
+      : '';
+    if (key === this.shownLock) return;
+    this.shownLock = key;
+    this.lockBox.hidden = !lock;
+    this.lockMarker.hidden = !lock?.marker;
+    if (!lock) return;
+    const box = this.lockBox.style;
+    box.width = `${Math.round(lock.halfWidth * 2)}px`;
+    box.height = `${Math.round(lock.halfHeight * 2)}px`;
+    box.margin = `${-Math.round(lock.halfHeight)}px 0 0 ${-Math.round(lock.halfWidth)}px`;
+    this.lockBox.classList.toggle('locking', lock.progress > 0 && !lock.locked);
+    this.lockBox.classList.toggle('locked', lock.locked);
+    this.lockFill.style.transform = `scaleX(${Math.round(lock.progress * 50) / 50})`;
+    this.lockMarker.classList.toggle('locked', lock.locked);
+    if (lock.marker) {
+      this.lockMarker.style.left = `${Math.round(lock.marker.x)}px`;
+      this.lockMarker.style.top = `${Math.round(lock.marker.y)}px`;
+    }
+  }
+
+  /** Someone's seeker missile is coming for you. */
+  setMissileWarning(on: boolean) {
+    if (on === this.shownWarning) return;
+    this.shownWarning = on;
+    this.missileWarning.hidden = !on;
   }
 
   /** Flashes the name of a weapon you just picked up under the crosshair. */

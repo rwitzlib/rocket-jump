@@ -1,6 +1,6 @@
 import { Vector3 } from 'three';
 import type { Vec3Tuple } from './map';
-import type { PlayerState, ProjectileKind, SimEvent } from './sim';
+import type { MissilePhase, PlayerState, ProjectileKind, SimEvent } from './sim';
 import type { PlayerInput, WeaponId } from './types';
 
 // Messages between client and server. Plain JSON-able data for now; a compact binary encoding can
@@ -46,6 +46,9 @@ export interface ProjectileState {
   vel: Vec3Tuple;
   life: number;
   traveled: number;
+  target: string | null; // a seeker missile's target: drives its steering, and the target's missile warning
+  phase: MissilePhase;
+  apex: number;
 }
 
 /** Position then rotation quaternion: [x, y, z, qx, qy, qz, qw]. */
