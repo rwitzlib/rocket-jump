@@ -576,7 +576,7 @@ body {
 #medals {
   position: fixed;
   left: 50%;
-  top: 24%;
+  top: 30%;
   transform: translateX(-50%);
   text-align: center;
   pointer-events: none;

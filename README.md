@@ -7,7 +7,7 @@ Built with **Three.js** (rendering), **Rapier** (physics, WASM), **TypeScript** 
 ## Playing
 
 Rocket Jump is a free-for-all deathmatch for up to 12 people per server. Bots fill in so there's always someone to
-fight, and they step aside as people join. A match is first to 25 kills, or the most kills after 8 minutes. Then come
+fight, and they step aside as people join. A match is first to 25 kills (15 on the bigger Citadel), or the most kills after 8 minutes. Then come
 15 seconds of results (a podium, plus awards for the most airshots, the longest streak and the best K/D), and the
 next map in the rotation (Arena, then Citadel, a 240 m fortress with vehicles).
 
@@ -39,7 +39,7 @@ Settings are environment variables:
 | `HOST` | 0.0.0.0 | interface to listen on |
 | `MAPS` | arena,citadel | map rotation |
 | `TIME_LIMIT` | 480 | seconds per match |
-| `FRAG_LIMIT` | 25 | kills to win |
+| `FRAG_LIMIT` | per map | kills to win (25 on Arena, 15 on Citadel) |
 | `INTERMISSION` | 15 | seconds on the results screen |
 | `MIN_PLAYERS` | 4 | bots fill the game up to this many players (0 for no bots) |
 | `MAX_PLAYERS` | 12 | people allowed in at once |
@@ -71,7 +71,11 @@ still running the old build are told to reload.
 npm run dev          # the page with hot reload, at http://localhost:5173
 npm run dev:server   # the game server on :8080, restarting on changes; Vite proxies /ws and /status to it
 npm run typecheck
+npx tsx scripts/balance.ts citadel 6 8   # bot-only match at full speed: kill pace, death causes, airshots
 ```
+
+Use the balance script after tuning weapons or maps: if the leader can't reach the frag limit in the time limit,
+matches end on time and the race to the limit is lost.
 
 Practice needs only `npm run dev`. `?map=citadel` preselects the big map: 240 m square with a ring deck around a
 central spire, bridges out to four corner towers and beams up top to swing from. `?server=ws://host:port/ws` points

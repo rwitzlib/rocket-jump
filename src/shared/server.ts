@@ -47,7 +47,8 @@ export interface ServerOptions {
   /** Map rotation, by name in MAPS. */
   maps: string[];
   timeLimit: number;
-  fragLimit: number;
+  /** Null: each map's own (MapDef.fragLimit), else MATCH.fragLimit. */
+  fragLimit: number | null;
   intermission: number;
   /** Bots fill the game up to this many players while anyone is connected. 0 for no bots. */
   minPlayers: number;
@@ -80,7 +81,7 @@ export class GameServer {
     this.options = {
       maps: ['arena'],
       timeLimit: MATCH.timeLimit,
-      fragLimit: MATCH.fragLimit,
+      fragLimit: null,
       intermission: MATCH.intermission,
       minPlayers: MATCH.minPlayers,
       maxPlayers: MATCH.maxPlayers,
@@ -254,7 +255,7 @@ export class GameServer {
       id,
       phase: 'playing',
       timeLeft: this.options.timeLimit,
-      fragLimit: this.options.fragLimit,
+      fragLimit: this.options.fragLimit ?? MAPS[this.mapName].fragLimit ?? MATCH.fragLimit,
       map: this.mapName,
       nextMap: maps[(this.mapIndex + 1) % maps.length],
       winnerId: null,

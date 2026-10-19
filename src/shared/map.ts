@@ -27,6 +27,7 @@ export interface VehicleDef {
 export interface MapDef {
   title: string; // shown in menus and on the scoreboard
   blurb: string; // a line about it for the menu
+  fragLimit?: number; // kills to win here, when the server doesn't set one: big maps play slower
   boxes: BoxDef[];
   crates: Vec3Tuple[];
   spawns: SpawnDef[];
@@ -222,6 +223,7 @@ const citadelQuadrant: BoxDef[] = [
 
 export const CITADEL: MapDef = {
   title: 'Citadel',
+  fragLimit: 15,
   blurb: 'Huge 240 m fortress in three layers, with buggies and helicopters.',
   boxes: [
     { pos: [0, -0.5, 0], size: [C_HALF * 2, 1, C_HALF * 2], color: FLOOR },

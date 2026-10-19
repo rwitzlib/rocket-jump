@@ -16,7 +16,7 @@ import { GameServer } from '../shared/server';
 //   HOST=0.0.0.0          interface to listen on
 //   MAPS=arena,citadel    map rotation
 //   TIME_LIMIT=480        seconds per match
-//   FRAG_LIMIT=25         kills to win
+//   FRAG_LIMIT=25         kills to win (default: 25 on Arena, 15 on Citadel)
 //   INTERMISSION=15       seconds on the results screen
 //   MIN_PLAYERS=4         bots fill in up to this many players (0: no bots)
 //   MAX_PLAYERS=12        people allowed in at once
@@ -59,7 +59,7 @@ const game = new GameServer(
   {
     maps,
     timeLimit: env('TIME_LIMIT', MATCH.timeLimit),
-    fragLimit: env('FRAG_LIMIT', MATCH.fragLimit),
+    fragLimit: process.env.FRAG_LIMIT ? env('FRAG_LIMIT', MATCH.fragLimit) : null, // default: per map
     intermission: env('INTERMISSION', MATCH.intermission),
     minPlayers: env('MIN_PLAYERS', MATCH.minPlayers),
     maxPlayers: env('MAX_PLAYERS', MATCH.maxPlayers),

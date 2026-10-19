@@ -6,6 +6,7 @@ import type * as THREE from 'three';
 const MAX_SHAKE_ANGLE = 0.06; // radians at full trauma
 const MAX_SHAKE_OFFSET = 0.12; // meters at full trauma
 const FOV_BOOST = 14; // extra degrees at high speed
+const SPRING_STEP = 1 / 120; // seconds
 
 export class CameraFX {
   private trauma = 0;
@@ -33,9 +34,13 @@ export class CameraFX {
     this.time += dt;
     this.trauma = Math.max(0, this.trauma - dt * 1.4);
 
-    // Damped spring back to zero for the landing dip.
-    this.dipVel += (-this.dip * 220 - this.dipVel * 22) * dt;
-    this.dip += this.dipVel * dt;
+    // Damped spring back to zero for the landing dip, in small steps: this stiff a spring
+    // integrated in one step blows up on a long frame (a hitch, or coming back to the tab).
+    for (let left = dt; left > 0; left -= SPRING_STEP) {
+      const h = Math.min(left, SPRING_STEP);
+      this.dipVel += (-this.dip * 220 - this.dipVel * 22) * h;
+      this.dip += this.dipVel * h;
+    }
     camera.position.y += this.dip;
 
     // Shake uses trauma² so small hits stay subtle. Layered sines are a cheap stand-in for noise.
