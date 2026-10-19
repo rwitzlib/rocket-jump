@@ -129,7 +129,7 @@ export class GameServer {
     const scores: ScoreEntry[] = [];
     for (const p of sim.players.values()) {
       const a = p.grapple?.anchor;
-      players.push({ id: p.id, pos: [p.pos.x, p.pos.y, p.pos.z], yaw: p.yaw, pitch: p.pitch, anchor: a ? [a.x, a.y, a.z] : null, alive: p.alive, protected: p.protectedFor > 0, grounded: p.grounded, primary: p.primary });
+      players.push({ id: p.id, pos: [p.pos.x, p.pos.y, p.pos.z], yaw: p.yaw, pitch: p.pitch, anchor: a ? [a.x, a.y, a.z] : null, alive: p.alive, protected: p.protectedFor > 0, grounded: p.grounded, primary: p.primary, vehicle: p.vehicle, seat: p.seat });
       scores.push({ id: p.id, kills: p.kills, deaths: p.deaths });
     }
     const projectiles: ProjectileState[] = sim.projectiles.map((r) => ({
@@ -144,8 +144,11 @@ export class GameServer {
       target: r.target,
       phase: r.phase,
       apex: r.apex,
+      from: r.from,
+      power: r.power,
     }));
     const pickups = sim.pickups.map((b) => b.respawnIn);
+    const vehicles = sim.vehicles.map((v) => v.capture());
     const crates: CrateState[] = sim.crates.map((c) => {
       const t = c.translation();
       const q = c.rotation();
@@ -161,6 +164,7 @@ export class GameServer {
         players: players.filter((p) => p.id !== id),
         projectiles,
         crates,
+        vehicles,
         pickups,
         scores,
         events: this.recentEvents,

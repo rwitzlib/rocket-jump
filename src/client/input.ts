@@ -56,7 +56,9 @@ export class Input {
       right: (k.has('KeyD') ? 1 : 0) - (k.has('KeyA') ? 1 : 0),
       jump: k.has('Space'),
       fire: this.buttons.has(0),
-      grapple: this.buttons.has(2) || k.has('KeyE') || k.has('ShiftLeft'),
+      grapple: this.buttons.has(2) || k.has('ShiftLeft'),
+      use: k.has('KeyE'),
+      down: k.has('KeyC'),
       yaw: this.yaw,
       pitch: this.pitch,
     };

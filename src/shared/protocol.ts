@@ -2,6 +2,7 @@ import { Vector3 } from 'three';
 import type { Vec3Tuple } from './map';
 import type { MissilePhase, PlayerState, ProjectileKind, SimEvent } from './sim';
 import type { PlayerInput, WeaponId } from './types';
+import type { VehicleState } from './vehicle';
 
 // Messages between client and server. Plain JSON-able data for now; a compact binary encoding can
 // replace this later without touching the code on either side of it.
@@ -29,6 +30,8 @@ export interface RemotePlayerState {
   protected: boolean; // spawn protection
   grounded: boolean; // only drives the remote player's animation
   primary: WeaponId; // which weapon their model carries
+  vehicle: number; // -1 on foot
+  seat: number;
 }
 
 export interface ScoreEntry {
@@ -49,6 +52,8 @@ export interface ProjectileState {
   target: string | null; // a seeker missile's target: drives its steering, and the target's missile warning
   phase: MissilePhase;
   apex: number;
+  from: number;
+  power: number;
 }
 
 /** Position then rotation quaternion: [x, y, z, qx, qy, qz, qw]. */
@@ -71,6 +76,7 @@ export interface SnapshotMessage {
   players: RemotePlayerState[]; // everyone else
   projectiles: ProjectileState[];
   crates: CrateState[];
+  vehicles: VehicleState[];
   pickups: number[]; // each mystery box's respawnIn: 0 while it's there to take
   scores: ScoreEntry[]; // everyone, including the recipient
   events: WireEvent[]; // the last NET.eventWindow ticks of events; clients skip ones they've seen
@@ -82,12 +88,12 @@ export type ServerMessage = WelcomeMessage | SnapshotMessage;
 const tuple = (v: Vector3): Vec3Tuple => [v.x, v.y, v.z];
 
 export function toWireEvent(e: SimEvent, tick: number): WireEvent {
-  if (e.type === 'explosion' || e.type === 'bounce') return { ...e, pos: tuple(e.pos), normal: tuple(e.normal), tick };
+  if (e.type === 'explosion' || e.type === 'bounce' || e.type === 'vehicleDestroyed') return { ...e, pos: tuple(e.pos), normal: tuple(e.normal), tick };
   return { ...e, tick };
 }
 
 export function fromWireEvent(w: WireEvent): SimEvent {
   const { tick: _, ...e } = w;
-  if (e.type === 'explosion' || e.type === 'bounce') return { ...e, pos: new Vector3(...e.pos), normal: new Vector3(...e.normal) };
+  if (e.type === 'explosion' || e.type === 'bounce' || e.type === 'vehicleDestroyed') return { ...e, pos: new Vector3(...e.pos), normal: new Vector3(...e.normal) };
   return e;
 }

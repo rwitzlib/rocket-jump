@@ -23,7 +23,9 @@ options, e.g. `?map=citadel&net=loopback&bots=4`.
 | Mouse | Look |
 | Space | Jump (hold to bunny-hop) |
 | Left click | Fire primary weapon (seekers: hold a target in the lock box first) |
-| Right click / E / Shift | Grapple (hold) |
+| Right click / Shift | Grapple (hold) |
+| E | Get in / out of a vehicle |
+| Space / C | Helicopter: climb / descend |
 | Tab (hold) | Scoreboard |
 | M | Mute / unmute |
 | P | Frame-time overlay (long frames are also logged to the console) |
@@ -73,6 +75,26 @@ dragged toward you. A hooked crate is reeled in with a fixed force, so loose cra
 ones hold firm enough to swing from. Rockets and hooks are judged against where you saw other players: the server
 rewinds them by your latency (up to 500 ms).
 
+### Vehicles
+
+Citadel has a **buggy** in each quadrant and two **helicopters** on the ramparts. Walk up to one and press **E** to
+get in: the first person takes the driver's seat, the second rides as gunner. Press E again to jump out, keeping the
+vehicle's speed. Inside a vehicle the camera switches to third person, and shots fly to whatever the crosshair is on.
+- **Buggy**: W/S throttle, brake and reverse, A/D steer, up to 26 m/s. Its gunner stands on the rear deck and fires
+  whatever primary they're carrying, but can't grapple. Hitting someone above 7 m/s runs them over: they're launched
+  along its path and hurt by its speed.
+- **Helicopter**: WASD moves relative to your view, Space climbs, C descends, and the nose follows the mouse. Left
+  click fires rocket pods (fast, alternating, 40% of a rocket). Right click fires a heat seeker after a Stinger-style
+  lock. A second player can ride in the side door as gunner. With no pilot it drops.
+
+Vehicles have health (300 each: about three direct rockets) and their riders' own shots don't hurt them. Destroyed,
+they explode: whoever is inside dies, credited to whoever did it, and the blast catches anyone nearby. They come back
+on their pad 15 s (buggy) or 20 s (helicopter) later. Hard landings damage them too, so bailing out of a high
+helicopter wrecks it. The grapple can hook a vehicle and ride along. Tuning is in `CAR`, `HELI` and `VEHICLE_DAMAGE`.
+
+Vehicles use the same netcode as players: the driver's client predicts its vehicle and replays it after server
+corrections, and everyone else sees it interpolated.
+
 ## Layout
 
 ```
@@ -82,7 +104,8 @@ src/
     types.ts       # PlayerInput, what a client will send each tick
     movement.ts    # Quake-style movement + grapple physics (pure functions)
     map.ts         # arena as plain data (boxes, crates, spawns)
-    sim.ts         # GameSim: fixed 60 Hz authoritative simulation (players, projectiles, pickups, explosions)
+    sim.ts         # GameSim: fixed 60 Hz authoritative simulation (players, vehicles, projectiles, pickups, explosions)
+    vehicle.ts     # VehicleSim and buggy / helicopter handling (velocity and heading, like movement.ts)
   client/
     main.ts        # bootstrap, fixed-timestep loop, interpolated camera
     input.ts       # keyboard + pointer lock
@@ -95,6 +118,7 @@ src/
     viewmodel.ts   # first-person weapons (rendered in a separate pass)
     weapons.ts     # weapon and projectile models
     pickups.ts     # mystery boxes
+    vehicles.ts    # buggy and helicopter models
 ```
 
 The simulation is kept separate from rendering on purpose. In multiplayer the server runs `GameSim`

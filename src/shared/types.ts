@@ -12,6 +12,8 @@ export interface PlayerInput {
   jump: boolean;
   fire: boolean;
   grapple: boolean;
+  use: boolean; // interact (E): get into or out of a vehicle
+  down: boolean; // descend (C), for helicopters
   yaw: number; // radians, 0 = looking down -Z
   pitch: number; // radians, positive = up
   /** Server tick the client was showing other players at, so hits are judged against what it saw. */
@@ -24,6 +26,10 @@ export const EMPTY_INPUT: PlayerInput = {
   jump: false,
   fire: false,
   grapple: false,
+  use: false,
+  down: false,
   yaw: 0,
   pitch: 0,
 };
+
+export type VehicleKind = 'car' | 'heli';

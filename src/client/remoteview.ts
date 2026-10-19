@@ -127,7 +127,7 @@ export class RemotePlayersView {
   sync(remotes: ReadonlyMap<string, RemotePlayer>, dt: number) {
     for (const r of remotes.values()) {
       const e = this.entryFor(r.id);
-      e.root.visible = r.alive;
+      e.root.visible = r.alive && !r.hidden;
       e.shell.visible = r.protected;
       this.setPrimary(e, r.primary);
       this.animate(e, r, dt);

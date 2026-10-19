@@ -13,6 +13,7 @@ import {
 } from '../../shared/protocol';
 import type { GameSim, PlayerSim, Projectile, SimEvent } from '../../shared/sim';
 import type { PlayerInput, WeaponId } from '../../shared/types';
+import type { VehicleSim } from '../../shared/vehicle';
 
 // The client half of the netcode.
 // - The local player and its projectiles are predicted: every input is simulated immediately, and when
@@ -37,6 +38,9 @@ export interface RemotePlayer {
   protected: boolean;
   grounded: boolean;
   primary: WeaponId;
+  vehicle: number; // -1 on foot
+  seat: number;
+  hidden: boolean; // inside a vehicle's body, so their model isn't drawn
 }
 
 export class NetStats {
@@ -155,7 +159,15 @@ export class NetClient {
       // state correction it comes with.
       const sim = fromWireEvent(e);
       const unpredicted =
-        e.type === 'explosion' || e.type === 'knockback' || e.type === 'respawn' || e.type === 'damaged' || e.type === 'killed' || e.type === 'pickup';
+        e.type === 'explosion' ||
+        e.type === 'knockback' ||
+        e.type === 'respawn' ||
+        e.type === 'damaged' ||
+        e.type === 'killed' ||
+        e.type === 'pickup' ||
+        e.type === 'entered' ||
+        e.type === 'exited' ||
+        e.type === 'rammed';
       if (unpredicted && this.firstSighting(sim)) {
         this.immediate.push(sim);
       }
@@ -171,6 +183,9 @@ export class NetClient {
     _oldStep.subVectors(me.pos, me.prevPos);
 
     me.restore(msg.you);
+    // Driving: the vehicle is ours to predict too, so it rewinds and replays along with us.
+    const driving = this.driving();
+    if (driving) driving.restore(msg.vehicles[driving.index]);
     this.restoreProjectiles(msg);
     while (this.pending.length && this.pending[0].seq <= msg.ack) this.pending.shift();
     for (const frame of this.pending) {
@@ -180,6 +195,7 @@ export class NetClient {
     me.seq = this.seq;
     if (!this.pending.length) me.prevPos.copy(me.pos).sub(_oldStep);
 
+    if (driving && !this.pending.length) driving.prevPos.copy(driving.pos).sub(_oldStep);
     const error = _old.distanceTo(me.pos);
     this.stats.lastError = error;
     if (error > 0.001) this.stats.corrections++;
@@ -194,7 +210,7 @@ export class NetClient {
     for (const r of msg.projectiles) {
       if (r.ownerId !== this.id) continue;
       const pos = new Vector3(...r.pos);
-      projectiles.push({ id: -r.shot, kind: r.kind, ownerId: r.ownerId, shot: r.shot, pos, prevPos: pos.clone(), vel: new Vector3(...r.vel), life: r.life, traveled: r.traveled, lag: 0, struck: null, target: r.target, phase: r.phase, apex: r.apex });
+      projectiles.push({ id: -r.shot, kind: r.kind, ownerId: r.ownerId, shot: r.shot, pos, prevPos: pos.clone(), vel: new Vector3(...r.vel), life: r.life, traveled: r.traveled, lag: 0, struck: null, target: r.target, phase: r.phase, apex: r.apex, from: r.from, power: r.power });
     }
   }
 
@@ -228,6 +244,7 @@ export class NetClient {
     this.interpolatePlayers(a, b, t);
     this.interpolateProjectiles(a, b, t);
     this.interpolateCrates(a, b, t);
+    this.interpolateVehicles(a, b, t);
 
     while (this.timeline.length && this.timeline[0].tick <= this.renderTick) {
       events.push(fromWireEvent(this.timeline.shift()!));
@@ -240,7 +257,7 @@ export class NetClient {
       const pa = a.players.find((p) => p.id === pb.id) ?? pb;
       let r = this.remotes.get(pb.id);
       if (!r) {
-        r = { id: pb.id, pos: new Vector3(), yaw: 0, pitch: 0, anchor: null, alive: true, protected: false, grounded: true, primary: pb.primary };
+        r = { id: pb.id, pos: new Vector3(), yaw: 0, pitch: 0, anchor: null, alive: true, protected: false, grounded: true, primary: pb.primary, vehicle: -1, seat: -1, hidden: false };
         this.remotes.set(pb.id, r);
       }
       // Dying or respawning is a teleport: show one end or the other, never a slide between them.
@@ -252,6 +269,9 @@ export class NetClient {
       r.protected = t < 0.5 ? pa.protected : pb.protected;
       r.grounded = t < 0.5 ? pa.grounded : pb.grounded;
       r.primary = t < 0.5 ? pa.primary : pb.primary;
+      r.vehicle = t < 0.5 ? pa.vehicle : pb.vehicle;
+      r.seat = t < 0.5 ? pa.seat : pb.seat;
+      r.hidden = r.vehicle >= 0 && !!this.sim.vehicles[r.vehicle]?.config.seats[r.seat]?.hidden;
       // Anchors move when hooked into a player or crate, so blend them when both ends have one.
       if (pa.anchor && pb.anchor) (r.anchor ??= new Vector3()).set(...pa.anchor).lerp(_v.set(...pb.anchor), t);
       else {
@@ -263,8 +283,10 @@ export class NetClient {
     for (const id of this.remotes.keys()) {
       if (!b.players.some((p) => p.id === id)) this.remotes.delete(id);
     }
+    // Hit tests skip anyone riding in our vehicle, as the server's do.
     this.alivePositions.clear();
-    for (const r of this.remotes.values()) if (r.alive) this.alivePositions.set(r.id, r.pos);
+    const ours = this.me.vehicle;
+    for (const r of this.remotes.values()) if (r.alive && (ours < 0 || r.vehicle !== ours)) this.alivePositions.set(r.id, r.pos);
   }
 
   private interpolateProjectiles(a: SnapshotMessage, b: SnapshotMessage, t: number) {
@@ -298,10 +320,36 @@ export class NetClient {
   private projectileFor(s: ProjectileState): Projectile {
     let r = this.projectileCache.get(s.id);
     if (!r) {
-      r = { id: s.id, kind: s.kind, ownerId: s.ownerId, shot: s.shot, pos: new Vector3(), prevPos: new Vector3(), vel: new Vector3(...s.vel), life: s.life, traveled: s.traveled, lag: 0, struck: null, target: s.target, phase: s.phase, apex: s.apex };
+      r = { id: s.id, kind: s.kind, ownerId: s.ownerId, shot: s.shot, pos: new Vector3(), prevPos: new Vector3(), vel: new Vector3(...s.vel), life: s.life, traveled: s.traveled, lag: 0, struck: null, target: s.target, phase: s.phase, apex: s.apex, from: s.from, power: s.power };
       this.projectileCache.set(s.id, r);
     }
     return r;
+  }
+
+  /** The vehicle we're driving, which we predict, or null. */
+  driving(): VehicleSim | null {
+    return this.me.vehicle >= 0 && this.me.seat === 0 ? (this.sim.vehicles[this.me.vehicle] ?? null) : null;
+  }
+
+  /** Every vehicle but the one we drive, placed where it was at render time. */
+  private interpolateVehicles(a: SnapshotMessage, b: SnapshotMessage, t: number) {
+    const driving = this.driving();
+    this.sim.vehicles.forEach((v, i) => {
+      const va = a.vehicles[i];
+      const vb = b.vehicles[i];
+      if (!va || !vb || v === driving) return;
+      v.restore(t < 0.5 ? va : vb);
+      // Respawning is a teleport: no slide back to the pad.
+      if (va.alive === vb.alive) {
+        v.pos.set(...va.pos).lerp(_v.set(...vb.pos), t);
+        v.yaw = lerpAngle(va.yaw, vb.yaw, t);
+        v.pitch = va.pitch + (vb.pitch - va.pitch) * t;
+        v.roll = va.roll + (vb.roll - va.roll) * t;
+      }
+      v.prevPos.copy(v.pos);
+      v.prevYaw = v.yaw;
+      v.place();
+    });
   }
 
   private interpolateCrates(a: SnapshotMessage, b: SnapshotMessage, t: number) {

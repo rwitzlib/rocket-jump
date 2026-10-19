@@ -44,6 +44,8 @@ export class Bot {
       jump: true,
       fire: false,
       grapple: false,
+      use: false,
+      down: false,
       yaw: Math.atan2(-dx, -dz),
       pitch: 0,
     };

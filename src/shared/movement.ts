@@ -65,7 +65,8 @@ export function updateVelocity(vel: Vector3, input: PlayerInput, grounded: boole
 export type Hook =
   | { kind: 'player'; id: string; offset: Vector3 } // offset from the player's center
   | { kind: 'crate'; index: number; local: Vector3; localNormal: Vector3 } // in the crate's own frame
-  | { kind: 'rocket'; ownerId: string; shot: number }; // owner + shot identify a rocket on both server and client
+  | { kind: 'rocket'; ownerId: string; shot: number } // owner + shot identify a rocket on both server and client
+  | { kind: 'vehicle'; index: number; local: Vector3 }; // in the vehicle's frame, turning with its heading
 
 export interface GrappleState {
   anchor: Vector3;

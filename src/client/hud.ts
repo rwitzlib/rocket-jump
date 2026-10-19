@@ -12,6 +12,8 @@ const KILL_VERB: Record<DeathCause, string> = {
   javelin: ' javelined ',
   stinger: ' stung ',
   fall: ' knocked off ',
+  vehicle: ' blew up ',
+  ram: ' ran over ',
 };
 const NOTICE_TIME = 2000; // ms a pickup notice stays up
 // Every setter compares against what's already shown, so calling them each frame is cheap.
@@ -48,6 +50,12 @@ export class Hud {
   private readonly notice = el('pickup-notice');
   private noticeTimer = 0;
   private shownWeapons = '';
+  private readonly prompt = el('prompt');
+  private shownPrompt = '';
+  private readonly vehicle = el('vehicle-status');
+  private readonly vehicleName = el('vehicle-name');
+  private readonly vehicleBar = el('vehicle-bar');
+  private shownVehicle = '';
 
   private shownHealth = -1;
   private shownProtected = false;
@@ -88,12 +96,12 @@ export class Hud {
    * `status`: shown after the primary's name (ammo, reloading, lock state); `alert` colors it as a
    * warning. `stowed`: the primary is two-handed, so the secondary can't be used.
    */
-  setWeapons(primary: WeaponId, secondary: WeaponId, status: string, alert: boolean, stowed: boolean) {
+  setWeapons(primary: string, secondary: string, status: string, alert: boolean, stowed: boolean) {
     const key = `${primary}/${secondary}/${status}/${alert}/${stowed}`;
     if (key === this.shownWeapons) return;
     this.shownWeapons = key;
-    this.primaryName.textContent = WEAPONS[primary].name;
-    this.secondaryName.textContent = WEAPONS[secondary].name + (stowed ? ' (stowed)' : '');
+    this.primaryName.textContent = primary;
+    this.secondaryName.textContent = secondary + (stowed ? ' (stowed)' : '');
     this.secondaryName.parentElement!.classList.toggle('stowed', stowed);
     this.ammo.textContent = status;
     this.ammo.classList.toggle('reloading', alert);
@@ -127,6 +135,31 @@ export class Hud {
   }
 
   /** Someone's seeker missile is coming for you. */
+  /** A key hint under the crosshair, like "E  Drive Buggy". Null hides it. */
+  setPrompt(key: string | null, action = '') {
+    const shown = key ? `${key}/${action}` : '';
+    if (shown === this.shownPrompt) return;
+    this.shownPrompt = shown;
+    this.prompt.hidden = !key;
+    if (!key) return;
+    const kbd = document.createElement('kbd');
+    kbd.textContent = key;
+    this.prompt.replaceChildren(kbd, action);
+  }
+
+  /** The vehicle you're in and its health. Null on foot. */
+  setVehicle(vehicle: { name: string; health: number; maxHealth: number } | null) {
+    const shown = vehicle ? `${vehicle.name}/${Math.ceil(vehicle.health)}` : '';
+    if (shown === this.shownVehicle) return;
+    this.shownVehicle = shown;
+    this.vehicle.hidden = !vehicle;
+    if (!vehicle) return;
+    const frac = Math.max(0, vehicle.health) / vehicle.maxHealth;
+    this.vehicleName.textContent = `${vehicle.name}  ${Math.max(0, Math.ceil(vehicle.health))}`;
+    this.vehicleBar.style.transform = `scaleX(${frac})`;
+    this.vehicle.classList.toggle('low', frac <= 0.3);
+  }
+
   setMissileWarning(on: boolean) {
     if (on === this.shownWarning) return;
     this.shownWarning = on;

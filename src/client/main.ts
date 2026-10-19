@@ -1,8 +1,9 @@
 import RAPIER from '@dimforge/rapier3d-compat';
 import * as THREE from 'three';
-import { DT, GRAPPLE, GRENADE, HYPERSONIC, ROCKET, SEEKERS, WEAPONS } from '../shared/config';
+import { DT, GRAPPLE, GRENADE, HELI, HYPERSONIC, ROCKET, SEEKERS, WEAPONS } from '../shared/config';
 import { MAPS } from '../shared/map';
-import { GameSim, isSeeker, lockedOn, type DeathCause, type PlayerSim, type SimEvent } from '../shared/sim';
+import { aimDirection } from '../shared/movement';
+import { GameSim, lockReady, type DeathCause, type PlayerSim, type SimEvent } from '../shared/sim';
 import { GameAudio } from './audio';
 import { CameraFX } from './camerafx';
 import { Effects } from './effects';
@@ -10,12 +11,13 @@ import { Hud } from './hud';
 import { Input } from './input';
 import { buildLevel, CrateView } from './level';
 import { Loopback, type NetConditions } from './net/loopback';
-import { NetClient } from './net/netclient';
+import { NetClient, type RemotePlayer } from './net/netclient';
 import { NetOverlay } from './net/netoverlay';
 import { PerfOverlay } from './perf';
 import { PickupView } from './pickups';
 import { RemotePlayersView } from './remoteview';
 import { Rope } from './rope';
+import { VehicleView } from './vehicles';
 import { ViewModel } from './viewmodel';
 
 const FOV = 90;
@@ -75,10 +77,12 @@ async function main() {
   const rope = new Rope(scene);
   const remoteView = new RemotePlayersView(scene);
   const pickupView = new PickupView(scene, sim.pickups);
+  const vehicleView = new VehicleView(scene, sim.vehicles);
   let fov = FOV;
   // Rockets and grenades are drawn leaving the barrel you see: the first-person one for ours, the model's for others.
   effects.muzzleOffset = (id, out) => {
-    if (id !== localId) return remoteView.muzzleOffset(id, out);
+    // In a vehicle we're in third person: our shots leave our model's launcher (if it's drawn), not the first-person one.
+    if (id !== localId || me.vehicle >= 0) return remoteView.muzzleOffset(id, out);
     camera.updateMatrixWorld();
     return camera.localToWorld(viewModel.muzzleOrigin(fov, out)).sub(camera.position);
   };
@@ -219,6 +223,34 @@ async function main() {
           audio.play('hit', { volume: 0.6 });
         }
         break;
+      case 'entered':
+        if (mine) {
+          rope.release();
+          audio.play('grappleAttach', { volume: 0.5, rate: 0.8 });
+        }
+        break;
+      case 'exited':
+        if (mine) audio.play('grappleRelease', { volume: 0.5 });
+        break;
+      case 'vehicleHit':
+        if (e.sourceId === localId) {
+          hud.hitMarker(false);
+          audio.play('hit', { volume: 0.5, rate: 0.8 });
+        }
+        break;
+      case 'vehicleDestroyed': {
+        effects.explosion(e.pos, e.normal, false, 7);
+        audio.play('explosion', { at: e.pos, volume: 2, rate: 0.7 });
+        cameraFx.shake(Math.max(0, 1 - e.pos.distanceTo(me.pos) / 40));
+        break;
+      }
+      case 'rammed':
+        if (mine) {
+          cameraFx.shake(0.6);
+          flash = Math.max(flash, 0.6);
+        }
+        audio.play('land', { at: playerPos(e.playerId), volume: 1.2, rate: 0.7 });
+        break;
       case 'killed':
         hud.killed(e.playerId, e.killerId, e.cause);
         if (mine) {
@@ -243,6 +275,11 @@ async function main() {
   let toneIn = 0; // seconds until the next lock-on or missile-warning beep
   const lockPoint = new THREE.Vector3();
   let shownSpeed = '';
+  const pivot = new THREE.Vector3();
+  const lookBack = new THREE.Vector3();
+  // Ourselves as another player would see us, drawn in third person while riding as a gunner.
+  const self: RemotePlayer = { id: localId, pos: new THREE.Vector3(), yaw: 0, pitch: 0, anchor: null, alive: true, protected: false, grounded: true, primary: me.primary, vehicle: -1, seat: -1, hidden: false };
+  const shownPlayers = new Map<string, RemotePlayer>();
 
   // Fixed-timestep simulation (60 Hz, same as a server would run) with interpolated rendering.
   const frame = (now: number) => {
@@ -265,17 +302,38 @@ async function main() {
     }
     if (client) {
       for (const e of client.update(dt, now)) handleEvent(e);
-      remoteView.sync(client.remotes, dt);
       netOverlay?.update(now);
     }
     const alpha = accumulator / DT;
     const speed = me.vel.length();
     const horizontalSpeed = Math.hypot(me.vel.x, me.vel.z);
+    const ride = me.alive && me.vehicle >= 0 ? sim.vehicles[me.vehicle] : null;
+    const rideSeat = ride ? ride.config.seats[me.seat] : null;
+    vehicleView.update(alpha, dt);
 
-    // Camera: interpolated position, but the latest mouse look so aiming never lags.
-    me.eye(eye);
-    prevEye.copy(me.prevPos).y += eye.y - me.pos.y;
-    camera.position.lerpVectors(prevEye, eye, alpha);
+    shownPlayers.clear();
+    if (client) for (const [id, r] of client.remotes) shownPlayers.set(id, r);
+    if (ride && rideSeat && !rideSeat.hidden) {
+      vehicleView.seatPosition(ride.index, me.seat, alpha, self.pos);
+      self.yaw = input.yaw;
+      self.pitch = input.pitch;
+      self.primary = me.primary;
+      shownPlayers.set(localId, self);
+    }
+    remoteView.sync(shownPlayers, dt);
+
+    // Camera: interpolated position, but the latest mouse look so aiming never lags. In a vehicle
+    // it orbits behind a pivot above your seat (the sim aims along the same line), pulled in
+    // short of any wall behind it.
+    if (ride && rideSeat) {
+      vehicleView.seatPosition(ride.index, me.seat, alpha, pivot).y += rideSeat.pivot;
+      aimDirection(input.yaw, input.pitch, lookBack).negate();
+      camera.position.copy(pivot).addScaledVector(lookBack, sim.clearDistance(pivot, lookBack, rideSeat.camDist));
+    } else {
+      me.eye(eye);
+      prevEye.copy(me.prevPos).y += eye.y - me.pos.y;
+      camera.position.lerpVectors(prevEye, eye, alpha);
+    }
     if (client) camera.position.add(client.visualOffset);
     camera.rotation.set(input.pitch, input.yaw, 0);
     fov = cameraFx.apply(camera, dt, speed);
@@ -285,13 +343,17 @@ async function main() {
     const projectiles = client ? client.renderProjectiles : sim.projectiles;
     // The grenade launcher's arc shows what's left in the drum, then the reload filling it back up.
     const grenades = me.primary === 'grenade';
-    const seeker = isSeeker(me.primary) ? SEEKERS[me.primary] : null;
+    // Locking: our seeker launcher, or a helicopter's missiles while we fly one.
+    const lockWeapon = sim.lockWeapon(me);
+    const seeker = lockWeapon ? SEEKERS[lockWeapon] : null;
     const reloading = grenades && me.reloading;
     const reloaded = 1 - me.fireCooldown / GRENADE.reload;
     const cooldown = seeker ? seeker.cooldown : me.primary === 'hypersonic' ? HYPERSONIC.cooldown : ROCKET.cooldown;
     const fireReady = grenades ? (reloading ? reloaded : 1) : 1 - me.fireCooldown / cooldown;
     const fireCharge = grenades ? (reloading ? reloaded : me.drum / GRENADE.drum) : fireReady;
     const grappleReady = 1 - me.grappleCooldown / GRAPPLE.cooldown;
+    const piloting = !!ride && me.seat === 0 && ride.kind === 'heli';
+    const driving = !!ride && me.seat === 0 && ride.kind === 'car';
     // A seeker loads its next missile once the launch kick has settled.
     const loading = reloading || (!!seeker && me.fireCooldown > 0 && me.fireCooldown < seeker.cooldown - 0.35);
     viewModel.setPrimary(me.primary);
@@ -308,18 +370,46 @@ async function main() {
     if (flashText !== shownFlash) hitFlash.style.opacity = shownFlash = flashText;
     const speedText = `${horizontalSpeed.toFixed(1)} m/s`;
     if (speedText !== shownSpeed) speedEl.textContent = shownSpeed = speedText;
-    const grappleStowed = !!WEAPONS[me.primary].twoHanded;
+    // No grapple from a seat.
+    const grappleStowed = !!WEAPONS[me.primary].twoHanded || !!ride;
     crosshair.classList.toggle('can-grapple', !me.grapple && !grappleStowed && sim.grappleTarget(me, target) !== null);
     crosshair.classList.toggle('grappling', !!me.grapple);
     hud.setHealth(me.health);
     hud.setProtected(me.alive && me.protectedFor > 0);
-    hud.setCooldowns(fireCharge, grappleStowed ? 0 : grappleReady);
-    const locked = lockedOn(me);
-    if (grenades) hud.setWeapons(me.primary, me.secondary, reloading ? 'Reloading' : `${me.drum}/${GRENADE.drum}`, reloading || me.drum === 0, grappleStowed);
-    else if (seeker) {
-      const status = me.fireCooldown > 0 ? 'Reloading' : locked ? 'Locked' : me.lockTarget ? 'Locking' : '';
-      hud.setWeapons(me.primary, me.secondary, status, status === 'Reloading' || status === 'Locked', grappleStowed);
-    } else hud.setWeapons(me.primary, me.secondary, '', false, grappleStowed);
+    const locked = lockReady(lockWeapon, me);
+    const lockStatus = !seeker ? '' : sim.lockCooldown(me) > 0 ? 'Reloading' : locked ? 'Locked' : me.lockTarget ? 'Locking' : '';
+    const primaryName = WEAPONS[me.primary].name;
+    const secondaryName = WEAPONS[me.secondary].name;
+    if (piloting) {
+      hud.setCooldowns(1 - ride.fireCooldown / HELI.podCooldown, 1 - ride.missileCooldown / HELI.missileCooldown);
+      hud.setWeapons('Rocket pods', `Heat seeker${lockStatus ? `  ${lockStatus}` : ''}`, '', false, false);
+    } else if (driving) {
+      hud.setCooldowns(0, 0);
+      hud.setWeapons('Driving', 'Your gunner shoots', '', false, false);
+    } else {
+      hud.setCooldowns(fireCharge, grappleStowed ? 0 : grappleReady);
+      if (grenades) hud.setWeapons(primaryName, secondaryName, reloading ? 'Reloading' : `${me.drum}/${GRENADE.drum}`, reloading || me.drum === 0, grappleStowed);
+      else if (seeker) hud.setWeapons(primaryName, secondaryName, lockStatus, lockStatus === 'Reloading' || lockStatus === 'Locked', grappleStowed);
+      else hud.setWeapons(primaryName, secondaryName, '', false, grappleStowed);
+    }
+
+    // What E would do: get out, or get into the nearest vehicle with room.
+    hud.setVehicle(ride ? { name: ride.config.name, health: ride.health, maxHealth: ride.config.health } : null);
+    if (ride) hud.setPrompt(null);
+    else if (me.alive) {
+      let near: (typeof sim.vehicles)[number] | null = null;
+      let nearDist = Infinity;
+      for (const v of sim.vehicles) {
+        const dist = v.pos.distanceTo(me.pos);
+        if (v.alive && v.seats.includes(null) && dist < v.config.enterRange && dist < nearDist) {
+          near = v;
+          nearDist = dist;
+        }
+      }
+      if (!near) hud.setPrompt(null);
+      else if (near.seats[0] === null) hud.setPrompt('E', `${near.kind === 'heli' ? 'Fly' : 'Drive'} ${near.config.name}`);
+      else hud.setPrompt('E', `Ride ${near.config.name} as gunner`);
+    } else hud.setPrompt(null);
 
     // Seeker lock box: the sim's lock box, scaled to the current FOV, plus a marker on whoever it's locking onto.
     if (seeker && me.alive) {
@@ -364,7 +454,7 @@ async function main() {
 
     renderer.clear();
     renderer.render(scene, camera);
-    if (me.alive) {
+    if (me.alive && !ride) {
       renderer.clearDepth();
       renderer.render(viewModel.scene, viewModel.camera);
     }
@@ -374,7 +464,7 @@ async function main() {
   requestAnimationFrame(frame);
 
   // Handy for tweaking from the browser console during development: `game.me.vel`, `game.sim`, etc.
-  if (import.meta.env.DEV) Object.assign(window, { game: { sim, me, client, loopback, hud, input, camera, scene, renderer, effects, audio, handleEvent, frame } });
+  if (import.meta.env.DEV) Object.assign(window, { game: { sim, me, client, loopback, hud, input, camera, scene, renderer, effects, audio, handleEvent, frame, vehicleView } });
 }
 
 function gpuName(renderer: THREE.WebGLRenderer): string {

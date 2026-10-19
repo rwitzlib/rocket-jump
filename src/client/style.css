@@ -95,6 +95,19 @@ body {
   pointer-events: none;
 }
 
+#prompt {
+  position: fixed;
+  left: 50%;
+  top: calc(50% + 80px);
+  transform: translateX(-50%);
+  color: #fff;
+  font-size: 16px;
+  font-weight: 700;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+  pointer-events: none;
+}
+
+#prompt kbd,
 #weapons kbd {
   margin-right: 8px;
   padding: 1px 5px;
@@ -102,6 +115,37 @@ body {
   border-radius: 3px;
   font: 600 11px ui-monospace, monospace;
   color: #aab4c4;
+}
+
+#vehicle-status {
+  position: fixed;
+  left: 24px;
+  bottom: 160px;
+  width: 180px;
+  color: #fff;
+  font-size: 15px;
+  font-weight: 700;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+  pointer-events: none;
+}
+
+#vehicle-status .bar {
+  height: 6px;
+  margin-top: 4px;
+  background: rgba(0, 0, 0, 0.45);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+#vehicle-bar {
+  height: 100%;
+  background: #ffe680;
+  transform-origin: left;
+  transition: transform 120ms;
+}
+
+#vehicle-status.low #vehicle-bar {
+  background: #ff8a5c;
 }
 
 #weapons .stowed {

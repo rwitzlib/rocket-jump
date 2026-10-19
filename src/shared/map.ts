@@ -1,6 +1,7 @@
 // Maps are plain data so the client (meshes) and a future server (colliders only) build from the same source.
 
 import { Euler, Quaternion, Vector3 } from 'three';
+import type { VehicleKind } from './types';
 
 export type Vec3Tuple = [number, number, number];
 
@@ -16,6 +17,13 @@ export interface SpawnDef {
   yaw: number; // facing direction, 0 = looking down -Z
 }
 
+/** Where a vehicle starts and comes back to after it's destroyed. */
+export interface VehicleDef {
+  kind: VehicleKind;
+  pos: Vec3Tuple; // collider center
+  yaw: number;
+}
+
 export interface MapDef {
   boxes: BoxDef[];
   crates: Vec3Tuple[];
@@ -23,6 +31,7 @@ export interface MapDef {
   pickups: Vec3Tuple[]; // mystery box centers
   killY: number;
   botOrbit?: number; // radius of the circle wandering bots follow around the center
+  vehicles?: VehicleDef[];
 }
 
 const FLOOR = 0x8a94a6;
@@ -234,6 +243,17 @@ export const CITADEL: MapDef = {
   pickups: [
     ...quad<Vec3Tuple>([[60, 1.4, 0], [TOWER + 8, RING_Y + 1.9, TOWER - 8]], turnPos),
     [0, SPIRE_H + 1.9, 0],
+  ],
+  // A buggy on the ground in each quadrant, and helicopters on two of the ramparts.
+  vehicles: [
+    ...quad<VehicleDef>([{ kind: 'car', pos: [30, 0.7, 96], yaw: Math.atan2(30, 96) }], (v, k) => ({
+      ...v,
+      pos: turnPos(v.pos, k),
+      yaw: v.yaw + (k * Math.PI) / 2,
+    })),
+    // (beside the pylon, not in front of it)
+    { kind: 'heli', pos: [10, 9.2, 110], yaw: 0 },
+    { kind: 'heli', pos: [-10, 9.2, -110], yaw: Math.PI },
   ],
   killY: -30,
   botOrbit: 50,

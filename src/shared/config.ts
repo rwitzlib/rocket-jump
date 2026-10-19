@@ -1,4 +1,4 @@
-import type { SeekerId, WeaponId, WeaponSlot } from './types';
+import type { SeekerId, VehicleKind, WeaponId, WeaponSlot } from './types';
 
 // All gameplay tuning lives here. Units are meters and seconds.
 // This file is shared so a future server simulates with identical numbers.
@@ -209,3 +209,93 @@ export const PICKUP = {
   reach: 0.5, // how close (beyond the box's half size) your capsule has to get to take it
   respawn: 10, // seconds until a taken box comes back
 };
+
+/**
+ * A seat in a vehicle. Offsets are in the vehicle's own frame (-Z forward), to the seated player's
+ * capsule center. The third-person camera orbits `pivot` meters above the seat at `camDist`, and
+ * the crosshair ray starts from that pivot so the sim and the camera agree on what you aim at.
+ */
+export interface SeatConfig {
+  role: 'driver' | 'gunner'; // the driver steers (and flies a helicopter's guns); gunners fire their own weapon
+  offset: [number, number, number];
+  pivot: number;
+  camDist: number;
+  hidden: boolean; // inside the body: the model isn't drawn
+  exit: [number, number, number]; // where you get out, in the vehicle's frame
+}
+
+export interface VehicleConfig {
+  name: string;
+  size: [number, number, number]; // collider full extents: width, height, length
+  health: number;
+  respawn: number; // seconds after being destroyed before it's back on its pad
+  seats: SeatConfig[];
+  enterRange: number; // how close to its center you have to be to get in
+  maxSpeed: number;
+  accel: number; // m/s²
+  turnRate: number; // radians per second at full lock
+  knockback: number; // fraction of a blast's push it takes: heavier than a player
+  crashSpeed: number; // landing faster than this damages it
+}
+
+export const CAR = {
+  name: 'Buggy',
+  size: [2.4, 1.3, 4.2],
+  health: 300,
+  respawn: 15,
+  enterRange: 4,
+  seats: [
+    { role: 'driver', offset: [0, 0.2, 0.2], pivot: 2.2, camDist: 7.5, hidden: true, exit: [-2.2, 0.3, 0] },
+    // stands on the rear deck behind the roll bar, exposed
+    { role: 'gunner', offset: [0, 1.55, 1.3], pivot: 1.2, camDist: 4.5, hidden: false, exit: [2.2, 0.3, 1] },
+  ],
+  maxSpeed: 26,
+  reverseSpeed: 9,
+  accel: 14,
+  brake: 30,
+  coast: 3, // m/s² of rolling resistance with no throttle
+  turnRate: 2.1,
+  fullTurnSpeed: 7, // below this, steering is proportionally weaker: no spinning on the spot
+  grip: 7, // 1/s: how fast sideways sliding dies out on the ground
+  knockback: 0.45,
+  crashSpeed: 24,
+  ramSpeed: 7, // hitting a player faster than this knocks them flying
+  ramDamage: 5, // per m/s over ramSpeed
+  ramKnockback: 0.8, // fraction of the car's speed they're launched at, plus ramLift upward
+  ramLift: 7,
+} satisfies VehicleConfig & Record<string, unknown>;
+
+export const HELI = {
+  name: 'Helicopter',
+  size: [2.6, 2.2, 5.6],
+  health: 300,
+  respawn: 20,
+  enterRange: 5,
+  seats: [
+    { role: 'driver', offset: [0, 0, -1], pivot: 3, camDist: 13, hidden: true, exit: [-2.6, -0.4, 0] },
+    // sitting in the open side door
+    { role: 'gunner', offset: [1.9, -0.1, 0.2], pivot: 1, camDist: 5, hidden: false, exit: [2.8, -0.4, 0.2] },
+  ],
+  maxSpeed: 28,
+  accel: 16,
+  climbSpeed: 10,
+  climbAccel: 14,
+  drag: 1.2, // 1/s: how fast it drifts to a stop with the stick centered
+  ceiling: 75, // m above the ground it can't climb past
+  turnRate: 2.0, // the nose follows your view at this rate
+  knockback: 0.3,
+  crashSpeed: 16,
+  tilt: 0.03, // radians of visual pitch/roll per m/s² of acceleration
+  // Rocket pods (left click): quick alternating volleys, lighter hits than a rocket launcher.
+  podCooldown: 0.16,
+  podSpeed: 60,
+  podLifetime: 3,
+  podPower: 0.4, // damage and knockback relative to a rocket
+  // Heat seeker (right click): locks like a Stinger, then fires one of its missiles.
+  missileCooldown: 3,
+} satisfies VehicleConfig & Record<string, unknown>;
+
+export const VEHICLES: Record<VehicleKind, VehicleConfig> = { car: CAR, heli: HELI };
+
+/** Damage to vehicles relative to players. Either vehicle takes three direct rockets. */
+export const VEHICLE_DAMAGE = 1;
