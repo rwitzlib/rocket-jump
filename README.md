@@ -100,7 +100,7 @@ Play online at a different server.
 | Left click | Fire primary weapon (seekers: hold a target in the lock box first) |
 | Right click / Shift | Grapple (hold) |
 | E | Get in / out of a vehicle |
-| Space / C | Helicopter: climb / descend |
+| Space / Shift | Helicopter: climb / descend (C works too) |
 | Tab (hold) | Scoreboard |
 | T / Enter | Chat |
 | M | Mute / unmute |
@@ -159,7 +159,7 @@ vehicle's speed. Inside a vehicle the camera switches to third person, and shots
 - **Buggy**: W/S throttle, brake and reverse, A/D steer, up to 26 m/s. Its gunner stands on the rear deck and fires
   whatever primary they're carrying, but can't grapple. Hitting someone above 7 m/s runs them over: they're launched
   along its path and hurt by its speed.
-- **Helicopter**: WASD moves relative to your view, Space climbs, C descends, and the nose follows the mouse. Left
+- **Helicopter**: WASD moves relative to your view, Space climbs, Shift (or C) descends, and the nose follows the mouse. Left
   click fires rocket pods (fast, alternating, 40% of a rocket). Right click fires a heat seeker after a Stinger-style
   lock. A second player can ride in the side door as gunner. With no pilot it drops.
 

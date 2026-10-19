@@ -59,17 +59,21 @@ export class Input {
     }
   }
 
+  /** In a vehicle Shift descends (a helicopter) instead of grappling, which no seat can do anyway. */
+  vehicleMode = false;
+
   sample(): PlayerInput {
     if (!this.enabled) this.clear();
     const k = this.keys;
+    const shift = k.has('ShiftLeft') || k.has('ShiftRight');
     return {
       forward: (k.has('KeyW') ? 1 : 0) - (k.has('KeyS') ? 1 : 0),
       right: (k.has('KeyD') ? 1 : 0) - (k.has('KeyA') ? 1 : 0),
       jump: k.has('Space'),
       fire: this.buttons.has(0),
-      grapple: this.buttons.has(2) || k.has('ShiftLeft'),
+      grapple: this.buttons.has(2) || (shift && !this.vehicleMode),
       use: k.has('KeyE'),
-      down: k.has('KeyC'),
+      down: k.has('KeyC') || (shift && this.vehicleMode),
       yaw: this.yaw,
       pitch: this.pitch,
     };

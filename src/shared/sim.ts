@@ -372,6 +372,8 @@ const _rayDir = new Vector3();
 const _ray = new RAPIER.Ray(_rayOrigin, _rayDir);
 
 // Removes velocity the collision pass refused to let us travel (walls, floors, ceilings).
+const VEHICLE_EDGE_RADIUS = 0.25;
+
 function clipVelocity(v: number, desired: number, actual: number): number {
   if (Math.abs(desired) < 1e-6) return v;
   const ratio = actual / desired;
@@ -444,8 +446,11 @@ export class GameSim {
     (map.vehicles ?? []).forEach((def, index) => {
       const body = this.world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased());
       const [w, h, l] = VEHICLES[def.kind].size;
+      // Rounded edges, same outer size: a sharp-edged box dragged along the floor by the character
+      // controller catches its bottom edges on the ground and stops dead, worst when driving diagonally.
+      const r = VEHICLE_EDGE_RADIUS;
       const collider = this.world.createCollider(
-        RAPIER.ColliderDesc.cuboid(w / 2, h / 2, l / 2).setCollisionGroups(VEHICLE_COLLIDER_GROUPS),
+        RAPIER.ColliderDesc.roundCuboid(w / 2 - r, h / 2 - r, l / 2 - r, r).setCollisionGroups(VEHICLE_COLLIDER_GROUPS),
         body,
       );
       const v = new VehicleSim(index, def, body, collider);
@@ -1506,18 +1511,35 @@ export class GameSim {
     else updateHeli(v, input, DT);
 
     // Same as players: `pos` is the truth, and a replay runs without stepping the world.
+    // Two passes: along the ground (with any climb), then down. In one pass, a move that's both
+    // forward and a little downward (gravity, every tick) sometimes comes back from the character
+    // controller with no forward part at all: the floor it's resting on is hit first and the slide
+    // along it is lost, and the buggy stops dead mid-drive.
     v.place();
     _desired.copy(v.vel).multiplyScalar(DT);
+    const fall = Math.min(_desired.y, 0);
+    _desired.y = Math.max(_desired.y, 0);
     this.vehicleController.computeColliderMovement(v.collider, _desired, undefined, VEHICLE_MOVE_GROUPS);
     const moved = this.vehicleController.computedMovement();
     v.vel.x = clipVelocity(v.vel.x, _desired.x, moved.x);
-    v.vel.y = clipVelocity(v.vel.y, _desired.y, moved.y);
     v.vel.z = clipVelocity(v.vel.z, _desired.z, moved.z);
     v.pos.x += moved.x;
     v.pos.y += moved.y;
     v.pos.z += moved.z;
-    v.grounded = this.vehicleController.computedGrounded();
+    let rose = moved.y;
     v.place();
+    // (Only when it's actually coming down: an empty second pass would snap a climbing helicopter
+    // straight back to the ground.)
+    if (fall < 0) {
+      _desired.set(0, fall, 0);
+      this.vehicleController.computeColliderMovement(v.collider, _desired, undefined, VEHICLE_MOVE_GROUPS);
+      const dropped = this.vehicleController.computedMovement().y;
+      v.pos.y += dropped;
+      rose += dropped;
+      v.place();
+    }
+    v.vel.y = clipVelocity(v.vel.y, v.vel.y * DT, rose);
+    v.grounded = this.vehicleController.computedGrounded();
     if (v.kind === 'car') this.tiltCar(v);
 
     if (mode !== 'authority') return;

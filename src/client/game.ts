@@ -328,6 +328,7 @@ export function startGame(ctx: GameContext, mapName: string, localId: string, tr
     const speed = me.vel.length();
     const horizontalSpeed = Math.hypot(me.vel.x, me.vel.z);
     const ride = me.alive && me.vehicle >= 0 ? sim.vehicles[me.vehicle] : null;
+    input.vehicleMode = !!ride;
     const rideSeat = ride ? ride.config.seats[me.seat] : null;
     vehicleView.update(alpha, dt);
 
@@ -503,6 +504,7 @@ export function startGame(ctx: GameContext, mapName: string, localId: string, tr
     },
     dispose() {
       window.removeEventListener('resize', resize);
+      input.vehicleMode = false;
       remoteView.dispose();
       rope.release();
       for (const s of [scene, viewModel.scene]) {
