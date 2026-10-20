@@ -22,6 +22,7 @@ import type { Store } from './store';
 /** Tags our Checkout Sessions in the Dashboard. */
 const INTEGRATION_ID = 'rocketjump_skins_qhzvtmwa';
 const PRICE_REFRESH = 60000; // ms between fetching prices again when one is missing
+const LOOKUP_KEYS_PER_LIST = 10; // the most lookup keys Stripe takes in one prices.list
 
 export const lookupKey = (sku: string) => `skin_${sku.replace(':', '_')}`;
 
@@ -67,9 +68,13 @@ export class Shop {
   private async price(sku: string) {
     if (!this.prices.has(sku) && Date.now() - this.pricesFetched > PRICE_REFRESH) {
       this.pricesFetched = Date.now();
-      const list = await this.stripe.prices.list({ lookup_keys: PREMIUM.map((s) => lookupKey(s.sku)), active: true, limit: 100 });
+      // (In batches: Stripe refuses more lookup keys than that in one call.)
+      const keys = PREMIUM.map((s) => lookupKey(s.sku));
+      const batches = [];
+      for (let i = 0; i < keys.length; i += LOOKUP_KEYS_PER_LIST) batches.push(keys.slice(i, i + LOOKUP_KEYS_PER_LIST));
+      const lists = await Promise.all(batches.map((lookup_keys) => this.stripe.prices.list({ lookup_keys, active: true, limit: 100 })));
       this.prices = new Map();
-      for (const price of list.data) {
+      for (const price of lists.flatMap((l) => l.data)) {
         const skin = PREMIUM.find((s) => lookupKey(s.sku) === price.lookup_key);
         if (skin) this.prices.set(skin.sku, { id: price.id, amount: price.unit_amount });
       }

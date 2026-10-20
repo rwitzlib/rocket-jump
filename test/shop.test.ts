@@ -24,6 +24,13 @@ function signedIn(store: Store, discordId = 'd1') {
 
 const session = (id: string, profile: string, sku: string, paid: boolean, pi = `pi_${id}`) => ({ id, object: 'checkout.session', metadata: { profile, sku }, payment_status: paid ? 'paid' : 'unpaid', payment_intent: pi });
 const event = (id: string, type: string, object: object) => ({ id, object: 'event', type, data: { object } }) as unknown as Stripe.Event;
+/** Stripe's prices.list, as far as the shop uses it: by lookup key, at most 10 at a time (as Stripe allows). */
+const fakePrices = {
+  list: async ({ lookup_keys = [] }: { lookup_keys?: string[] }) => {
+    if (lookup_keys.length > 10) throw new Error('Array lookup_keys exceeded maximum 10 allowed elements.');
+    return { data: PREMIUM.filter((s) => lookup_keys.includes(lookupKey(s.sku))).map((s) => ({ id: `price_${s.sku}`, lookup_key: lookupKey(s.sku), unit_amount: s.price })) };
+  },
+};
 
 test('premium skins are worn only once bought', () => {
   assert.ok(PREMIUM.length > 0);
@@ -137,7 +144,7 @@ test('checkout needs a sign-in and a skin not yet owned, and records the session
   const store = new Store(null);
   const created: Stripe.Checkout.SessionCreateParams[] = [];
   const fake = {
-    prices: { list: async () => ({ data: PREMIUM.map((s) => ({ id: `price_${s.sku}`, lookup_key: lookupKey(s.sku), unit_amount: s.price })) }) },
+    prices: fakePrices,
     checkout: {
       sessions: {
         create: async (params: Stripe.Checkout.SessionCreateParams) => {
@@ -179,7 +186,7 @@ test('a set owns the skins in it: worn, refused at checkout once all are owned, 
   const key = signedIn(store);
   const id = store.idFor(key);
   const fake = {
-    prices: { list: async () => ({ data: PREMIUM.map((s) => ({ id: `price_${s.sku}`, lookup_key: lookupKey(s.sku), unit_amount: s.price })) }) },
+    prices: fakePrices,
     checkout: { sessions: { create: async () => ({ id: 'cs_x', url: 'https://checkout.stripe.com/c/pay/test' }) } },
   } as unknown as Stripe;
   const shop = new Shop(fake, SECRET, store);
