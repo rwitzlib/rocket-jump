@@ -2030,9 +2030,10 @@ button.link {
 }
 
 .level-chip {
-  margin-left: 6px;
-  padding: 1px 7px;
-  border-radius: 9px;
+  flex: none;
+  padding: 4px 10px;
+  border-radius: 12px;
+  white-space: nowrap;
   background: rgba(255, 179, 71, 0.18);
   color: var(--accent-2);
   font-size: 11px;
