@@ -287,3 +287,34 @@ test('accounts, aliases and purchases survive a restart', () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('checkouts per profile are limited, and abandoned ones are forgotten', async () => {
+  const store = new Store(null);
+  let n = 0;
+  const fake = { prices: fakePrices, checkout: { sessions: { create: async () => ({ id: `cs_${++n}`, url: 'https://checkout.stripe.com/c/pay/test' }) } } } as unknown as Stripe;
+  const shop = new Shop(fake, SECRET, store);
+  const p = store.find(signedIn(store))!;
+  for (let i = 0; i < 10; i++) assert.ok('url' in (await shop.checkout(p, PREMIUM[0].sku, 'http://localhost:5173/')));
+  assert.equal(((await shop.checkout(p, PREMIUM[0].sku, 'http://localhost:5173/')) as { status: number }).status, 429);
+  // Three days on, the ones nobody paid for are gone (and don't count any more).
+  for (let i = 1; i <= 10; i++) store.purchase(`cs_${i}`)!.created -= 3 * 86400000;
+  assert.ok('url' in (await shop.checkout(p, PREMIUM[0].sku, 'http://localhost:5173/')));
+  assert.equal(store.purchase('cs_1'), undefined);
+  assert.ok(store.purchase(`cs_${n}`));
+});
+
+test("a webhook event that fails to apply isn't marked done, so Stripe's retry gets handled", () => {
+  const store = new Store(null);
+  const shop = new Shop(stripe, SECRET, store);
+  const real = store.settlePurchase.bind(store);
+  let fail = true;
+  store.settlePurchase = (...args) => {
+    if (fail) throw new Error('disk full');
+    return real(...args);
+  };
+  const e = event('evt_retry', 'checkout.session.completed', session('cs_r', 'someone', PREMIUM[0].sku, true));
+  assert.throws(() => shop.handle(e));
+  fail = false;
+  assert.match(shop.handle(e), /paid/);
+  assert.equal(shop.handle(e), 'already handled');
+});

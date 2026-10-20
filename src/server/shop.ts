@@ -23,6 +23,7 @@ import type { Store } from './store';
 const INTEGRATION_ID = 'rocketjump_skins_qhzvtmwa';
 const PRICE_REFRESH = 60000; // ms between fetching prices again when one is missing
 const LOOKUP_KEYS_PER_LIST = 10; // the most lookup keys Stripe takes in one prices.list
+const CHECKOUTS_PER_HOUR = 10; // per profile: plenty for someone shopping, not for filling the store
 
 export const lookupKey = (sku: string) => `skin_${sku.replace(':', '_')}`;
 
@@ -44,6 +45,7 @@ export class Shop {
     if (!skin) return { status: 404, error: 'There is no such skin.' };
     if (!p.account) return { status: 403, error: 'Sign in with Discord to buy skins.' };
     if (hasAll(sku, p.owned)) return { status: 409, error: skin.skus ? 'You have everything in that set already.' : 'You have that one already.' };
+    if (this.store.checkoutsSince(p.id, Date.now() - 3600000) >= CHECKOUTS_PER_HOUR) return { status: 429, error: "You've opened a lot of checkouts just now. Try again later." };
     const price = await this.price(sku);
     if (!price) {
       console.error(`No Stripe price with lookup key ${lookupKey(sku)}: run npm run stripe:setup`);
@@ -91,6 +93,16 @@ export class Shop {
   /** Handles one event (once: Stripe may send it again). Says what it did, for the log. */
   handle(event: Stripe.Event): string {
     if (this.store.seenEvent(event.id)) return 'already handled';
+    try {
+      return this.apply(event);
+    } catch (err) {
+      // (So Stripe's retry gets handled, rather than skipped as done.)
+      this.store.forgetEvent(event.id);
+      throw err;
+    }
+  }
+
+  private apply(event: Stripe.Event): string {
     switch (event.type) {
       case 'checkout.session.completed':
       case 'checkout.session.async_payment_succeeded':

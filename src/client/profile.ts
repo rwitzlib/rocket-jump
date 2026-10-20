@@ -87,10 +87,16 @@ const here = () => `${location.origin}${location.pathname}`;
 
 export const fetchProfile = (base: string, key: string) => post<ProfileView>(base, '/profile', { key });
 export const wearLook = (base: string, key: string, look: Look) => post<ProfileView>(base, '/profile/look', { key, ...look });
-const startSignIn = (base: string, key: string) => post<{ url: string }>(base, '/auth/discord', { key, returnTo: here() });
+/** Only Discord's sign-in page and Stripe's checkout: whatever server answered, never anywhere else. */
+function offsite(url: string, host: string): string {
+  const u = new URL(url);
+  if (u.protocol !== 'https:' || u.hostname !== host) throw new Error("That server sent an odd link, so it wasn't opened.");
+  return u.href;
+}
+const startSignIn = async (base: string, key: string) => offsite((await post<{ url: string }>(base, '/auth/discord', { key, returnTo: here() })).url, 'discord.com');
 const claimSignIn = (base: string, code: string, key: string) => post<{ key: string | null; name: string }>(base, '/auth/claim', { code, key });
 const signOut = (base: string, key: string) => post<{ ok: boolean }>(base, '/auth/signout', { key });
-const startCheckout = (base: string, key: string, sku: string) => post<{ url: string }>(base, '/shop/checkout', { key, sku, returnTo: here() });
+const startCheckout = async (base: string, key: string, sku: string) => offsite((await post<{ url: string }>(base, '/shop/checkout', { key, sku, returnTo: here() })).url, 'checkout.stripe.com');
 
 export interface Board {
   map: string;
@@ -204,7 +210,7 @@ export class ProfilePanel {
     if (!key || this.busy) return;
     this.busy = true;
     try {
-      location.href = (await startSignIn(this.base(), key)).url;
+      location.href = await startSignIn(this.base(), key);
     } catch (err) {
       this.notice = { text: (err as Error).message, error: true };
       this.render();
@@ -229,7 +235,7 @@ export class ProfilePanel {
     this.notice = { text: 'Opening checkout…' };
     this.render();
     try {
-      location.href = (await startCheckout(this.base(), key, sku)).url;
+      location.href = await startCheckout(this.base(), key, sku);
     } catch (err) {
       this.notice = { text: (err as Error).message, error: true };
       this.render();

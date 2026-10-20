@@ -78,6 +78,11 @@ export class RateLimiter {
     return true;
   }
 
+  /** Whether this address has used up its actions for now (without counting this as one). */
+  blocked(key: string, now = Date.now()): boolean {
+    return (this.hits.get(key) ?? []).filter((t) => now - t < this.windowMs).length >= this.max;
+  }
+
   /** Forgets addresses with nothing recent, then (if still too many) the least recently seen. */
   private prune(now: number) {
     for (const [key, times] of this.hits) if (times.every((t) => now - t >= this.windowMs)) this.hits.delete(key);
@@ -110,6 +115,43 @@ export class ConnectionCap {
 
   count(key: string): number {
     return this.open.get(key) ?? 0;
+  }
+}
+
+/**
+ * Messages one connection may send: a bucket of `burst` that refills at `rate` a second. A client
+ * sends an input a tick (60 a second), with bursts after a stall; anything past the bucket is
+ * dropped, and a connection that keeps flooding (`abuse` drops within a second) is told to go.
+ */
+export class MessageBudget {
+  private tokens: number;
+  private last: number;
+  private drops = 0;
+  private dropWindow = 0;
+
+  constructor(
+    private readonly rate = 120,
+    private readonly burst = 240,
+    private readonly abuse = 600,
+    now = Date.now(),
+  ) {
+    this.tokens = burst;
+    this.last = now;
+  }
+
+  /** 'ok' to handle the message, 'drop' to ignore it, 'abuse' to close the connection. */
+  take(now = Date.now()): 'ok' | 'drop' | 'abuse' {
+    this.tokens = Math.min(this.burst, this.tokens + ((now - this.last) / 1000) * this.rate);
+    this.last = now;
+    if (this.tokens >= 1) {
+      this.tokens--;
+      return 'ok';
+    }
+    if (now - this.dropWindow >= 1000) {
+      this.dropWindow = now;
+      this.drops = 0;
+    }
+    return ++this.drops > this.abuse ? 'abuse' : 'drop';
   }
 }
 

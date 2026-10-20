@@ -15,8 +15,8 @@ export interface RotationEntry {
 export function parseRotation(entries: string[], mode: GameMode = MATCH.mode): RotationEntry[] {
   return entries
     .map((e) => e.trim().split(':'))
-    .filter(([map]) => map in MAPS)
-    .map(([map, m]) => ({ map, mode: m && m in MODES ? (m as GameMode) : mode }));
+    .filter(([map]) => Object.hasOwn(MAPS, map))
+    .map(([map, m]) => ({ map, mode: m && Object.hasOwn(MODES, m) ? (m as GameMode) : mode }));
 }
 
 export const isTeamMode = (mode: GameMode) => MODES[mode].teams;

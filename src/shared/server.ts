@@ -49,6 +49,7 @@ interface Connection {
   token: string; // secret, from the welcome: lets a dropped connection take this player back
   away: number; // seconds left to reconnect after the connection dropped; 0 while connected
   lastVote: number; // ms timestamp of the last vote this person called
+  switches: number[]; // ms timestamps of their recent switches between playing and watching
   profile: string | null; // secret profile key: their stats are kept (online)
   look: string; // what they wear: "tint/trail"
   level: number; // their profile's level, for the scoreboard
@@ -106,6 +107,8 @@ const PING_INTERVAL = 2000; // ms
 const SKILL_CHECK = 20; // seconds between bot skill adjustments
 const SKILL_LADDER: BotSkill[] = ['easy', 'normal', 'hard'];
 const CHAT_INTERVAL = 600; // ms a player must wait between chat lines
+/** Switches between playing and watching (each one tells everyone): at most this many in this long. */
+const SPECTATE_SWITCHES = { max: 4, window: 10000 };
 
 const now = () => performance.now();
 /** Race paths are kept a sample every this many ticks. */
@@ -293,9 +296,14 @@ export class GameServer {
         for (const other of this.connections.keys()) this.send(other, { type: 'chat', id, name: conn.name, text });
         break;
       }
-      case 'spectate':
+      case 'spectate': {
+        const t = now();
+        conn.switches = conn.switches.filter((s) => t - s < SPECTATE_SWITCHES.window);
+        if (conn.switches.length >= SPECTATE_SWITCHES.max) return this.tell(id, 'Give it a few seconds before switching again.');
+        if (msg.on !== conn.spectator) conn.switches.push(t);
         this.setSpectating(id, conn, msg.on);
         break;
+      }
     }
   }
 
@@ -343,6 +351,7 @@ export class GameServer {
       token: randomToken(),
       away: 0,
       lastVote: -Infinity,
+      switches: [],
       profile: null,
       look: encodeLook(DEFAULT_LOOK),
       level: 0,

@@ -8,7 +8,7 @@ import { parseRoomRequest, Rooms } from '../src/shared/rooms';
 import { GameServer, type ServerOptions } from '../src/shared/server';
 import type { SimEvent } from '../src/shared/sim';
 import type { StatEvent } from '../src/shared/progress';
-import { basicPassword, clientAddr, ConnectionCap, isCloudflare, RateLimiter, sameSecret, securityHeaders } from '../src/server/guard';
+import { basicPassword, clientAddr, ConnectionCap, isCloudflare, MessageBudget, RateLimiter, sameSecret, securityHeaders } from '../src/server/guard';
 import { newKey, Store } from '../src/server/store';
 import './helpers';
 
@@ -198,4 +198,45 @@ test("a room whose tick throws is reported, and the others keep going", () => {
   rooms.tick();
   assert.deepEqual(errors, [broken.code]);
   assert.equal(ticked, 1, 'the room after it still ticked');
+});
+
+test('room requests and rotations only take real modes and maps, not names off Object.prototype', () => {
+  for (const sneaky of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
+    assert.equal(parseRoomRequest({ mode: sneaky, map: 'arena' }), null, sneaky);
+    assert.equal(parseRoomRequest({ mode: 'ffa', map: sneaky }), null, sneaky);
+  }
+  assert.ok(parseRoomRequest({ mode: 'ffa', map: 'arena' }));
+});
+
+test('a rate limiter can say an address is blocked without counting that as a try', () => {
+  const misses = new RateLimiter(2, 60000);
+  assert.equal(misses.blocked('a', 0), false);
+  misses.allow('a', 0);
+  misses.allow('a', 0);
+  for (let i = 0; i < 5; i++) assert.equal(misses.blocked('a', 1000), true);
+  assert.equal(misses.blocked('a', 60001), false, 'free again once the window passes');
+  assert.equal(misses.blocked('b', 1000), false);
+});
+
+test('a connection may send an input a tick with room for bursts; a flood is dropped, then closed', () => {
+  const budget = new MessageBudget(120, 240, 600, 0);
+  // Steady play: 60 a second for ten seconds, all through.
+  for (let i = 0; i < 600; i++) assert.equal(budget.take((i * 1000) / 60), 'ok');
+  // A burst after a stall: the bucket covers it.
+  for (let i = 0; i < 200; i++) assert.equal(budget.take(10000), 'ok');
+  // A flood: past the bucket it's dropped, and soon the connection goes.
+  const results = Array.from({ length: 1000 }, () => budget.take(10001));
+  assert.ok(results.includes('drop'));
+  assert.equal(results.at(-1), 'abuse');
+});
+
+test("switching between playing and watching is limited, so it can't spam everyone's chat", () => {
+  const sent: { id: string; text: string }[] = [];
+  const server = new GameServer((id, msg) => msg.type === 'chat' && sent.push({ id, text: msg.text }), { maps: ['arena'], minPlayers: 0 } as Partial<ServerOptions>);
+  server.receive('p1', { type: 'join', name: 'Ann', version: PROTOCOL_VERSION, spectate: false });
+  server.receive('p2', { type: 'join', name: 'Bo', version: PROTOCOL_VERSION, spectate: false });
+  sent.length = 0;
+  for (let i = 0; i < 50; i++) server.receive('p1', { type: 'spectate', on: i % 2 === 0 });
+  const toBo = sent.filter((m) => m.id === 'p2');
+  assert.equal(toBo.length, 4, 'only the first few switches told anyone');
 });

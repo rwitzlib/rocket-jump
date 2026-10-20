@@ -62,7 +62,7 @@ export interface Room {
 export function parseRoomRequest(data: unknown): RoomRequest | null {
   if (!data || typeof data !== 'object') return null;
   const r = data as Record<string, unknown>;
-  const mode = typeof r.mode === 'string' && r.mode in MODES ? (r.mode as GameMode) : null;
+  const mode = typeof r.mode === 'string' && Object.hasOwn(MODES, r.mode) ? (r.mode as GameMode) : null;
   const custom = r.map === 'custom' ? sanitizeMap(r.custom) : null;
   const map = typeof r.map === 'string' && (r.map === 'rotation' || PLAYABLE_MAPS.includes(r.map) || custom) ? r.map : null;
   if (!mode || !map) return null;

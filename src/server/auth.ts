@@ -17,6 +17,7 @@ import { randomBytes } from 'node:crypto';
 
 const STATE_LIFE = 10 * 60000; // ms to finish signing in
 const CLAIM_LIFE = 2 * 60000;
+const MAX_PENDING = 5000; // sign-ins under way at once; past that, the oldest are dropped
 
 export interface DiscordConfig {
   clientId: string;
@@ -60,6 +61,10 @@ export class DiscordAuth {
     this.expire();
     const state = token();
     this.pending.set(state, { profile, returnTo, expires: Date.now() + STATE_LIFE });
+    for (const k of this.pending.keys()) {
+      if (this.pending.size <= MAX_PENDING) break;
+      this.pending.delete(k);
+    }
     const q = new URLSearchParams({
       client_id: this.config.clientId,
       response_type: 'code',
@@ -89,6 +94,7 @@ export class DiscordAuth {
       return `${pending.returnTo}#signin-error=failed`;
     }
     const claim = token();
+    this.expire();
     this.claims.set(claim, { profile: pending.profile, user, expires: Date.now() + CLAIM_LIFE });
     return `${pending.returnTo}#signin=${claim}`;
   }

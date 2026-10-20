@@ -6,11 +6,11 @@ import { gzipSync } from 'node:zlib';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { DT, MATCH, MODES, type GameMode } from '../shared/config';
 import { MAPS, PLAYABLE_MAPS } from '../shared/map';
-import { VOTE_KICK } from '../shared/moderation';
+import { isOffensive, VOTE_KICK } from '../shared/moderation';
 import Stripe from 'stripe';
 import { decodeLook, encodeLook, levelOf, newProfile, viewProfile, wornLook, type Profile } from '../shared/progress';
 import { DiscordAuth, safeReturn } from './auth';
-import { basicPassword, clientAddr, ConnectionCap, RateLimiter, sameSecret, securityHeaders } from './guard';
+import { basicPassword, clientAddr, ConnectionCap, MessageBudget, RateLimiter, sameSecret, securityHeaders } from './guard';
 import { Shop } from './shop';
 import { Store } from './store';
 import { Analytics, CLIENT_EVENTS, statsPage, type ClientEvent } from './analytics';
@@ -79,6 +79,8 @@ const PORT = env('PORT', 8080);
 const HOST = process.env.HOST ?? '0.0.0.0';
 const STATIC_DIR = resolve(process.env.STATIC_DIR ?? 'dist');
 const MAX_MESSAGE = 16 * 1024; // bytes: an input packet is well under 1 KB
+const MAX_BUFFERED = 4 * 1024 * 1024; // bytes waiting to go to one client before it's dropped
+const ROOMS_PER_ADDRESS = 2; // rooms one address may have open at once
 const JOIN_DEADLINE = 10000; // ms a new connection has to say who it is
 const TRUST_PROXY = Math.max(0, Math.floor(env('TRUST_PROXY', 0)));
 const TRUST_CLOUDFLARE = process.env.TRUST_CLOUDFLARE === '1' || process.env.TRUST_CLOUDFLARE === 'true';
@@ -146,6 +148,8 @@ const rooms = new Rooms(
     // A client that can't keep up (a huge send buffer) gets skipped snapshots rather than a growing backlog.
     if (!socket || socket.ws.readyState !== socket.ws.OPEN) return;
     if (msg.type === 'snapshot' && socket.ws.bufferedAmount > 256 * 1024) return;
+    // One that stops reading altogether would hold the rest in memory for ever: let it go.
+    if (socket.ws.bufferedAmount > MAX_BUFFERED) return void socket.ws.terminate();
     const data = socket.wire.encode(msg);
     bytesOut += data.length;
     socket.ws.send(data);
@@ -211,6 +215,11 @@ const roomsOpened = new RateLimiter(3, 60000);
 const menuEvents = new RateLimiter(30, 60000);
 const accountTries = new RateLimiter(10, 60000);
 const profileWrites = new RateLimiter(30, 60000);
+/** Wrong room codes and wrong stats passwords, so neither can be guessed by trying them all. */
+const roomMisses = new RateLimiter(20, 60000);
+const statsMisses = new RateLimiter(10, 60000);
+/** Who opened each room that's still open (by code), so one address can't hold them all. */
+const roomOwners = new Map<string, string>();
 /** WebSockets open per address. */
 const connections = new ConnectionCap(Math.max(1, env('MAX_CONNECTIONS_PER_ADDRESS', 8)));
 
@@ -392,9 +401,12 @@ function openRoom(req: import('node:http').IncomingMessage, res: import('node:ht
       }
       const request = parseRoomRequest(parsed);
       if (!request) return json(res, 400, { error: 'That room request makes no sense.' });
+      for (const code of roomOwners.keys()) if (!rooms.get(code)) roomOwners.delete(code);
+      if ([...roomOwners.values()].filter((owner) => owner === addr).length >= ROOMS_PER_ADDRESS) return json(res, 429, { error: 'You have rooms open already. Play in one of those, or wait for one to close.' });
       if (!roomsOpened.allow(addr)) return json(res, 429, { error: "You've opened a few rooms just now. Try again in a minute." });
       const room = rooms.create(request);
       if ('error' in room) return json(res, 503, room);
+      roomOwners.set(room.code, addr);
       log('room', { code: room.code, name: room.name, mode: request.mode, map: request.map, private: request.private, addr });
       json(res, 201, { code: room.code });
     }),
@@ -417,6 +429,10 @@ function staticFile(file: string) {
 }
 
 const http = createServer((req, res) => guarded(res, () => serve(req, res)));
+// Slow clients (headers or bodies trickled in a byte at a time) don't get to hold sockets for minutes.
+http.headersTimeout = 10000;
+http.requestTimeout = 30000;
+http.maxHeadersCount = 50;
 
 function serve(req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) {
   const url = new URL(req.url ?? '/', 'http://localhost');
@@ -454,9 +470,14 @@ function serve(req: import('node:http').IncomingMessage, res: import('node:http'
   // password: a header, so the key isn't left in proxy logs and browser history. Off unless set.
   if (url.pathname === '/stats') {
     if (!STATS_KEY) return json(res, 404, { error: 'Not found' });
+    const addr = addrOf(req);
+    if (statsMisses.blocked(addr)) return json(res, 429, { error: 'Too many tries just now. Wait a minute.' });
     const given = basicPassword(req.headers.authorization);
     if (given === null || !sameSecret(given, STATS_KEY)) {
-      if (given !== null) log('stats-denied', { addr: addrOf(req) });
+      if (given !== null) {
+        statsMisses.allow(addr);
+        log('stats-denied', { addr });
+      }
       res.writeHead(401, { ...API_HEADERS, 'www-authenticate': 'Basic realm="Rocket Jump stats", charset="UTF-8"', 'content-type': 'text/plain', 'cache-control': 'no-store' }).end('Sign in with the stats key as the password.');
       return;
     }
@@ -480,7 +501,7 @@ function serve(req: import('node:http').IncomingMessage, res: import('node:http'
   if (url.pathname === '/leaderboard') {
     const map = url.searchParams.get('map');
     if (map) {
-      if (!(map in MAPS)) return json(res, 404, { error: 'No such map.' });
+      if (!Object.hasOwn(MAPS, map)) return json(res, 404, { error: 'No such map.' });
       const board = store.board(map);
       const ghost = url.searchParams.get('ghost') && board.ghost ? { ...board.ghost, name: board.laps[0]?.name ?? '' } : undefined;
       return json(res, 200, { map, laps: board.laps, ghost });
@@ -556,8 +577,14 @@ wss.on('connection', (ws, req) => {
   }
   ws.once('close', () => connections.remove(addr));
   const code = new URL(req.url ?? '/', 'http://localhost').searchParams.get('room') ?? MAIN_ROOM;
+  // (Private rooms are found only by their code: too many wrong ones and the address waits.)
+  if (code.toLowerCase() !== MAIN_ROOM && roomMisses.blocked(addr)) {
+    ws.close(4429, 'Too many wrong room codes. Wait a minute.');
+    return;
+  }
   const room = rooms.get(code);
   if (!room) {
+    roomMisses.allow(addr);
     ws.close(4404, 'There is no room with that code. It may have closed.');
     return;
   }
@@ -577,7 +604,14 @@ wss.on('connection', (ws, req) => {
   }, JOIN_DEADLINE);
   ws.once('close', () => clearTimeout(deadline));
 
+  const budget = new MessageBudget();
   ws.on('message', (data, isBinary) => {
+    const allowed = budget.take();
+    if (allowed === 'abuse') {
+      log('flood', { id, room: room.code, addr });
+      return void ws.terminate();
+    }
+    if (allowed === 'drop') return;
     try {
       receive(data as Buffer, isBinary);
     } catch (err) {
@@ -618,7 +652,8 @@ wss.on('connection', (ws, req) => {
     // saved profile only once it earns something, so made-up keys don't pile up.)
     if (msg.type === 'join' && msg.profile && !socket.profile) {
       socket.profile = msg.profile;
-      const p = store.find(msg.profile) ? store.profile(msg.profile, msg.name) : newProfile(Store.idOf(msg.profile), msg.name, Date.now());
+      const name = isOffensive(msg.name) ? '' : msg.name; // (the game gives them another; the profile keeps its own)
+      const p = store.find(msg.profile) ? store.profile(msg.profile, name) : newProfile(Store.idOf(msg.profile), name, Date.now());
       game.setLook(id, encodeLook(wornLook(p)), levelOf(p.xp));
     }
   };

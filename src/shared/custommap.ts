@@ -113,9 +113,32 @@ const fromBase64Url = (text: string) => {
   return Uint8Array.from(s, (c) => c.charCodeAt(0));
 };
 
-async function pipe(bytes: Uint8Array, stream: CompressionStream | DecompressionStream): Promise<Uint8Array> {
-  const out = new Response(new Blob([bytes as BlobPart]).stream().pipeThrough(stream));
-  return new Uint8Array(await out.arrayBuffer());
+/** The most a map code may be, and decompress to: a full map is well under both. */
+const MAX_CODE = 200 * 1024;
+const MAX_JSON = 1024 * 1024;
+
+async function pipe(bytes: Uint8Array, stream: CompressionStream | DecompressionStream, max = Infinity): Promise<Uint8Array> {
+  const reader = new Blob([bytes as BlobPart]).stream().pipeThrough(stream).getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.length;
+    // (A tiny code can inflate to gigabytes: stop reading rather than run out of memory.)
+    if (size > max) {
+      void reader.cancel();
+      throw new RangeError('map code too big');
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(size);
+  let at = 0;
+  for (const c of chunks) {
+    out.set(c, at);
+    at += c.length;
+  }
+  return out;
 }
 
 /** A map as a compact text code: compressed JSON, base64url. */
@@ -127,7 +150,8 @@ export async function encodeMapCode(map: MapDef): Promise<string> {
 /** A map back from its code, checked; null if the code is broken. */
 export async function decodeMapCode(code: string): Promise<MapDef | null> {
   try {
-    const json = await pipe(fromBase64Url(code.trim()), new DecompressionStream('deflate-raw'));
+    if (code.length > MAX_CODE) return null;
+    const json = await pipe(fromBase64Url(code.trim()), new DecompressionStream('deflate-raw'), MAX_JSON);
     return sanitizeMap(JSON.parse(new TextDecoder().decode(json)));
   } catch {
     return null;

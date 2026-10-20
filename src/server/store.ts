@@ -17,6 +17,8 @@ const SAVE_DELAY = 5000; // ms
 const BOARD_SIZE = 20;
 const FORGET_AFTER = 60 * 86400000; // profiles that never earned anything go after 60 days unseen
 const HANDLED_EVENTS = 2000;
+/** A checkout nobody finished is forgotten after this (Stripe's own sessions expire after a day). */
+const STALE_CHECKOUT = 2 * 86400000;
 
 interface Board {
   laps: LapRecord[]; // best first, one per profile
@@ -189,8 +191,19 @@ export class Store {
 
   /** A Checkout Session was opened for a skin. */
   addPurchase(session: string, profile: string, sku: string) {
-    this.purchases.set(session, { session, profile, sku, status: 'pending', paymentIntent: null, created: Date.now() });
+    const now = Date.now();
+    // (Abandoned checkouts would otherwise pile up for ever. A late payment for one still counts:
+    // settlePurchase works from the session's own metadata.)
+    for (const [id, x] of this.purchases) if (x.status === 'pending' && !x.paymentIntent && now - x.created > STALE_CHECKOUT) this.purchases.delete(id);
+    this.purchases.set(session, { session, profile, sku, status: 'pending', paymentIntent: null, created: now });
     this.changed();
+  }
+
+  /** How many checkouts this profile has opened since then, finished or not. */
+  checkoutsSince(profile: string, since: number): number {
+    let n = 0;
+    for (const x of this.purchases.values()) if (x.profile === profile && x.created >= since) n++;
+    return n;
   }
 
   /**
@@ -228,6 +241,12 @@ export class Store {
     }
     this.changed();
     return purchase;
+  }
+
+  /** Handling a Stripe event failed: it may be handled when Stripe sends it again. */
+  forgetEvent(id: string) {
+    const i = this.events.lastIndexOf(id);
+    if (i >= 0) this.events.splice(i, 1);
   }
 
   /** Whether a Stripe event was handled already; marks it handled. */
