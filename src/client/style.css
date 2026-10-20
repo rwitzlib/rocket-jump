@@ -2163,6 +2163,53 @@ button.link {
   cursor: not-allowed;
 }
 
+/* Skins tab: the list, and the character wearing them beside it. */
+.skins-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 230px;
+  gap: 18px;
+  align-items: start;
+}
+
+/* (Hints elsewhere tuck up under the field above; here that would run into the last row of skins.) */
+.skins-list > .hint {
+  margin: 12px 0 0;
+}
+
+.skins-side {
+  position: sticky;
+  top: 0;
+  text-align: center;
+}
+
+.skins-side .hint {
+  margin: 6px 0 0;
+  font-size: 12px;
+}
+
+.skin-preview {
+  display: block;
+  width: 100%;
+  height: 340px;
+  border-radius: 10px;
+  background: radial-gradient(ellipse at 50% 70%, rgba(255, 179, 71, 0.1), rgba(255, 255, 255, 0.02) 70%);
+}
+
+@media (max-width: 640px) {
+  .skins-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .skins-side {
+    position: static;
+    order: -1;
+  }
+
+  .skin-preview {
+    height: 220px;
+  }
+}
+
 /* Premium skins: a price tag until bought. */
 .look.premium {
   border-color: rgba(255, 207, 122, 0.45);

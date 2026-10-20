@@ -1,6 +1,7 @@
 import { MAPS, PLAYABLE_MAPS } from '../shared/map';
 import { EXPLOSIONS, formatPrice, PREMIUM, TINTS, TRAILS, type LapRecord, type Look, type ProfileView } from '../shared/progress';
 import { formatLap } from './objectives';
+import { SkinPreview } from './skinpreview';
 
 // The player's online profile, as the menu shows it: level and XP, lifetime stats, the day's and
 // week's challenges, the skins their level has unlocked, and the race records on every map. The
@@ -104,6 +105,8 @@ export class ProfilePanel {
   /** A line under the skins: how a sign-in or purchase went. */
   private notice: { text: string; error?: boolean } | null = null;
   private busy = false;
+  /** The character beside the Skins tab: made the first time the tab opens. */
+  private preview: SkinPreview | null = null;
 
   constructor(
     private readonly base: () => string,
@@ -256,7 +259,7 @@ export class ProfilePanel {
     if (!v) return;
     if (this.tab === 'overview') this.body.replaceChildren(...this.overview(v));
     else if (this.tab === 'challenges') this.body.replaceChildren(...this.challenges(v));
-    else if (this.tab === 'skins') this.body.replaceChildren(...this.skins(v));
+    else if (this.tab === 'skins') this.showSkins(v);
     else void this.records();
   }
 
@@ -312,6 +315,20 @@ export class ProfilePanel {
     return out;
   }
 
+  /** The skins, with the character wearing them alongside. */
+  private showSkins(v: ProfileView) {
+    this.preview ??= new SkinPreview();
+    this.preview.wear(v.look);
+    const side = el('div', 'skins-side');
+    side.append(this.preview.canvas, el('p', 'hint', 'Hover a skin to try it on.'));
+    const list = el('div', 'skins-list');
+    list.append(...this.skins(v));
+    const layout = el('div', 'skins-layout');
+    layout.append(list, side);
+    this.body.replaceChildren(layout);
+    this.preview.start();
+  }
+
   private skins(v: ProfileView): HTMLElement[] {
     const pick = async (look: Look) => {
       const key = profileKey();
@@ -341,6 +358,13 @@ export class ProfilePanel {
         else if (premium) b.append(el('span', 'owned-tag', '★'));
         b.title = locked ? `${item.name}: unlocks at level ${item.level}` : forSale ? (v.account ? `Buy ${item.name} for ${formatPrice(item.price!)}` : `${item.name}: sign in with Discord to buy it`) : item.name;
         b.disabled = locked;
+        // Trying it on: the character wears it while it's hovered (or focused), bought or not.
+        const tryOn = () => this.preview?.wear(wear(item.id));
+        const takeOff = () => this.preview?.wear(this.view?.look ?? v.look);
+        b.addEventListener('pointerenter', tryOn);
+        b.addEventListener('focus', tryOn);
+        b.addEventListener('pointerleave', takeOff);
+        b.addEventListener('blur', takeOff);
         b.addEventListener('click', () => {
           if (!forSale) void pick(wear(item.id));
           else if (v.account) void this.buy(sku);
@@ -370,7 +394,7 @@ export class ProfilePanel {
         v.look.explosion,
         (id) => ({ ...v.look, explosion: id as Look['explosion'] }),
       ),
-      el('p', 'hint', `Armor color shows outside team games. Everyone sees your trail. More explosions are on the way.${v.shop ? ' Gold-edged skins are premium: buying one supports the game.' : ''}`),
+      el('p', 'hint', `Armor color shows outside team games. Everyone sees your trail and explosion. ${v.shop ? ' Gold-edged skins are premium: buying one keeps the servers running.' : ''}`),
     ];
   }
 
