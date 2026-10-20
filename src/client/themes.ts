@@ -58,4 +58,31 @@ export const THEMES: Record<string, Theme> = {
     fog: [1.0, 3.6],
     exposure: 1.05,
   },
+  // Foundry: a dim steel hall lit orange from the pit below, a hazy sky through the roof girders.
+  foundry: {
+    sky: { top: 0x2a3446, horizon: 0x8a6a58, bottom: 0x3a2a24, sunColor: 0xffb070, sunSize: 0.0012, clouds: 0.7, cloudColor: 0x9a8a80, cloudShade: 0x5a4a48 },
+    sunDir: [20, 70, 30],
+    sun: { color: 0xffd0a0, intensity: 1.9 },
+    hemi: { sky: 0xb0b8d0, ground: 0xa05a30, intensity: 1.5 },
+    fog: [0.8, 2.6],
+    exposure: 1.05,
+  },
+  // Coliseum: a clear moonlit night, the arena lit by torches.
+  night: {
+    sky: { top: 0x0a1230, horizon: 0x3a4a78, bottom: 0x1a2038, sunColor: 0xdde8ff, sunSize: 0.0009, clouds: 0.2, cloudColor: 0x5a6a90, cloudShade: 0x2a3050 },
+    sunDir: [-30, 50, 40],
+    sun: { color: 0xb8c8ff, intensity: 1.5 },
+    hemi: { sky: 0x8090c8, ground: 0x5a4a38, intensity: 1.3 },
+    fog: [1.2, 4],
+    exposure: 1.15,
+  },
+  // Canyon: a hot, hazy desert noon.
+  desert: {
+    sky: { top: 0x4a8ad8, horizon: 0xf0d8b0, bottom: 0xc8a070, sunColor: 0xfff4d8, sunSize: 0.0015, clouds: 0.15, cloudColor: 0xffffff, cloudShade: 0xe0c8b0 },
+    sunDir: [30, 75, -20],
+    sun: { color: 0xfff0d8, intensity: 2.7 },
+    hemi: { sky: 0xd8e8ff, ground: 0x9a6040, intensity: 1.4 },
+    fog: [1.2, 3.5],
+    exposure: 1,
+  },
 };

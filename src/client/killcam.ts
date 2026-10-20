@@ -99,6 +99,16 @@ export class KillcamRecorder {
     });
   }
 
+  /** A copy of the stretch from `from` to `to`, to replay later (the play of the match). */
+  snapshot(from: number, to: number): KillcamRecorder {
+    const copy = new KillcamRecorder();
+    copy.frames.push(...this.frames.filter((f) => f.t >= from && f.t <= to));
+    copy.blasts.push(...this.blasts.filter((b) => b.t >= from && b.t <= to));
+    copy.shots.push(...this.shots.filter((s) => s.t >= from && s.t <= to));
+    copy.clock = to;
+    return copy;
+  }
+
   /** Explosions that went off in (from, to]. */
   blastsBetween(from: number, to: number): readonly Blast[] {
     return this.blasts.filter((b) => b.t > from && b.t <= to);

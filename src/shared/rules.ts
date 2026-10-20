@@ -1,7 +1,7 @@
 import { Vector3 } from 'three';
-import { CTF, DT, ITEMS, PLAYER, RACE } from './config';
+import { CTF, DT, ITEMS, KOTH, PLAYER, RACE } from './config';
 import type { ItemKind } from './map';
-import { flagBases, raceCourse, type RaceCourse } from './modes';
+import { flagBases, hillSpots, raceCourse, type RaceCourse } from './modes';
 import { segmentDistance } from './physics';
 import type { PlayerSim } from './player';
 import type { SimEvent } from './events';
@@ -44,14 +44,67 @@ export class ModeRules {
   /** Red's then blue's, in capture the flag (the same two exist in every mode, unused). */
   readonly flags: Flag[];
   readonly course: RaceCourse;
-  /** Captures in capture the flag, kills in team deathmatch. */
+  /** Captures in capture the flag, kills in team deathmatch, rounds in elimination. */
   readonly teamScores = [0, 0];
+  /** King of the hill: where it can be, and which spot it's on now. */
+  readonly hills: Vector3[];
+  hillIndex = 0;
+  private hillClock = 0;
+  private holder: string | null = null;
+  private contested = false;
 
   constructor(private readonly sim: GameSim) {
     const map = sim.map;
     this.items = (map.items ?? []).map((d) => ({ kind: d.kind, pos: new Vector3(d.pos[0], d.pos[1] + ITEM_HEIGHT, d.pos[2]), respawnIn: 0 }));
     this.flags = flagBases(map).map((pos, team) => ({ team, home: new Vector3(...pos), pos: new Vector3(...pos), carrier: null, atHome: true, returnIn: 0 }));
     this.course = raceCourse(map);
+    this.hills = hillSpots(map).map((h) => new Vector3(...h));
+  }
+
+  get hill(): Vector3 {
+    return this.hills[this.hillIndex % this.hills.length];
+  }
+
+  /** Whether a living player stands on the hill. */
+  onHill(p: PlayerSim): boolean {
+    const h = this.hill;
+    const feet = p.pos.y - FEET;
+    return p.alive && Math.hypot(p.pos.x - h.x, p.pos.z - h.z) < KOTH.radius && feet > h.y - 1 && feet < h.y + KOTH.height;
+  }
+
+  /** A new match: the hill back to its first spot. */
+  resetHill() {
+    this.hillIndex = 0;
+    this.hillClock = 0;
+    this.holder = null;
+    this.contested = false;
+  }
+
+  /**
+   * King of the hill, server only: whoever is alone on the hill scores, a second at a time. Two or
+   * more on it is contested: nobody scores. The hill moves on every so often.
+   */
+  stepHill(events: SimEvent[]) {
+    this.hillClock += DT;
+    if (this.hillClock >= KOTH.moveEvery) {
+      this.hillClock = 0;
+      this.hillIndex = (this.hillIndex + 1) % this.hills.length;
+    }
+    let on: PlayerSim | null = null;
+    let count = 0;
+    for (const p of this.sim.players.values()) {
+      if (!this.onHill(p)) continue;
+      on = p;
+      count++;
+    }
+    const holder = count === 1 ? on!.id : null;
+    const contested = count > 1;
+    if (holder !== this.holder || contested !== this.contested) {
+      this.holder = holder;
+      this.contested = contested;
+      events.push({ type: 'hill', playerId: holder, contested });
+    }
+    if (count === 1) on!.points += DT;
   }
 
   /** True if a living player's capsule is within `reach` of a point. */

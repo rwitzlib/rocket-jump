@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import { PLAYER, TEAMS } from '../shared/config';
+import { PALETTE } from './palette';
+import { TINTS, type Look } from '../shared/progress';
 import type { WeaponId } from '../shared/types';
 import type { RemotePlayer } from './net/netclient';
 import { buildGauntlet, buildHookHead, LAUNCHER, PRIMARY_MODELS } from './weapons';
@@ -13,8 +15,10 @@ import { buildFlagModel } from './objectives';
 // from the interpolated movement; the gauntlet swings to point along the rope while grappling.
 
 const COLORS = [0x3d9cf0, 0xf0a830, 0xa860f0, 0x40c878, 0xf05a80, 0x30c8d0];
-/** Colors by index: the free-for-all palette, then red and blue for teams. */
-const ALL_COLORS = [...COLORS, ...TEAMS.map((t) => t.color)];
+/** Armor colors players can pick (after 'auto'), from their profile. */
+const TINT_COLORS = TINTS.slice(1).map((t) => t.color);
+/** Colors by index: the free-for-all palette, then red and blue for teams, then the picked tints. */
+const ALL_COLORS = [...COLORS, ...TEAMS.map((t) => t.color), ...TINT_COLORS];
 const OVERDRIVE_COLOR = 0xff40d0;
 
 const TAG_HEIGHT = 0.045; // with no size attenuation: about 2% of the screen height at a 90° FOV
@@ -139,6 +143,8 @@ export class RemotePlayersView {
   castLevel: ((from: THREE.Vector3, dir: THREE.Vector3, max: number, outNormal: THREE.Vector3) => number | null) | null = null;
   /** Display names by player id, for the tags over their heads. */
   names: ReadonlyMap<string, string> = new Map();
+  /** What players wear (their profile's look), by id. */
+  looks: ReadonlyMap<string, Look> = new Map();
   /** Teams by player id, in team modes: their armor takes the team's color. */
   teams: ReadonlyMap<string, number> = new Map();
   /** Our own team (-1 outside team modes, or watching): name tags read white for allies, red for enemies. */
@@ -304,7 +310,11 @@ export class RemotePlayersView {
 
   private colorIndex(id: string): number {
     const team = this.teams.get(id) ?? -1;
-    return team >= 0 ? COLORS.length + team : teamIndex(id);
+    if (team >= 0) return COLORS.length + team;
+    // Outside team modes, the armor color they picked (if any).
+    const tint = this.looks.get(id)?.tint;
+    const picked = tint && tint !== 'auto' ? TINTS.findIndex((t) => t.id === tint) : -1;
+    return picked > 0 ? COLORS.length + TEAMS.length + picked - 1 : teamIndex(id);
   }
 
   /** Hides (or shows again) everyone and every corpse: the killcam draws its own copies meanwhile. */
@@ -548,8 +558,8 @@ export class RemotePlayersView {
   private tagColor(id: string): string {
     const team = this.teams.get(id) ?? -1;
     if (team < 0) return '#fff';
-    if (this.localTeam < 0) return team === 0 ? '#ff8a7a' : '#7ab4ff';
-    return team === this.localTeam ? '#fff' : '#ff4a3a';
+    if (this.localTeam < 0) return PALETTE.teamTags[team] ?? '#fff';
+    return team === this.localTeam ? '#fff' : PALETTE.enemyTag;
   }
 
   private setTag(e: Entry, name: string, color: string) {

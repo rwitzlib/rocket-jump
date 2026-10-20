@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { DT, PLAYER, RACE, TEAMS } from '../shared/config';
+import { DT, KOTH, PLAYER, RACE, TEAMS } from '../shared/config';
 import type { FlagState } from '../shared/protocol';
 import type { Item } from '../shared/sim';
 import type { RaceCourse } from '../shared/modes';
@@ -230,6 +230,48 @@ export class RaceView {
   }
 }
 
+/**
+ * King of the hill: a glowing ring on the floor where the hill is, with a column of light over it,
+ * colored by who has it: white for nobody, green for you, red for someone else, yellow contested.
+ */
+export class HillView {
+  private readonly group = new THREE.Group();
+  private readonly ring: THREE.Mesh<THREE.TorusGeometry, THREE.MeshBasicMaterial>;
+  private readonly column: THREE.Mesh<THREE.CylinderGeometry, THREE.MeshBasicMaterial>;
+  private time = 0;
+
+  constructor(
+    scene: THREE.Scene,
+    private readonly spots: readonly THREE.Vector3[],
+  ) {
+    this.ring = new THREE.Mesh(new THREE.TorusGeometry(KOTH.radius, 0.12, 8, 64), new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, depthWrite: false }));
+    this.ring.rotation.x = Math.PI / 2;
+    this.ring.position.y = 0.08;
+    const column = new THREE.CylinderGeometry(KOTH.radius, KOTH.radius, KOTH.height, 48, 1, true);
+    column.translate(0, KOTH.height / 2, 0);
+    this.column = new THREE.Mesh(column, new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.08, depthWrite: false, side: THREE.DoubleSide }));
+    this.group.add(this.ring, this.column);
+    this.group.renderOrder = 2;
+    scene.add(this.group);
+  }
+
+  /** Where the hill is now: its floor center. */
+  get position(): THREE.Vector3 {
+    return this.group.position;
+  }
+
+  update(dt: number, index: number, state: 'free' | 'mine' | 'theirs' | 'contested') {
+    this.time += dt;
+    const spot = this.spots[Math.max(0, index) % this.spots.length];
+    this.group.position.copy(spot);
+    const color = state === 'mine' ? 0x60ff90 : state === 'theirs' ? 0xff5a4a : state === 'contested' ? 0xffe060 : 0xffffff;
+    const pulse = 1 + Math.sin(this.time * (state === 'free' ? 2 : 6)) * 0.25;
+    this.ring.material.color.set(color).multiplyScalar(1.4 * pulse);
+    this.column.material.color.set(color);
+    this.column.material.opacity = 0.06 + 0.04 * pulse;
+  }
+}
+
 /** Seconds as "1:02.345", or "0:00.000". */
 export function formatLap(seconds: number): string {
   const s = Math.max(0, seconds);
@@ -250,6 +292,12 @@ export class RaceGhost {
   // the lap was done arrives, so the finished lap is usually here by then.
   private previous: number[] = [];
   private best: Float32Array | null = null;
+  /** The record lap on this map (online): its own gold ghost. Positions every `recordStride` ticks. */
+  private recordPath: Float32Array | null = null;
+  private recordStride = 1;
+  private readonly recordMesh: THREE.Group;
+  recordTime = 0;
+  recordName = '';
   private splits: number[] = []; // seconds at each ring this lap
   private bestSplits: number[] = [];
   bestTime = 0;
@@ -266,6 +314,12 @@ export class RaceGhost {
     this.mesh.add(body, visor);
     this.mesh.visible = false;
     scene.add(this.mesh);
+    const gold = new THREE.MeshBasicMaterial({ color: 0xffd060, transparent: true, opacity: 0.3, depthWrite: false });
+    this.recordMesh = new THREE.Group();
+    this.recordMesh.add(new THREE.Mesh(body.geometry, gold), new THREE.Mesh(visor.geometry, new THREE.MeshBasicMaterial({ color: 0xfff0a0, transparent: true, opacity: 0.6, depthWrite: false })));
+    this.recordMesh.children[1].position.copy(visor.position);
+    this.recordMesh.visible = false;
+    scene.add(this.recordMesh);
     try {
       const saved = JSON.parse(localStorage.getItem(GHOST_KEY + map) ?? 'null') as { time: number; path: number[]; splits?: number[] } | null;
       if (saved && saved.time > 0 && Array.isArray(saved.path)) {
@@ -326,26 +380,38 @@ export class RaceGhost {
     }
   }
 
-  /** Places the ghost where it was this far into its lap; hidden with no lap under way. */
-  update(lapTime: number) {
-    const best = this.best;
-    if (!best || lapTime < 0) {
-      this.mesh.visible = false;
-      return;
-    }
-    const t = lapTime / DT;
-    const i = Math.floor(t);
-    const last = best.length / 3 - 1;
-    if (i >= last) {
-      this.mesh.visible = false;
-      return;
-    }
-    const f = t - i;
-    const a = i * 3;
-    this.mesh.position.set(best[a] + (best[a + 3] - best[a]) * f, best[a + 1] + (best[a + 4] - best[a + 1]) * f, best[a + 2] + (best[a + 5] - best[a + 2]) * f);
-    const dx = best[a + 3] - best[a];
-    const dz = best[a + 5] - best[a + 2];
-    if (dx * dx + dz * dz > 1e-6) this.mesh.rotation.y = Math.atan2(-dx, -dz);
-    this.mesh.visible = true;
+  /** The map's record lap (from the server's leaderboard): x, y, z in centimeters every `stride` ticks. */
+  setRecord(path: number[], stride: number, time: number, name: string) {
+    this.recordPath = Float32Array.from(path, (v) => v / 100);
+    this.recordStride = stride;
+    this.recordTime = time;
+    this.recordName = name;
   }
+
+  /** Places the ghosts where they were this far into their laps; hidden with no lap under way. */
+  update(lapTime: number) {
+    placeGhost(this.mesh, this.best, 1, lapTime);
+    placeGhost(this.recordMesh, this.recordPath, this.recordStride, lapTime);
+  }
+}
+
+/** Puts a ghost where its path was `lapTime` into the lap (sampled every `stride` ticks), or hides it. */
+function placeGhost(mesh: THREE.Object3D, path: Float32Array | null, stride: number, lapTime: number) {
+  if (!path || lapTime < 0) {
+    mesh.visible = false;
+    return;
+  }
+  const t = lapTime / DT / stride;
+  const i = Math.floor(t);
+  if (i >= path.length / 3 - 1) {
+    mesh.visible = false;
+    return;
+  }
+  const f = t - i;
+  const a = i * 3;
+  mesh.position.set(path[a] + (path[a + 3] - path[a]) * f, path[a + 1] + (path[a + 4] - path[a + 1]) * f, path[a + 2] + (path[a + 5] - path[a + 2]) * f);
+  const dx = path[a + 3] - path[a];
+  const dz = path[a + 5] - path[a + 2];
+  if (dx * dx + dz * dz > 1e-6) mesh.rotation.y = Math.atan2(-dx, -dz);
+  mesh.visible = true;
 }

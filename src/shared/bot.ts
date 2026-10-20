@@ -132,6 +132,12 @@ export class Bot {
    * teammate who has it) and defenders circle our base.
    */
   private objective(p: PlayerSim, sim: GameSim): Vector3 | null {
+    // King of the hill: onto it, circling a little so they're hard to hit standing there.
+    if (sim.mode === 'koth') {
+      const h = sim.rules.hill;
+      const a = this.t * this.orbitSpeed * 4;
+      return _goal.set(h.x + Math.cos(a) * 3, h.y, h.z + Math.sin(a) * 3);
+    }
     if (sim.mode !== 'ctf' || p.team < 0) return null;
     const own = sim.flags[p.team];
     const enemy = sim.flags[1 - p.team];

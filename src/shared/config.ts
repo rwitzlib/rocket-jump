@@ -180,22 +180,31 @@ export const NET = {
 };
 
 /** Bump whenever client and server stop understanding each other; mismatched clients are told to reload. */
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 
 /**
  * - ffa: free-for-all deathmatch, first to the frag limit.
+ * - koth: king of the hill. Score a point a second while you're alone on the hill; it moves every minute.
+ * - duel: one on one, first to 10. The winner stays on for the next challenger.
+ * - instagib: everyone has the Hypersonic and one hit kills. No pickups or items.
+ * - elim: elimination rounds, red against blue. No regeneration or respawning mid-round: the last
+ *   team standing takes it.
  * - tdm: two teams, first team to the frag limit. No friendly fire (your rockets still shove teammates).
  * - ctf: capture the flag. Take the other team's flag from their base and bring it to yours, while
  *   your own flag is home.
  * - race: a time trial round a loop of checkpoint rings. Nobody can hurt anyone, best lap wins.
  */
-export type GameMode = 'ffa' | 'tdm' | 'ctf' | 'race';
+export type GameMode = 'ffa' | 'tdm' | 'ctf' | 'race' | 'koth' | 'duel' | 'instagib' | 'elim';
 
 export const MODES: Record<GameMode, { name: string; short: string; teams: boolean; blurb: string }> = {
   ffa: { name: 'Deathmatch', short: 'DM', teams: false, blurb: 'Everyone for themselves. First to the frag limit.' },
   tdm: { name: 'Team Deathmatch', short: 'TDM', teams: true, blurb: 'Red against blue. First team to the frag limit.' },
   ctf: { name: 'Capture the Flag', short: 'CTF', teams: true, blurb: "Grab their flag and bring it home while yours is safe." },
   race: { name: 'Rocket Race', short: 'Race', teams: false, blurb: 'Rocket jump and grapple round the checkpoints. Best lap wins.' },
+  koth: { name: 'King of the Hill', short: 'KOTH', teams: false, blurb: 'Stand on the hill alone to score. It moves every minute.' },
+  duel: { name: 'Duel', short: 'Duel', teams: false, blurb: 'One on one, first to 10. The winner stays on for the next challenger.' },
+  instagib: { name: 'Instagib', short: 'Insta', teams: false, blurb: 'Everyone has a Hypersonic, and one hit kills. No pickups.' },
+  elim: { name: 'Elimination', short: 'Elim', teams: true, blurb: 'Rounds, red against blue. No regeneration, no respawns: last team standing takes the round.' },
 };
 
 export const TEAMS = [
@@ -212,6 +221,27 @@ export const CTF = {
   touchRadius: 1.7, // meters between a player's center and a flag's base for a touch
   returnTime: 20, // seconds a dropped flag lies before it goes home by itself
   carrierSpeedCap: 26, // m/s: a flag carrier's speed is clipped to this, so one rocket jump can't cross the map
+};
+
+export const KOTH = {
+  scoreLimit: 60, // seconds on the hill to win
+  timeLimit: 8 * 60,
+  radius: 6, // the hill: a cylinder this wide...
+  height: 5, // ...rising this far above its floor (and a meter below, for uneven ground)
+  moveEvery: 60, // seconds before it moves to the next spot
+};
+
+export const DUEL = { fragLimit: 10, players: 2 };
+
+export const INSTAGIB = {
+  killDamage: 30, // a Hypersonic hit doing at least this much (anything close to direct) kills outright
+};
+
+export const ELIM = {
+  roundLimit: 5, // rounds to win the match
+  roundTime: 120, // seconds before a round ends anyway: the team with more people standing takes it
+  between: 4, // seconds between rounds
+  timeLimit: 20 * 60,
 };
 
 export const RACE = {

@@ -34,7 +34,7 @@ for (const name of Object.keys(MAPS)) {
     }
   });
 
-  test(`${name}: both teams have their own spawns in capture the flag`, () => {
+  test(`${name}: both teams have their own spawns in capture the flag`, { skip: MAPS[name].tutorial }, () => {
     const map = MAPS[name];
     const red = teamSpawns(map, 0);
     const blue = teamSpawns(map, 1);

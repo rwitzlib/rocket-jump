@@ -1,4 +1,4 @@
-import { CTF, MATCH, MODES, RACE, TDM, type GameMode } from './config';
+import { CTF, DUEL, ELIM, KOTH, MATCH, MODES, RACE, TDM, type GameMode } from './config';
 import { MAPS, type MapDef, type SpawnDef, type Vec3Tuple } from './map';
 
 // What each game mode needs from a map, worked out from its data: flag bases for capture the flag,
@@ -25,6 +25,9 @@ export const isTeamMode = (mode: GameMode) => MODES[mode].teams;
 export function scoreLimit(map: MapDef, mode: GameMode, override: number | null): number {
   if (mode === 'race') return 0;
   if (mode === 'ctf') return CTF.captureLimit;
+  if (mode === 'koth') return KOTH.scoreLimit;
+  if (mode === 'duel') return override ?? DUEL.fragLimit;
+  if (mode === 'elim') return ELIM.roundLimit;
   const frags = override ?? map.fragLimit ?? MATCH.fragLimit;
   return mode === 'tdm' ? Math.round(frags * TDM.fragScale) : frags;
 }
@@ -34,7 +37,22 @@ export function timeLimit(mode: GameMode, override: number | null): number {
   if (override !== null) return override;
   if (mode === 'ctf') return CTF.timeLimit;
   if (mode === 'race') return RACE.timeLimit;
+  if (mode === 'koth') return KOTH.timeLimit;
+  if (mode === 'elim') return ELIM.timeLimit;
   return MATCH.timeLimit;
+}
+
+/** Modes with no mystery boxes or items on the map. */
+export const noPickups = (mode: GameMode) => mode === 'race' || mode === 'instagib';
+
+/**
+ * King of the hill: the spots the hill moves between. The map's own, or the mystery boxes' (which
+ * maps put in places worth fighting over), on the floor under each.
+ */
+export function hillSpots(map: MapDef): Vec3Tuple[] {
+  if (map.hills?.length) return map.hills;
+  const spots = map.pickups.map((p): Vec3Tuple => [p[0], p[1] - 1.4, p[2]]);
+  return spots.length ? spots : [map.spawns[0].pos];
 }
 
 const dist2 = (a: Vec3Tuple, b: Vec3Tuple) => (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2;

@@ -95,6 +95,7 @@ export class PlayerSim {
   lapTime = -1;
   bestLap = 0; // race: seconds, 0 for none yet
   captures = 0;
+  points = 0; // king of the hill: seconds held
 
   health: number = COMBAT.maxHealth;
   alive = true;

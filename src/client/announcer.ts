@@ -2,7 +2,7 @@ import { MATCH, MODES, TEAMS } from '../shared/config';
 import type { MatchState, ScoreEntry } from '../shared/protocol';
 import type { DeathCause, FlagAction } from '../shared/sim';
 import type { GameAudio } from './audio';
-import type { Hud } from './hud';
+import { modeGoal, type Hud } from './hud';
 
 // The announcer: medals for you (airshots, multi kills, sprees, revenge, shutdowns), lines in the
 // kill feed when anyone goes on a spree, and match beats like taking the lead or a minute left.
@@ -28,6 +28,8 @@ export class Announcer {
   private rank = 0; // 1 = leading, 0 = not ranked yet
   private warnedMinute = false;
   private warnedFrags = Infinity;
+  private round = 0;
+  private hill = -1;
   private teamLead = -2; // which team leads: -1 tied, -2 not known yet
 
   constructor(
@@ -60,10 +62,11 @@ export class Announcer {
       this.warnedMinute = match.timeLeft <= 60;
       this.warnedFrags = Infinity;
       this.teamLead = -2;
+      this.round = match.round;
+      this.hill = match.hill;
       if (!first && match.phase === 'playing') {
-        const goal =
-          match.mode === 'race' ? 'Best lap wins' : match.mode === 'ctf' ? `First to ${match.scoreLimit} captures` : `First to ${match.scoreLimit}`;
-        this.hud.medal(match.mode === 'race' ? 'GO!' : 'FIGHT!', `${MODES[match.mode].name} · ${goal}`, 'big');
+        const goal = modeGoal(match.mode, match.scoreLimit);
+        this.hud.medal(match.mode === 'race' ? 'GO!' : 'FIGHT!', `${MODES[match.mode].name} · ${goal[0].toUpperCase()}${goal.slice(1)}`, 'big');
       }
     }
     if (match.phase !== 'playing') return;
@@ -75,6 +78,21 @@ export class Announcer {
     }
 
     if (match.mode === 'race') return;
+    // Elimination: each round gets its own call to fight.
+    if (match.mode === 'elim' && match.round !== this.round && match.roundLeft > 0) {
+      this.round = match.round;
+      this.hud.medal(`ROUND ${match.round}`, 'FIGHT!', 'big');
+      this.audio.play('lead', { volume: 0.6 });
+    }
+    // King of the hill: it moves on every so often.
+    if (match.mode === 'koth') {
+      if (match.hill !== this.hill) {
+        this.hill = match.hill;
+        this.hud.medal('THE HILL MOVED', 'Follow the marker', 'notice', 0xffe060);
+        this.audio.play('lead', { volume: 0.5, rate: 1.1 });
+      }
+      return;
+    }
     if (MODES[match.mode].teams) {
       this.teamUpdate(match, scores);
       return;
@@ -84,7 +102,7 @@ export class Announcer {
     const left = match.scoreLimit - top;
     if (top > 0 && left <= 3 && left > 0 && left < this.warnedFrags) {
       this.warnedFrags = left;
-      this.hud.medal(left === 1 ? '1 FRAG LEFT' : `${left} FRAGS LEFT`, '', 'notice');
+      this.hud.medal(left === 1 ? '1 KILL LEFT' : `${left} KILLS LEFT`, '', 'notice');
       this.audio.play('lead', { volume: 0.4, rate: 0.8 });
     }
 
@@ -115,8 +133,8 @@ export class Announcer {
     const mine = scores.find((s) => s.id === this.localId)?.team ?? -1;
     const top = Math.max(red, blue);
     const left = match.scoreLimit - top;
-    const unit = match.mode === 'ctf' ? 'CAPTURE' : 'FRAG';
-    if (top > 0 && left <= (match.mode === 'ctf' ? 1 : 3) && left > 0 && left < this.warnedFrags) {
+    const unit = match.mode === 'ctf' ? 'CAPTURE' : match.mode === 'elim' ? 'ROUND' : 'FRAG';
+    if (top > 0 && left <= (match.mode === 'ctf' || match.mode === 'elim' ? 1 : 3) && left > 0 && left < this.warnedFrags) {
       this.warnedFrags = left;
       this.hud.medal(left === 1 ? `1 ${unit} LEFT` : `${left} ${unit}S LEFT`, '', 'notice');
       this.audio.play('lead', { volume: 0.4, rate: 0.8 });
@@ -130,7 +148,7 @@ export class Announcer {
     if (lead === -1) {
       this.hud.medal('SCORES TIED', '', 'notice');
       this.audio.play('lead', { volume: 0.5, rate: 0.9 });
-    } else if (mine >= 0 && match.mode === 'tdm') {
+    } else if (mine >= 0 && (match.mode === 'tdm' || match.mode === 'elim')) {
       this.hud.medal(lead === mine ? 'YOUR TEAM TOOK THE LEAD' : 'YOUR TEAM LOST THE LEAD', '', 'notice', TEAMS[lead].color);
       this.audio.play(lead === mine ? 'lead' : 'lostLead', { volume: 0.6 });
     }

@@ -1,12 +1,12 @@
 import RAPIER from '@dimforge/rapier3d-compat';
 import { Euler, Quaternion, Vector3 } from 'three';
-import { COMBAT, CRATE, CTF, DT, GRAPPLE, GRAVITY, GRENADE, HELI, HYPERSONIC, ITEMS, LOADOUT, PICKUP, PLAYER, RACE, ROCKET, SEEKERS, VEHICLE_DAMAGE, VEHICLES, WEAPONS, type GameMode, type SeekerConfig } from './config';
+import { COMBAT, CRATE, CTF, DT, GRAPPLE, GRAVITY, GRENADE, HELI, HYPERSONIC, ITEMS, LOADOUT, PICKUP, PLAYER, RACE, ROCKET, SEEKERS, VEHICLE_DAMAGE, VEHICLES, WEAPONS, type GameMode, type SeekerConfig, INSTAGIB } from './config';
 import { Driving } from './driving';
 import type { SimEvent, StepMode } from './events';
 import { Flight } from './flight';
 import { capsuleNormal, rayCapsule, REWIND_TICKS } from './hits';
 import type { MapDef, SpawnDef } from './map';
-import { isTeamMode, teamSpawns, type RaceCourse } from './modes';
+import { isTeamMode, noPickups, teamSpawns, type RaceCourse } from './modes';
 import { aimDirection, applyGrapple, updateVelocity, type GrappleState, type Hook } from './movement';
 import { clipVelocity, PLAYER_COLLISION_GROUPS, raySphere, VEHICLE_COLLIDER_GROUPS } from './physics';
 import { PlayerSim } from './player';
@@ -86,6 +86,9 @@ const _rayDir = new Vector3();
 const _ray = new RAPIER.Ray(_rayOrigin, _rayDir);
 
 const VEHICLE_EDGE_RADIUS = 0.25;
+
+/** respawnIn for someone knocked out of an elimination round: past any round, until the server ends it. */
+export const OUT_OF_ROUND = 1e6;
 
 export class GameSim {
   readonly world: RAPIER.World;
@@ -216,14 +219,33 @@ export class GameSim {
     for (const item of this.items) item.respawnIn = 0;
     for (const f of this.flags) this.rules.returnFlag(f);
     this.teamScores.fill(0);
+    this.rules.resetHill();
     for (const p of this.players.values()) {
       p.kills = 0;
       p.deaths = 0;
       p.captures = 0;
+      p.points = 0;
       p.bestLap = 0;
       p.flag = -1;
       this.respawn(p);
     }
+  }
+
+  /** Elimination: a new round, everyone back on their feet and the map as it started. */
+  newRound() {
+    for (const p of this.players.values()) if (p.vehicle >= 0) this.driving.leaveSeat(p);
+    this.projectiles.length = 0;
+    for (const box of this.pickups) box.respawnIn = 0;
+    for (const item of this.items) item.respawnIn = 0;
+    for (const p of this.players.values()) this.respawn(p);
+  }
+
+  /** Elimination: someone joining mid-round sits it out, as if knocked out already. */
+  bench(p: PlayerSim) {
+    p.alive = false;
+    p.health = 0;
+    p.respawnIn = OUT_OF_ROUND;
+    p.collider.setEnabled(false);
   }
 
   get teams(): boolean {
@@ -266,7 +288,7 @@ export class GameSim {
     p.prevPos.copy(p.pos);
     p.vel.set(0, 0, 0);
     p.grapple = null;
-    p.primary = LOADOUT.primary;
+    p.primary = this.mode === 'instagib' ? 'hypersonic' : LOADOUT.primary;
     p.secondary = LOADOUT.secondary;
     p.drum = GRENADE.drum;
     p.reloading = false;
@@ -534,11 +556,12 @@ export class GameSim {
       p.collider.setTranslation(p.pos);
       p.body.setNextKinematicTranslation(p.pos);
     }
-    if (this.mode !== 'race') {
+    if (!noPickups(this.mode)) {
       this.stepPickups(events);
       this.rules.stepItems(events);
     }
     if (this.mode === 'ctf') this.rules.stepFlags(events);
+    if (this.mode === 'koth') this.rules.stepHill(events);
     this.flight.stepProjectiles(events, 'authority');
     this.world.step();
     this.tick++;
@@ -593,7 +616,8 @@ export class GameSim {
       p.protectedFor = Math.max(0, p.protectedFor - DT);
       // Overhealth from health packs drains back down to full; below full, regeneration.
       if (p.health > COMBAT.maxHealth) p.health = Math.max(COMBAT.maxHealth, p.health - ITEMS.health.decay * DT);
-      else if (p.sinceDamaged > COMBAT.regenDelay) p.health = Math.min(COMBAT.maxHealth, p.health + COMBAT.regenRate * DT);
+      // (Elimination rounds have no regeneration: every hit counts until the round is over.)
+      else if (p.sinceDamaged > COMBAT.regenDelay && this.mode !== 'elim') p.health = Math.min(COMBAT.maxHealth, p.health + COMBAT.regenRate * DT);
       p.rammedFor = Math.max(0, p.rammedFor - DT);
       // E gets you into the nearest vehicle with a free seat, or out of the one you're in. Only the
       // server decides: a client finds out from its next snapshot. In a race it's the restart key.
@@ -1059,6 +1083,11 @@ export class GameSim {
 
   damage(p: PlayerSim, amount: number, sourceId: string, events: SimEvent[], cause: DeathCause) {
     if (amount <= 0 || p.protectedFor > 0 || this.mode === 'race' || this.allies(sourceId, p.id)) return;
+    // Instagib: a Hypersonic hit that lands at all kills (armor or not).
+    if (this.mode === 'instagib' && cause === 'hypersonic' && sourceId !== p.id && amount >= INSTAGIB.killDamage) {
+      amount = 1e4;
+      p.armor = 0;
+    }
     // Finishing yourself off right after someone hit you still counts as their kill.
     const killer = sourceId === p.id ? this.recentAttacker(p) : sourceId;
     // Armor soaks up part of every hit while it lasts.
@@ -1101,7 +1130,8 @@ export class GameSim {
     p.health = 0;
     p.armor = 0;
     p.overdrive = 0;
-    p.respawnIn = this.mode === 'race' ? RACE.respawnDelay : COMBAT.respawnDelay;
+    // In elimination you're out until the next round (the server brings everyone back then).
+    p.respawnIn = this.mode === 'race' ? RACE.respawnDelay : this.mode === 'elim' ? OUT_OF_ROUND : COMBAT.respawnDelay;
     p.vel.set(0, 0, 0);
     p.grapple = null;
     p.collider.setEnabled(false); // rockets fly through the dead

@@ -13,6 +13,11 @@ export default defineConfig({
       '/ws': { target: `ws://${GAME_SERVER}`, ws: true },
       '/status': { target: `http://${GAME_SERVER}` },
       '/rooms': { target: `http://${GAME_SERVER}` },
+      '/profile': { target: `http://${GAME_SERVER}` },
+      '/leaderboard': { target: `http://${GAME_SERVER}` },
+      '/servers': { target: `http://${GAME_SERVER}` },
+      '/event': { target: `http://${GAME_SERVER}` },
+      '/health': { target: `http://${GAME_SERVER}` },
     },
   },
 });

@@ -71,6 +71,23 @@ export interface Level {
   update(dt: number, camera: THREE.Camera): void;
 }
 
+/** One of a level's boxes, painted with its surfaces (the map editor builds them one at a time too). */
+export function boxMesh(box: BoxDef): THREE.Mesh {
+  const side = levelMaterial(box.mat ?? 'grid', box.color);
+  // BoxGeometry face order: +x, -x, +y, -y, +z, -z.
+  const faces = [side, side, box.top ? levelMaterial(box.top.mat, box.top.color) : side, side, side, side];
+  // A shipping container gets its doors on both ends.
+  const ends = box.mat === 'container' ? containerEnds(box) : [];
+  for (const f of ends) faces[f] = levelMaterial('doors', box.color);
+  const material = faces.every((m) => m === side) ? side : faces;
+  const mesh = new THREE.Mesh(boxGeometry(box, ends), material);
+  mesh.position.set(...box.pos);
+  if (box.rot) mesh.rotation.set(...box.rot);
+  mesh.castShadow = mesh.receiveShadow = true;
+  mesh.updateMatrixWorld();
+  return mesh;
+}
+
 /** Builds the static level: boxes, sky, light, fog and scenery. */
 export function buildLevel(scene: THREE.Scene, map: MapDef): Level {
   const theme = THEMES[map.theme ?? 'classic'] ?? THEMES.classic;
@@ -106,18 +123,7 @@ export function buildLevel(scene: THREE.Scene, map: MapDef): Level {
   scene.add(sun, sun.target);
 
   const meshes = map.boxes.filter((box) => !box.hidden).map((box) => {
-    const side = levelMaterial(box.mat ?? 'grid', box.color);
-    // BoxGeometry face order: +x, -x, +y, -y, +z, -z.
-    const faces = [side, side, box.top ? levelMaterial(box.top.mat, box.top.color) : side, side, side, side];
-    // A shipping container gets its doors on both ends.
-    const ends = box.mat === 'container' ? containerEnds(box) : [];
-    for (const f of ends) faces[f] = levelMaterial('doors', box.color);
-    const material = faces.every((m) => m === side) ? side : faces;
-    const mesh = new THREE.Mesh(boxGeometry(box, ends), material);
-    mesh.position.set(...box.pos);
-    if (box.rot) mesh.rotation.set(...box.rot);
-    mesh.castShadow = mesh.receiveShadow = true;
-    mesh.updateMatrixWorld();
+    const mesh = boxMesh(box);
     scene.add(mesh);
     return mesh;
   });

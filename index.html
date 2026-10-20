@@ -17,7 +17,7 @@
     <div id="hud" hidden>
       <div id="hit-flash"></div>
       <div id="damage-dirs"></div>
-      <div id="crosshair"></div>
+      <div id="crosshair" class="xhair"></div>
       <!-- Weapon cooldowns around the crosshair: grapple on the left, rocket on the right. They fill bottom to top. -->
       <svg id="cooldowns" viewBox="-24 -24 48 48" aria-hidden="true">
         <path class="track" d="M -5.56 17.12 A 18 18 0 0 1 -5.56 -17.12" />
@@ -38,7 +38,7 @@
       <div id="markers"></div>
       <div id="spectating" hidden>
         <div id="spectating-name"></div>
-        <div class="hint"><kbd>LMB</kbd> next <kbd>RMB</kbd> previous <kbd>Space</kbd> free camera <kbd>J</kbd> join the game</div>
+        <div class="hint"><kbd>LMB</kbd> next <kbd>RMB</kbd> previous <kbd>Space</kbd> camera: follow, free, overhead <kbd>J</kbd> join the game</div>
       </div>
       <div id="medals"></div>
       <div id="speed">0.0 m/s</div>
@@ -49,8 +49,13 @@
       <div id="missile-warning" hidden>MISSILE LOCK</div>
       <div id="prompt" hidden></div>
       <div id="vehicle-status" hidden><span id="vehicle-name"></span><div class="bar"><div id="vehicle-bar"></div></div></div>
-      <div id="weapons"><div><kbd>LMB</kbd><span id="weapon-primary">Rocket Launcher</span><span id="weapon-ammo"></span></div><div><kbd>RMB</kbd><span id="weapon-secondary">Grapple</span></div></div>
+      <div id="weapons"><div><kbd id="key-fire">LMB</kbd><span id="weapon-primary">Rocket Launcher</span><span id="weapon-ammo"></span></div><div><kbd id="key-grapple">RMB</kbd><span id="weapon-secondary">Grapple</span></div></div>
       <div id="mute"></div>
+      <div id="coach" hidden></div>
+      <div id="xp-gain"></div>
+      <div id="highlight-label" hidden></div>
+      <div id="tip" hidden></div>
+      <div id="reconnecting" hidden>Connection lost. Reconnecting…</div>
 
       <div id="health">
         <div id="overdrive" hidden></div>
@@ -85,9 +90,8 @@
     <div id="menu" class="screen">
       <div class="menu-panel">
         <h1 class="logo">ROCKET<span>JUMP</span></h1>
-        <p class="tagline">Rocket jump. Grapple. Land the airshot.</p>
         <label class="field">
-          <span>Name</span>
+          <span>Name <b id="menu-level" class="level-chip" hidden></b></span>
           <input id="name-input" type="text" maxlength="16" autocomplete="nickname" spellcheck="false" placeholder="Pick a name" />
         </label>
         <button id="play-online" class="primary" disabled>
@@ -98,6 +102,7 @@
           <button id="open-rooms" class="ghost">Servers and rooms</button>
           <button id="watch-online" class="ghost">Watch online</button>
         </div>
+        <button id="play-training" class="ghost training" title="A short course that teaches rocket jumping and the grapple">Training: learn the moves</button>
         <div class="practice">
           <button id="play-practice" disabled title="Practice against bots, offline">Practice</button>
           <select id="practice-mode" aria-label="Practice mode"></select>
@@ -115,11 +120,13 @@
           </select>
         </div>
         <div class="menu-row">
+          <button id="open-profile" class="ghost">Profile</button>
+          <button id="open-editor" class="ghost">Map editor</button>
           <button id="open-settings" class="ghost">Settings</button>
           <button id="open-controls" class="ghost">How to play</button>
         </div>
         <p id="menu-error" class="error" hidden></p>
-        <p id="touch-warning" class="error" hidden>Rocket Jump needs a mouse and keyboard.</p>
+        <p id="touch-warning" class="hint" hidden>On a phone? Turn it sideways: touch controls appear when you play. A gamepad works too.</p>
       </div>
     </div>
 
@@ -150,6 +157,8 @@
     <div id="rooms" class="screen modal" hidden>
       <div class="menu-panel wide">
         <h2>Servers and rooms</h2>
+        <div id="server-list" class="room-list"></div>
+        <h3>Rooms on this server</h3>
         <div id="room-list" class="room-list"><p class="hint">Looking…</p></div>
         <div class="room-code">
           <input id="room-code" type="text" maxlength="5" autocomplete="off" spellcheck="false" placeholder="Room code" aria-label="Room code" />
@@ -181,18 +190,91 @@
       </div>
     </div>
 
+    <!-- The map editor's tools and panels, over the 3D view. -->
+    <div id="editor" hidden>
+      <div id="editor-top">
+        <div id="editor-tools"></div>
+        <div class="editor-file">
+          <button id="editor-new" class="ghost">New</button>
+          <button id="editor-open" class="ghost">Open</button>
+          <button id="editor-save" class="ghost">Save</button>
+          <button id="editor-import" class="ghost">Import</button>
+          <button id="editor-export" class="ghost">Export</button>
+          <button id="editor-share" class="ghost">Share link</button>
+          <select id="editor-mode" aria-label="Mode to play it in"></select>
+          <select id="editor-bots" aria-label="Bots">
+            <option value="0">No bots</option>
+            <option value="3" selected>3 bots</option>
+            <option value="5">5 bots</option>
+          </select>
+          <button id="editor-test" class="primary">Play it</button>
+          <button id="editor-host" class="ghost">Host online</button>
+          <button id="editor-exit" class="ghost">Exit</button>
+          <input id="editor-file" type="file" accept=".json,application/json" hidden />
+        </div>
+      </div>
+      <aside id="editor-panel"></aside>
+      <div id="editor-status"></div>
+    </div>
+
+    <!-- Profile: level, stats, challenges, looks, race records. -->
+    <div id="profile" class="screen modal" hidden>
+      <div class="menu-panel wide">
+        <h2>Profile</h2>
+        <div class="tabs" role="tablist">
+          <button class="tab active" data-tab="overview" role="tab">Overview</button>
+          <button class="tab" data-tab="challenges" role="tab">Challenges</button>
+          <button class="tab" data-tab="looks" role="tab">Looks</button>
+          <button class="tab" data-tab="records" role="tab">Race records</button>
+        </div>
+        <div id="profile-body"></div>
+        <button id="profile-done" class="primary">Done</button>
+      </div>
+    </div>
+
     <div id="settings" class="screen modal" hidden>
       <div class="menu-panel">
         <h2>Settings</h2>
-        <label class="slider"><span>Mouse sensitivity</span><input id="set-sensitivity" type="range" /><output id="out-sensitivity"></output></label>
-        <label class="slider"><span>Field of view</span><input id="set-fov" type="range" /><output id="out-fov"></output></label>
-        <label class="slider"><span>Volume</span><input id="set-volume" type="range" /><output id="out-volume"></output></label>
-        <label class="slider choice"><span>Graphics</span><select id="set-graphics">
-          <option value="high">High: outlines, glow, smooth edges</option>
-          <option value="low">Low: faster on older laptops</option>
-        </select></label>
-        <label class="check"><input id="set-invert" type="checkbox" /><span>Invert mouse Y</span></label>
-        <label class="check"><input id="set-killcam" type="checkbox" /><span>Killcam: replay how you died from your killer's view</span></label>
+        <div class="tabs" role="tablist">
+          <button class="tab active" data-tab="general" role="tab">General</button>
+          <button class="tab" data-tab="crosshair" role="tab">Crosshair</button>
+          <button class="tab" data-tab="keys" role="tab">Controls</button>
+        </div>
+        <div class="tab-pane" data-pane="general">
+          <label class="slider"><span>Mouse sensitivity</span><input id="set-sensitivity" type="range" /><output id="out-sensitivity"></output></label>
+          <label class="slider"><span>Gamepad look speed</span><input id="set-padSensitivity" type="range" /><output id="out-padSensitivity"></output></label>
+          <label class="slider"><span>Field of view</span><input id="set-fov" type="range" /><output id="out-fov"></output></label>
+          <label class="slider"><span>Volume</span><input id="set-volume" type="range" /><output id="out-volume"></output></label>
+          <label class="slider choice"><span>Graphics</span><select id="set-graphics">
+            <option value="high">High: outlines, glow, smooth edges</option>
+            <option value="low">Low: faster on older laptops</option>
+          </select></label>
+          <label class="slider choice"><span>Touch screen</span><select id="set-touchLayout">
+            <option value="right">Move with the left thumb, aim with the right</option>
+            <option value="left">Move with the right thumb, aim with the left</option>
+          </select></label>
+          <label class="check"><input id="set-invert" type="checkbox" /><span>Invert look up and down</span></label>
+          <label class="check"><input id="set-killcam" type="checkbox" /><span>Killcam: replay how you died from your killer's view</span></label>
+          <label class="check"><input id="set-hints" type="checkbox" /><span>Tips for new players</span></label>
+          <label class="check"><input id="set-colorblind" type="checkbox" /><span>Colorblind-friendly colors: orange and blue teams, a cyan grapple cue <small id="colorblind-note" class="hint" hidden>(applies when you reload the page)</small></span></label>
+        </div>
+        <div class="tab-pane" data-pane="crosshair" hidden>
+          <div class="crosshair-preview"><div id="crosshair-sample" class="xhair"></div></div>
+          <label class="slider choice"><span>Style</span><select id="set-crosshairStyle">
+            <option value="circle">Ring</option>
+            <option value="circle-dot">Ring and dot</option>
+            <option value="dot">Dot</option>
+            <option value="cross">Cross</option>
+          </select></label>
+          <label class="slider"><span>Color</span><input id="set-crosshairColor" type="color" /><output id="out-crosshairColor"></output></label>
+          <label class="slider"><span>Size</span><input id="set-crosshairSize" type="range" /><output id="out-crosshairSize"></output></label>
+        </div>
+        <div class="tab-pane" data-pane="keys" hidden>
+          <p class="hint">Click a slot, then press a key or mouse button. Esc cancels, Backspace clears it.</p>
+          <div id="binds" class="binds"></div>
+          <p class="hint">Gamepad: left stick moves, right stick looks, A jumps, RT fires, LT grapples, X uses, B descends, Start pauses, Back shows the scores.</p>
+          <button id="binds-reset" class="ghost">Reset controls</button>
+        </div>
         <button id="settings-done" class="primary">Done</button>
       </div>
     </div>
@@ -208,11 +290,13 @@
             <tr><td>Left click / F</td><td>Fire</td></tr>
             <tr><td>Right click / Shift / Q</td><td>Grapple (hold)</td></tr>
             <tr><td>Arrow keys</td><td>Look around (if the mouse can't be captured)</td></tr>
+            <tr><td>Gamepad</td><td>Sticks move and look, RT fire, LT grapple, A jump</td></tr>
             <tr><td>E</td><td>Get in / out of a vehicle (restart a race)</td></tr>
             <tr><td>Space / Shift</td><td>Helicopter climb / descend (C works too)</td></tr>
             <tr><td>Tab (hold)</td><td>Scoreboard</td></tr>
             <tr><td>T / Enter</td><td>Chat</td></tr>
             <tr><td>M</td><td>Mute</td></tr>
+            <tr><td>K</td><td>Save the last replay (killcam, play of the match) as a video</td></tr>
             <tr><td>Esc</td><td>Pause menu</td></tr>
           </table>
           <ul class="tips">

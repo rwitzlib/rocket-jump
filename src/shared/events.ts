@@ -34,6 +34,7 @@ export type SimEvent =
   | { type: 'item'; playerId: string; kind: ItemKind; index: number }
   | { type: 'flag'; team: number; action: FlagAction; playerId: string | null } // playerId null: it went home by itself
   | { type: 'checkpoint'; playerId: string; index: number; time: number }
+  | { type: 'hill'; playerId: string | null; contested: boolean } // king of the hill: who has it now (null: nobody)
   | { type: 'lap'; playerId: string; time: number; best: boolean }
   | { type: 'entered'; playerId: string; vehicle: number; seat: number }
   | { type: 'exited'; playerId: string; vehicle: number }

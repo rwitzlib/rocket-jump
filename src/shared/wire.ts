@@ -414,6 +414,9 @@ const SCORE: Schema = [
   ['team', 'i'],
   ['captures', 'u'],
   ['bestLap', 'f'],
+  ['look', 's'],
+  ['level', 'u'],
+  ['points', 'u'],
 ];
 
 const MATCH: Schema = [
@@ -429,6 +432,9 @@ const MATCH: Schema = [
   ['nextMode', GAME_MODES],
   ['winnerId', 'id'],
   ['winnerTeam', 'i'],
+  ['hill', 'i'],
+  ['round', 'u'],
+  ['roundLeft', 'tenths'],
 ];
 
 const FLAG: Schema = [
@@ -486,6 +492,7 @@ const EVENTS: Record<WireEvent['type'], Schema> = {
   flag: [['team', 'u'], ['action', ['taken', 'dropped', 'returned', 'captured']], ['playerId', 'id']],
   checkpoint: [['playerId', 'id'], ['index', 'u'], ['time', 'f']],
   lap: [['playerId', 'id'], ['time', 'f'], ['best', 'b']],
+  hill: [['playerId', 'id'], ['contested', 'b']],
   entered: [['playerId', 'id'], ['vehicle', 'u'], ['seat', 'u']],
   exited: [['playerId', 'id'], ['vehicle', 'u']],
   vehicleHit: [['vehicle', 'u'], ['sourceId', 'id'], ['amount', 'f']],

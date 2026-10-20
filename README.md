@@ -6,7 +6,7 @@ Built with **Three.js** (rendering), **Rapier** (physics, WASM), **TypeScript** 
 
 ## Playing
 
-Rocket Jump is an arena shooter for up to 12 people per server, in four modes:
+Rocket Jump is an arena shooter for up to 12 people per server, in eight modes:
 
 - **Deathmatch**: everyone for themselves. First to 20 kills (25 on Arena, 15 on the bigger Citadel), or the most
   kills after 8 minutes.
@@ -19,7 +19,16 @@ Rocket Jump is an arena shooter for up to 12 people per server, in four modes:
 - **Rocket Race**: a time trial. Fly through the checkpoint rings in order; the start gate starts the clock and
   finishes each lap. Racers are ghosts to each other (no damage, no shoving, no hooking each other), E restarts from
   the start, and the best lap after 5 minutes wins. Split times at each ring compare with your best lap, and the
-  ghost of that lap flies alongside you (kept in your browser, per map).
+  ghost of that lap flies alongside you (kept in your browser, per map). Online, the map's record lap flies
+  along too, as a gold ghost.
+- **King of the Hill**: stand in the glowing ring with nobody else on it to score a point a second. First to 60.
+  The hill moves every minute (each map has its spots; by default, under the mystery boxes).
+- **Duel**: one on one, first to 10. Two play and everyone else waits in line; the winner stays on and the
+  loser goes to the back.
+- **Instagib**: everyone carries the Hypersonic and any hit kills, armor or not. No pickups or items.
+- **Elimination**: red against blue in rounds. No regeneration and no respawning mid-round: the last team
+  standing takes it (or, when the 2-minute round runs out, the one with more people up). First to 5 rounds.
+  While you're out, the camera follows a teammate who's still in.
 
 In team modes, names over teammates are white and over enemies red.
 
@@ -34,7 +43,16 @@ longest streak and the best K/D), and the next map and mode in the rotation:
   gatehouses in the corners, waterfalls and giant stone heads in the cliffs.
 - **Skyreach**: floating islands above the clouds at sunset, linked by plank bridges, with crystal perches up high.
   Fall off and it's a long way down, but the rock under every island can be grappled to climb back.
+- **Foundry**: a steel hall over a pit of molten metal: corner towers, catwalks, a lattice of girders to swing
+  from, chains, and an island over the pit.
+- **Coliseum**: a small torch-lit arena at night, made for duels: a dais, pillars, a square of beams, balconies.
+- **Canyon**: a long red-rock canyon built for vehicles, with buggies and a helicopter at each base.
 - **Arena** and **Citadel**: the original two maps, kept as they were.
+
+**Training** (on the menu, highlighted until you've done it) is a short course that teaches one move per ring:
+jumping, rocket jumping onto a ledge, swinging on the grapple, a rocket-jump long jump and grappling up a
+tower. A coach says what to do next. In your first games, one-off tips explain the rest as it comes up (off in
+Settings).
 
 The menu shows one of the new maps drifting by behind it.
 
@@ -55,8 +73,37 @@ it. The arrow keys look around, small mouse movements over the game do too, clic
 grapples, and Esc pauses. Each click on the game tries for the capture again.
 
 **Spectating.** Watch online, or press Esc and Spectate in a game. Click to follow the next player (right click, the
-one before), Space for a free camera you fly where you look with WASD, and J (or Esc, Join the game) to play. Someone
+one before), Space to go between following, a free camera you fly where you look with WASD, and an overhead
+view of the whole map with everyone marked through walls, and J (or Esc, Join the game) to play. Someone
 joining a full server watches until a place comes free, then gets in automatically.
+
+**Profiles.** Online play earns XP (kills, airshots, captures, laps, matches and wins) toward levels, and counts
+lifetime stats. Three daily and three weekly challenges (the same for everyone) pay extra. Levels unlock
+armor colors and rocket trails, worn from **Profile, Looks** and seen by everyone. **Profile, Race records**
+has the fastest laps on every map. There are no accounts: the browser keeps a secret key, and the server
+keeps the profile (in `DATA_DIR`).
+
+**Map editor.** Build a map from boxes and place spawns, mystery boxes, items, flags, race rings and hill spots,
+then **Play it** (practice, any mode), **Host online** (opens a room on it; the map goes to everyone who joins)
+or **Share link** (the whole map, compressed into a link that opens it in the editor). Maps save in the browser,
+and export and import as JSON.
+
+**Controls.** Every action can be rebound (Settings, Controls), mouse buttons included. Gamepads work: sticks
+move and look, RT fires, LT grapples, A jumps, Start pauses, Back shows the scores, with a little aim assist
+and rumble. Phones and tablets get touch controls: a stick wherever the left thumb lands, drag to look, and
+buttons for fire, grapple and jump (swap sides in Settings). Settings also have crosshair styles, colors and
+sizes, and colorblind-friendly colors (orange and blue teams, a cyan grapple cue).
+
+**Dropped connections** don't throw you out: the game reconnects by itself and you carry on as you were, for
+up to 30 seconds (and a server restart for a deploy puts you straight into the new match).
+
+**Behaving.** Names and chat are filtered for slurs and the worst words. In chat, `/votekick name` starts a vote
+(more than half of the others must say `/yes`; the kicked are kept out of that room for 10 minutes),
+`/mute name` hides someone's chat from you, and `/help` lists the commands. The server also watches for
+aimbot-like snaps onto targets and logs anyone it suspects (`suspect` lines) for a person to look at.
+
+**Replays.** After the killcam (or the play of the match, which replays the best kill of the match before the
+results), K saves it as a video file.
 
 **Items.** Besides the mystery boxes, maps have health packs (+50, up to 150; anything over 100 drains away), armor
 (+50, up to 100; it soaks up two thirds of each hit until it runs out) and one **overdrive** somewhere hard to reach:
@@ -88,7 +135,7 @@ Settings are environment variables:
 |---|---|---|
 | `PORT` | 8080 | HTTP and WebSocket port |
 | `HOST` | 0.0.0.0 | interface to listen on |
-| `MAPS` | dockyard,temple:ctf,skyreach:tdm,arena,citadel:ctf | rotation: maps, each with an optional `:mode` (ffa, tdm, ctf, race) |
+| `MAPS` | dockyard,temple:ctf,foundry:koth,skyreach:tdm,canyon:ctf,arena:instagib,coliseum,citadel:elim | rotation: maps, each with an optional `:mode` (ffa, tdm, ctf, race, koth, duel, instagib, elim) |
 | `MODE` | ffa | the mode for rotation entries that don't name one |
 | `TIME_LIMIT` | per mode | seconds per match (8 minutes; CTF 10, races 5) |
 | `FRAG_LIMIT` | per map | kills to win (20 on the new maps, 25 on Arena, 15 on Citadel; 1.6x that in TDM) |
@@ -98,13 +145,29 @@ Settings are environment variables:
 | `MAX_SPECTATORS` | 8 | people allowed to watch on top of that |
 | `MAX_ROOMS` | 8 | rooms at once, the main one included (each runs a match: about 1 ms a tick with 12 players) |
 | `BOT_SKILL` | auto | easy, normal or hard. Auto starts easy and steps up while people are winning, down while they're losing |
+| `RECONNECT_GRACE` | 30 | seconds a player whose connection drops is held for them to come back |
+| `DATA_DIR` | (none) | where profiles, race records and the server's numbers are saved. Unset, they're lost on restart |
+| `STATS_KEY` | (none) | turns on `/stats?key=...`: players, sessions, early leavers, modes, maps, menu use, where people die |
+| `REGION` | (none) | where this server is, shown in server lists |
+| `SERVERS` | (none) | other Rocket Jump servers for the menu's list, with their ping: `Name|https://host,Name 2|https://host2` |
 | `STATIC_DIR` | dist | where the built client is |
 
 The rotation and match settings are the main room's. `GET /rooms` lists the public rooms as JSON, and `POST /rooms`
 opens one (`{ name, mode, map, bots, skill, private }`, at most three a minute from one address).
-`GET /status` returns the main room's map and mode, who's playing and watching, the rotation, the match state, how
+`POST /profile` (`{ key }`) returns a profile, `POST /profile/look` puts on a look, `GET /leaderboard?map=NAME`
+lists a map's fastest laps (`&ghost=1` adds the record lap's path), `GET /servers` lists the other servers, and
+`POST /event` counts menu use. `GET /status` returns the main room's map and mode, who's playing and watching, the rotation, the match state, how
 many rooms are open, and the average tick time as JSON. `GET /health` answers `ok` for load balancers. The server logs one JSON line per event: join,
 leave, and a status line every minute while anyone is on (with the average outgoing bandwidth).
+
+**Keeping profiles.** Profiles, race records and the stats live in one JSON file each in `DATA_DIR`, written a
+few seconds after changes and on shutdown. On Railway: add a Volume to the service mounted at `/data`, and set
+`DATA_DIR=/data`. The image runs as the `node` user and Railway mounts volumes owned by root, so also set
+`RAILWAY_RUN_UID=0` (or the server can't write there, and says so in its log).
+
+**More than one region.** Run another copy of the service in another region (on Railway, a second service with
+its own region), give each a `REGION`, and list the others in `SERVERS` on each. The menu's Servers and rooms
+shows every server's ping and who's on, and sends people to the one they pick.
 
 **Hosting publicly.** Anything that runs Node 20+ works, and a `Dockerfile` is included:
 
@@ -129,7 +192,7 @@ still running the old build are told to reload.
 npm run dev          # the page with hot reload, at http://localhost:5173
 npm run dev:server   # the game server on :8080, restarting on changes; Vite proxies /ws and /status to it
 npm run typecheck
-npm test                                        # the test suite: about 50 tests, a few seconds
+npm test                                        # the test suite: about 90 tests, a few seconds
 npx tsx scripts/balance.ts citadel 6 8          # bot-only match at full speed: kill pace, death causes, airshots
 npx tsx scripts/balance.ts temple 7 10 normal ctf # any mode: team modes also report team scores and flag play
 npx tsx scripts/wire-check.ts citadel 11 60      # round-trips every snapshot of a match through the wire format, and measures it
@@ -168,8 +231,10 @@ without them still works: flags go on the two spawns farthest apart and the race
 | M | Mute / unmute |
 | P | Frame-time overlay (long frames are also logged to the console) |
 | Esc | Pause menu (Spectate is there) |
+| K | Save the last replay (killcam, play of the match) as a video |
+| Chat `/votekick`, `/yes`, `/no`, `/mute`, `/unmute`, `/help` | Vote someone out, hide someone's chat |
 | Spectating: click / right click | Follow the next / previous player |
-| Spectating: Space, J | Free camera; join the game |
+| Spectating: Space, J | Camera: follow, free, overhead; join the game |
 
 Aim at your feet and fire while jumping to rocket jump. Your own rockets never hurt you and launch you harder than
 they push others, so rocket jumping is free. WASD steers you in the air. The arcs around the crosshair show weapon
@@ -261,8 +326,14 @@ src/
     wire.ts        # the binary, delta-compressed wire format for snapshots and inputs
     rooms.ts       # several games per server: room codes, the public list, closing empty rooms
     bot.ts         # server-side bots
+    progress.ts    # XP, levels, challenges, cosmetics: what a profile is and how events change it
+    moderation.ts  # the word filter and vote-kick rules
+    anticheat.ts   # spotting aimbot-like snaps onto targets
+    custommap.ts   # checking maps from the editor, and their share codes
   server/
     main.ts        # the dedicated server: HTTP for the built client and /rooms, WebSockets at /ws, the tick loop
+    store.ts       # profiles and race records, saved in DATA_DIR
+    analytics.ts   # the server's numbers (/stats)
 test/              # npm test (node:test, run with tsx)
   client/
     main.ts        # menus, settings, sessions (online or practice), the frame loop
@@ -274,7 +345,13 @@ test/              # npm test (node:test, run with tsx)
                    #   recap, scoreboard, results
     killcam.ts     # records the last few seconds, to replay a death from the killer's eyes
     objectives.ts  # flags and their bases, items, race rings, the best-lap ghost
-    input.ts       # keyboard + pointer lock
+    input.ts       # keyboard, mouse (pointer lock), gamepads; rebindable actions
+    touch.ts       # on-screen controls for phones and tablets
+    tutorial.ts    # the training course's coach, and tips for new players
+    profile.ts     # the Profile window: level, stats, challenges, looks, race records
+    editor.ts      # the map editor
+    clips.ts       # saving replays as video
+    palette.ts     # colorblind-friendly colors (loaded first)
     level.ts       # meshes for the map and crates, the sky, sun and fog
     surfaces.ts    # painted level textures (stone, brick, planks, containers...) drawn on canvases at startup
     decor.ts       # scenery: trees, water, mountains, lamps, ships, waterfalls, clouds (merged into few draw calls)
@@ -293,7 +370,7 @@ test/              # npm test (node:test, run with tsx)
     remoteview.ts  # other players' models and name tags
     pickups.ts     # mystery boxes
     vehicles.ts    # buggy and helicopter models
-    net/           # WebSocket and loopback transports, NetClient prediction + interpolation, debug overlay
+    net/           # WebSocket (reconnecting) and loopback transports, NetClient prediction + interpolation, debug overlay
 ```
 
 The simulation is kept separate from rendering on purpose. The server runs `GameSim` with every player's inputs, and
@@ -336,4 +413,6 @@ player after the WebSocket's compression against 31 (`scripts/wire-check.ts` mea
 6. ~~Matches, menus, announcer, deployment~~
 7. ~~Team deathmatch, capture the flag, rocket races, spectating, killcam, items, binary snapshots~~
 8. ~~Rooms and a server browser, automated tests, the simulation split into parts~~
-9. Next: more maps, rebindable keys and gamepads, a list of servers across hosts
+9. ~~More maps, rebindable keys and gamepads, a list of servers across hosts~~
+10. ~~Training, profiles and challenges, race records, four more modes, a map editor, touch controls, reconnecting~~
+11. Next: accounts that follow you across devices, ranked duels, map voting between matches

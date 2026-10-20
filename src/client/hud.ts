@@ -56,6 +56,22 @@ const ordinal = (n: number) => {
 };
 
 /** Best first, by what the mode scores. */
+/** What wins this mode, for menus and the HUD: "first to 20", "best lap wins". */
+export function modeGoal(mode: GameMode, limit: number): string {
+  switch (mode) {
+    case 'race':
+      return 'best lap wins';
+    case 'ctf':
+      return `first to ${limit} captures`;
+    case 'koth':
+      return `first to ${limit} s on the hill`;
+    case 'elim':
+      return `first to ${limit} rounds`;
+    default:
+      return `first to ${limit}`;
+  }
+}
+
 export const rankScores = (scores: readonly ScoreEntry[], mode: GameMode = 'ffa') => [...scores].sort(compareScores(mode));
 
 const css = (color: number) => `#${color.toString(16).padStart(6, '0')}`;
@@ -149,6 +165,9 @@ export class Hud {
   private readonly names = new Map<string, string>();
   private readonly teams = new Map<string, number>();
   boardOpen = false; // Tab held
+  private readonly xpBox = el('xp-gain');
+  private highlightOn = false;
+  private xpTotal = 0;
   /** Whether the game has the keyboard (the mouse captured, or playing without it): Tab opens the board only then. */
   isPlaying: () => boolean = () => !!document.pointerLockElement;
 
@@ -164,6 +183,30 @@ export class Hud {
       this.boardOpen = false;
       this.board.hidden = true;
     });
+  }
+
+  /** "+25 XP Kill" in the corner, adding up while they come in quick succession. */
+  xpGained(amount: number, why: string) {
+    const box = this.xpBox;
+    this.xpTotal = box.classList.contains('show') ? this.xpTotal + amount : amount;
+    box.textContent = `+${this.xpTotal} XP${why ? `  ${why}` : ''}`;
+    box.classList.remove('show');
+    void box.offsetWidth;
+    box.classList.add('show');
+  }
+
+  /** The banner over the play of the match; null hides it (and lets the results show). */
+  setHighlight(text: string | null) {
+    this.highlightOn = text !== null;
+    const label = el('highlight-label');
+    label.hidden = text === null;
+    if (text) label.textContent = text;
+  }
+
+  /** Shows or hides the scoreboard (Tab does this by itself; this is for the gamepad and touch). */
+  showBoard(on: boolean) {
+    this.boardOpen = on;
+    this.board.hidden = !on;
   }
 
   setLocalId(id: string) {
@@ -204,7 +247,13 @@ export class Hud {
       this.matchBar.hidden = true;
       return;
     }
-    const time = formatTime(match.phase === 'playing' ? match.timeLeft : 0);
+    // Elimination counts the round down, then the wait for the next one.
+    const time =
+      match.mode === 'elim' && match.phase === 'playing'
+        ? match.roundLeft > 0
+          ? `R${match.round} ${formatTime(match.roundLeft)}`
+          : `Next round ${Math.ceil(-match.roundLeft)}`
+        : formatTime(match.phase === 'playing' ? match.timeLeft : 0);
     const ranked = rankScores(scores, match.mode);
     const myIndex = ranked.findIndex((s) => s.id === this.localId);
     const me = ranked[myIndex];
@@ -223,6 +272,11 @@ export class Hud {
       left = me?.bestLap ? `Best ${formatLap(me.bestLap)}` : 'No lap yet';
       if (leader?.bestLap && leader.id !== this.localId) right = `Record: ${leader.name} ${formatLap(leader.bestLap)}`;
       else if (leader?.bestLap) right = 'You hold the record';
+    } else if (match.mode === 'koth') {
+      const leader = ranked[0];
+      left = me ? `${ordinal(myIndex + 1)} · ${me.points} / ${match.scoreLimit} s` : '';
+      if (leader && leader.id !== this.localId && leader.points > 0) right = `Leader: ${leader.name} ${leader.points} s`;
+      else if (ranked[1] && leader?.id === this.localId && leader.points > 0) right = `Next: ${ranked[1].name} ${ranked[1].points} s`;
     } else {
       const leader = ranked[0];
       left = me ? `${ordinal(myIndex + 1)} · ${me.kills} / ${match.scoreLimit}` : '';
@@ -370,7 +424,8 @@ export class Hud {
 
   /** The results screen between matches; hidden otherwise. */
   setResults(match: MatchState | null, scores: readonly ScoreEntry[]) {
-    const show = match?.phase === 'intermission';
+    // (held back while the play of the match is showing)
+    const show = match?.phase === 'intermission' && !this.highlightOn;
     this.results.hidden = !show;
     if (!show || !match) {
       this.shownResults = '';
@@ -405,7 +460,15 @@ export class Hud {
     el('results-sub').textContent = teams ? `${TEAMS[0].name} ${match.teamScores[0]} – ${match.teamScores[1]} ${TEAMS[1].name}${placed ? ` · ${placed}` : ''}` : placed;
 
     const scoreText = (s: ScoreEntry) =>
-      mode === 'race' ? (s.bestLap ? formatLap(s.bestLap) : 'no lap') : mode === 'ctf' ? `${s.captures} cap${s.captures === 1 ? '' : 's'} · ${s.kills} kills` : `${s.kills} kill${s.kills === 1 ? '' : 's'}`;
+      mode === 'race'
+        ? s.bestLap
+          ? formatLap(s.bestLap)
+          : 'no lap'
+        : mode === 'ctf'
+          ? `${s.captures} cap${s.captures === 1 ? '' : 's'} · ${s.kills} kills`
+          : mode === 'koth'
+            ? `${s.points} s on the hill · ${s.kills} kills`
+            : `${s.kills} kill${s.kills === 1 ? '' : 's'}`;
     el('results-podium').replaceChildren(
       ...ranked.slice(0, 3).map((s, i) => {
         const div = document.createElement('div');
@@ -588,7 +651,7 @@ export class Hud {
     if (!info) return;
     this.death.classList.toggle('killcam', info.killcam);
     this.killcamLabel.hidden = !info.killcam;
-    const timer = respawnIn > 0 ? `Respawning in ${Math.ceil(respawnIn)}` : 'Respawning…';
+    const timer = respawnIn > 1000 ? 'Out until the next round' : respawnIn > 0 ? `Respawning in ${Math.ceil(respawnIn)}` : 'Respawning…';
     if (timer !== this.shownTimer) this.deathTimer.textContent = this.shownTimer = timer;
     this.deathTitle.textContent = info.killerId
       ? `Killed by ${this.name(info.killerId)}`
@@ -641,7 +704,7 @@ export class Hud {
     if (!this.boardOpen) return;
     const mode = match?.mode ?? 'ffa';
     const sorted = rankScores(scores, mode);
-    const goal = !match ? '' : mode === 'race' ? 'best lap wins' : mode === 'ctf' ? `first to ${match.scoreLimit} captures` : `first to ${match.scoreLimit}`;
+    const goal = !match ? '' : modeGoal(mode, match.scoreLimit);
     const title = match ? `${MODES[mode].name}  ·  ${mapTitle(match.map)}  ·  ${goal}  ·  ${formatTime(match.phase === 'playing' ? match.timeLeft : 0)} left` : '';
     const key = title + JSON.stringify(sorted) + JSON.stringify(match?.teamScores);
     if (key === this.shownBoard) return;
@@ -653,7 +716,9 @@ export class Hud {
         ? [['Best lap', (s) => (s.bestLap ? formatLap(s.bestLap) : '–')]]
         : mode === 'ctf'
           ? [['Caps', (s) => String(s.captures)], ['Kills', (s) => String(s.kills)], ['Deaths', (s) => String(s.deaths)]]
-          : [['Kills', (s) => String(s.kills)], ['Deaths', (s) => String(s.deaths)], ['Air', (s) => String(s.airshots)]];
+          : mode === 'koth'
+            ? [['Hill', (s) => `${s.points} s`], ['Kills', (s) => String(s.kills)], ['Deaths', (s) => String(s.deaths)]]
+            : [['Kills', (s) => String(s.kills)], ['Deaths', (s) => String(s.deaths)], ['Air', (s) => String(s.airshots)]];
     const head = document.createElement('tr');
     for (const text of ['Player', ...columns.map(([name]) => name), 'Ping']) {
       const th = document.createElement('th');

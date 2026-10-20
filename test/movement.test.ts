@@ -59,6 +59,8 @@ test('the grapple attaches in range, pulls you in, and lets go on release', () =
   const p = sim.addPlayer('a');
   place(p, 0, 1, 40);
   settle(sim, p);
+  // The pull runs through a mystery box: a two-handed weapon from it would put the grapple away.
+  for (const box of sim.pickups) box.respawnIn = 1e9;
   // The tower is 8 m wide at the center: aim at it, about 34 m away.
   const events = run(sim, 1, { a: { grapple: true, yaw: 0, pitch: 0.2 } });
   assert.ok(events.some((e) => e.type === 'grapple' && e.attached), 'hooked the tower');

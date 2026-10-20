@@ -1,6 +1,10 @@
 import type { BotSkill } from './bot';
 import { DT, MODES, type GameMode } from './config';
+import { PLAYABLE_MAPS } from './map';
+import { CUSTOM_PREFIX, sanitizeMap } from './custommap';
+import type { MapDef } from './map';
 import { MAPS } from './map';
+import type { StatEvent } from './progress';
 import { cleanText, type ServerMessage } from './protocol';
 import { GameServer, type ServerOptions } from './server';
 
@@ -26,6 +30,8 @@ export interface RoomRequest {
   bots: number; // fill up to this many players with bots
   skill: BotSkill | 'auto';
   private: boolean;
+  /** A map from the editor (map is then 'custom'). */
+  custom?: MapDef;
 }
 
 /** A room as the server browser lists it. */
@@ -40,6 +46,7 @@ export interface RoomInfo {
   bots: number;
   phase: string;
   main: boolean;
+  mapTitle: string;
 }
 
 export interface Room {
@@ -56,17 +63,25 @@ export function parseRoomRequest(data: unknown): RoomRequest | null {
   if (!data || typeof data !== 'object') return null;
   const r = data as Record<string, unknown>;
   const mode = typeof r.mode === 'string' && r.mode in MODES ? (r.mode as GameMode) : null;
-  const map = typeof r.map === 'string' && (r.map === 'rotation' || r.map in MAPS) ? r.map : null;
+  const custom = r.map === 'custom' ? sanitizeMap(r.custom) : null;
+  const map = typeof r.map === 'string' && (r.map === 'rotation' || PLAYABLE_MAPS.includes(r.map) || custom) ? r.map : null;
   if (!mode || !map) return null;
   const bots = ROOM_BOTS.includes(r.bots as (typeof ROOM_BOTS)[number]) ? (r.bots as number) : 0;
   const skill = (['easy', 'normal', 'hard', 'auto'] as const).find((s) => s === r.skill) ?? 'auto';
   const name = cleanText(r.name, MAX_ROOM_NAME) || `${MODES[mode].name} room`;
-  return { name, mode, map, bots, skill, private: r.private === true };
+  return { name, mode, map, bots, skill, private: r.private === true, ...(custom ? { custom } : {}) };
 }
 
 export class Rooms {
   private readonly rooms = new Map<string, Room>();
   readonly main: Room;
+  /** Someone was voted out of a room. */
+  onKick: (room: Room, id: string) => void = () => {};
+  onSuspect: (room: Room, id: string, name: string, detail: { hits: number; snaps: number }) => void = () => {};
+  onDeath: (map: string, x: number, z: number, cause: string) => void = () => {};
+  onMatchOver: (mode: GameMode, map: string, people: number) => void = () => {};
+  /** Something for a player's profile happened in a room. */
+  onStat: (room: Room, id: string, profile: string, name: string, e: StatEvent) => void = () => {};
 
   constructor(
     /** Delivers a message to a client, whichever room it's in (client ids are unique across rooms). */
@@ -76,7 +91,16 @@ export class Rooms {
     readonly limits = { maxRooms: 8, idleTimeout: 120 },
   ) {
     this.main = { code: MAIN_ROOM, name: 'Main', server: new GameServer(send, mainOptions), public: true, main: true, idle: 0 };
+    this.hook(this.main);
     this.rooms.set(MAIN_ROOM, this.main);
+  }
+
+  private hook(room: Room) {
+    room.server.onKick = (id) => this.onKick(room, id);
+    room.server.onStat = (id, profile, name, e) => this.onStat(room, id, profile, name, e);
+    room.server.onSuspect = (id, name, detail) => this.onSuspect(room, id, name, detail);
+    room.server.onDeath = (map, x, z, cause) => this.onDeath(map, x, z, cause);
+    room.server.onMatchOver = (mode, map, people) => this.onMatchOver(mode, map, people);
   }
 
   get count(): number {
@@ -95,17 +119,22 @@ export class Rooms {
     do {
       code = Array.from({ length: CODE_LENGTH }, () => CODE_LETTERS[Math.floor(Math.random() * CODE_LETTERS.length)]).join('');
     } while (this.rooms.has(code));
-    const maps = req.map === 'rotation' ? Object.keys(MAPS).map((m) => `${m}:${req.mode}`) : [`${req.map}:${req.mode}`];
+    // A map from the editor joins the list of maps while its room is open.
+    const custom = req.custom ? `${CUSTOM_PREFIX}${code.toLowerCase()}` : null;
+    if (custom) MAPS[custom] = req.custom!;
+    const maps = req.map === 'rotation' ? PLAYABLE_MAPS.map((m) => `${m}:${req.mode}`) : [`${custom ?? req.map}:${req.mode}`];
     const server = new GameServer(this.send, {
       maxPlayers: this.mainOptions.maxPlayers,
       maxSpectators: this.mainOptions.maxSpectators,
       intermission: this.mainOptions.intermission,
+      reconnectGrace: this.mainOptions.reconnectGrace,
       maps,
       mode: req.mode,
       minPlayers: req.bots,
       botSkill: req.skill,
     });
     const room: Room = { code, name: req.name, server, public: !req.private, main: false, idle: 0 };
+    this.hook(room);
     this.rooms.set(code, room);
     return room;
   }
@@ -120,7 +149,7 @@ export class Rooms {
 
   info(r: Room): RoomInfo {
     const s = r.server.status();
-    return { code: r.code, name: r.name, mode: s.mode, map: s.map, players: s.players.length, maxPlayers: s.maxPlayers, spectators: s.spectators.length, bots: s.bots, phase: s.match.phase, main: r.main };
+    return { code: r.code, name: r.name, mode: s.mode, map: s.map, mapTitle: MAPS[s.map]?.title ?? s.map, players: s.players.length, maxPlayers: s.maxPlayers, spectators: s.spectators.length, bots: s.bots, phase: s.match.phase, main: r.main };
   }
 
   /** One tick of every room. Rooms that have sat empty long enough close (never the main one). */
@@ -131,6 +160,7 @@ export class Rooms {
       if (!r.main && r.idle > this.limits.idleTimeout) {
         r.server.sim.world.free();
         this.rooms.delete(code);
+        delete MAPS[`${CUSTOM_PREFIX}${code.toLowerCase()}`];
       }
     }
   }

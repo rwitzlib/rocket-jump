@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { TRAILS } from '../shared/progress';
 import { DecalGeometry } from 'three/examples/jsm/geometries/DecalGeometry.js';
 import { GRENADE, HYPERSONIC, ROCKET, SEEKERS } from '../shared/config';
 import { isArmed, type Projectile, type ProjectileKind } from '../shared/sim';
@@ -138,8 +139,13 @@ interface ProjectileMesh {
   spin: number; // a grenade's tumble so far, radians
 }
 
+type Trail = (typeof TRAILS)[number];
+const _hue = new THREE.Color();
+
 /** Rockets, grenades, trails and explosions. Purely visual: reads game state, never writes it. */
 export class Effects {
+  /** A player's rocket trail (their profile's look); null for the classic one. */
+  trailOf: (ownerId: string) => Trail | null = () => null;
   readonly fire = new ParticleSystem(3000, THREE.AdditiveBlending, undefined, 1.25);
   readonly smoke = new ParticleSystem(3000, THREE.NormalBlending, puffTexture());
   /** Cartoon fireballs: solid billowing puffs, drawn a little brighter than lit so they glow. */
@@ -590,7 +596,12 @@ export class Effects {
         continue;
       }
 
-      // Lay smoke + exhaust glow at fixed spacing along the path traveled since the last frame.
+      // Lay smoke + exhaust glow at fixed spacing along the path traveled since the last frame, in
+      // the colors of the shooter's trail.
+      const trail = this.trailOf(r.ownerId);
+      const fire = trail ? [...trail.fire] : [0xffd080, 0xff5010];
+      const smoke = trail ? [...trail.smoke] : [0xd8d4d0, 0x8a8682];
+      if (trail?.id === 'rainbow') fire[1] = _hue.setHSL((performance.now() / 1500 + r.id * 0.17) % 1, 1, 0.55).getHex();
       let gap = lastTrail.distanceTo(mesh.position);
       _step.subVectors(mesh.position, lastTrail).normalize();
       while (gap >= TRAIL_SPACING) {
@@ -602,12 +613,13 @@ export class Effects {
           vel: _rand,
           life: 0.9 + Math.random() * 0.5,
           size: [0.35, 1.6],
-          color: [0xd8d4d0, 0x8a8682],
+          color: smoke as [number, number],
           alpha: 0.7,
           drag: 1,
           gravity: -0.4,
         });
-        this.fire.emit({ pos: lastTrail, life: 0.12, size: [0.5, 0.2], color: [0xffd080, 0xff5010], alpha: 0.8 });
+        this.fire.emit({ pos: lastTrail, life: 0.12, size: [0.5, 0.2], color: fire as [number, number], alpha: 0.8 });
+        if (trail?.id === 'rainbow') fire[1] = _hue.offsetHSL(0.03, 0, 0).getHex();
       }
     }
     for (const [id, entry] of this.projectileMeshes) {

@@ -11,17 +11,23 @@ import { Effects } from './effects';
 import type { DeathInfo, Hud, Marker } from './hud';
 import type { Input } from './input';
 import { KILLCAM_AFTER, KILLCAM_BEFORE, KillcamRecorder } from './killcam';
+import { ClipRecorder } from './clips';
 import { buildLevel, CrateView } from './level';
 import { resetLevelMaterials } from './surfaces';
 import { blankRemote, NetClient, type RemotePlayer } from './net/netclient';
 import type { NetOverlay } from './net/netoverlay';
 import type { Transport } from './net/transport';
-import { clearFlags, FlagsView, formatLap, ItemsView, RaceGhost, RaceView } from './objectives';
+import { clearFlags, FlagsView, formatLap, HillView, ItemsView, RaceGhost, RaceView } from './objectives';
+import { noPickups } from '../shared/modes';
 import type { PerfOverlay } from './perf';
 import type { PostFX } from './postfx';
 import { PickupView } from './pickups';
 import { RemotePlayersView } from './remoteview';
 import { Rope } from './rope';
+import { Coach, Tips } from './tutorial';
+import { fetchBoard } from './profile';
+import { LAP_SAMPLE } from '../shared/server';
+import { decodeLook, TRAILS, type Look } from '../shared/progress';
 import type { Settings } from './settings';
 import { VehicleView } from './vehicles';
 import { ViewModel } from './viewmodel';
@@ -59,6 +65,8 @@ export interface Game {
   receive(msg: ServerMessage): void;
   /** Re-reads FOV and the like after the settings changed. */
   applySettings(): void;
+  /** Saves the last replay as a video file. False if there isn't one. */
+  saveClip(): boolean;
   dispose(): void;
 }
 
@@ -69,6 +77,8 @@ export interface GameSetup {
   transport: Transport;
   startSeq: number;
   spectator: boolean;
+  /** Where the server's HTTP side is, for online games (race records); null in practice. */
+  apiBase: string | null;
 }
 
 export function startGame(ctx: GameContext, setup: GameSetup): Game {
@@ -113,12 +123,38 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
   killcamView.castLevel = remoteView.castLevel;
   const recorder = new KillcamRecorder();
   const race = mode === 'race';
-  const pickupView = race ? null : new PickupView(scene, sim.pickups);
-  const itemsView = race ? null : new ItemsView(scene, sim.items);
+  const pickupView = noPickups(mode) ? null : new PickupView(scene, sim.pickups);
+  const itemsView = noPickups(mode) ? null : new ItemsView(scene, sim.items);
+  const hillView = mode === 'koth' ? new HillView(scene, sim.rules.hills) : null;
+  let hillHolder: string | null = null;
+  let hillContested = false;
   const flagsView = mode === 'ctf' ? new FlagsView(scene, sim.flags.map((f) => f.home)) : null;
   const raceView = race ? new RaceView(scene, sim.course) : null;
   const ghost = race && !spectator ? new RaceGhost(scene, mapName) : null;
+  // Online: the map's record lap flies along too, as a gold ghost.
+  if (ghost && setup.apiBase !== null) {
+    void fetchBoard(setup.apiBase, mapName, true)
+      .then((board) => {
+        if (!board.ghost?.path.length) return;
+        ghost.setRecord(board.ghost.path, LAP_SAMPLE, board.ghost.time, board.ghost.name);
+        hud.feedNotice(`Record lap ${formatLap(board.ghost.time)} by ${board.ghost.name}: the gold ghost`, 0xffd060);
+      })
+      .catch(() => {});
+  }
   const vehicleView = new VehicleView(scene, sim.vehicles);
+  // What everyone wears, from the scores: armor color and rocket trail.
+  const looks = new Map<string, Look>();
+  const shownLooks = new Map<string, string>();
+  effects.trailOf = (id) => {
+    const trail = looks.get(id)?.trail;
+    return trail && trail !== 'classic' ? (TRAILS.find((t) => t.id === trail) ?? null) : null;
+  };
+  // Training talks you round its course; everywhere else, one-off tips for new players.
+  const coach = map.tutorial && !spectator ? new Coach(input) : null;
+  const tips = new Tips(settings, input);
+  let aliveFor = 0;
+  let couldGrapple = false;
+  let grappleCue = 0;
   let fov = settings.fov;
   // Rockets and grenades are drawn leaving the barrel you see: the first-person one for ours, the model's for others.
   effects.muzzleOffset = (id, out) => {
@@ -133,6 +169,24 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
   const cameraFx = new CameraFX(settings.fov);
   input.yaw = me.yaw;
   input.pitch = 0;
+  // Gamepad aim assist: the view slows while the crosshair is on (or just off) an enemy in sight.
+  const assistDir = new THREE.Vector3();
+  const assistTo = new THREE.Vector3();
+  input.aimFriction = (yaw, pitch) => {
+    if (spectator || !me.alive) return 1;
+    aimDirection(yaw, pitch, assistDir);
+    let best = Infinity;
+    for (const r of client.remotes.values()) {
+      if (!r.alive || sim.allies(localId, r.id)) continue;
+      assistTo.copy(r.pos).sub(camera.position);
+      const dist = assistTo.length();
+      if (dist > 90 || dist < 1) continue;
+      const angle = assistDir.angleTo(assistTo);
+      // A player is about a meter across: allow for that at this distance.
+      best = Math.min(best, angle - Math.atan(0.6 / dist));
+    }
+    return best < 0.02 ? 0.4 : best < 0.08 ? 0.65 : 1;
+  };
   hud.setLocalId(localId);
   announcer.setLocalId(localId);
   let death: Omit<DeathInfo, 'damage' | 'killcam'> | null = null;
@@ -141,7 +195,14 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
   // After we die: the camera backs off into third person to watch our body fly, then (if someone
   // killed us) the killcam replays the last couple of seconds from their eyes.
   let deathCam: { from: THREE.Vector3; yaw: number; age: number; target: THREE.Vector3 } | null = null;
-  let killcam: { killerId: string; diedAt: number; age: number; shown: number } | null = null;
+  // `source`: the live recorder for our own death, or a saved copy for the play of the match.
+  let killcam: { killerId: string; diedAt: number; age: number; shown: number; source: KillcamRecorder; highlight: boolean } | null = null;
+  // The play of the match: the best kill this client saw, kept to replay on the results screen.
+  let highlight: { score: number; killerId: string; t: number; label: string; source: KillcamRecorder | null } | null = null;
+  let highlightShown = -1; // the match id it was last shown for
+  const lastKill = new Map<string, number>(); // killer -> recorder clock of their last kill, for multi kills
+  const clips = new ClipRecorder();
+  clips.onReady = (label) => tips.show('clip', `Press K to save that replay (${label}) as a video.`);
   // The killer as the killcam shows them: their weapon in first person, kicking when they fire,
   // and their grapple rope.
   let killcamKiller: RemotePlayer | null = null;
@@ -193,6 +254,7 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
         audio.play('explosion', { at: e.pos, volume: 1.6 });
         const dist = e.pos.distanceTo(camera.position);
         cameraFx.shake(Math.max(0, 0.7 * (1 - dist / 25)));
+        if (dist < 20) input.rumble(0.6 * (1 - dist / 20), 160);
         break;
       }
       case 'fired': {
@@ -202,6 +264,7 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
         const rate = e.weapon === 'javelin' ? 0.75 : e.weapon === 'stinger' ? 1.35 : 1;
         if (mine) {
           viewModel.fire();
+          input.rumble(0.15, 60);
           audio.play(sound, { volume: 0.8, rate });
           cameraFx.shake(e.weapon === 'grenade' ? 0.08 : e.weapon === 'javelin' || e.weapon === 'hypersonic' ? 0.18 : 0.12);
         } else {
@@ -247,7 +310,19 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
         if (at) audio.play('pickup', { at, volume: 0.9, rate: e.action === 'captured' ? 0.6 : 0.8 });
         break;
       }
+      case 'hill':
+        if (hillHolder !== localId && e.playerId === localId && !spectator) {
+          hud.medal('HOLDING THE HILL', 'Stay on it', 'notice', 0x60ff90);
+          audio.play('pickup', { volume: 0.6, rate: 1.2 });
+        }
+        hillHolder = e.playerId;
+        hillContested = e.contested;
+        break;
       case 'checkpoint':
+        if (mine && coach?.passed(e.index, e.time)) {
+          hud.medal('TRAINING COMPLETE', 'You know the moves', 'big', 0x7cf0a0);
+          audio.play('airshot', { volume: 0.7 });
+        }
         if (!mine || !ghost) break;
         audio.play('blip', { volume: 0.6, rate: 1.3 });
         {
@@ -312,6 +387,8 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
         const at = playerPos(e.playerId);
         if (at) effects.beam(fxAt.copy(at).setY(at.y - PLAYER.halfHeight - PLAYER.radius));
         if (mine) {
+          coach?.reset();
+          if (me.deaths > 0 || death) tips.show('respawn', 'Back in! Floating ? boxes swap your rocket launcher for something different until you die.');
           input.yaw = e.yaw;
           input.pitch = 0;
           rope.release();
@@ -329,6 +406,7 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
         }
         if (mine) {
           flash = Math.max(flash, 0.3 + e.amount / 60);
+          input.rumble(0.3 + e.amount / 100, 200);
           if (e.sourceId !== localId) damageTaken.set(e.sourceId, (damageTaken.get(e.sourceId) ?? 0) + e.amount);
           // Point at whoever did it, relative to where we're looking.
           const from = e.sourceId !== localId ? playerPos(e.sourceId) : undefined;
@@ -339,6 +417,7 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
         } else if (e.sourceId === localId && !spectator) {
           hud.hitMarker(false);
           // Hitting someone in midair rings out: the shot this game is built around.
+          if (e.midair) tips.show('airshot', 'Airshot! Hitting someone in midair is the shot this game is about: knock them into the air, then catch them.');
           if (e.midair) audio.play('airshot', { volume: 0.45, rate: 1.2 });
           else audio.play('hit', { volume: 0.6 });
         }
@@ -388,11 +467,22 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
           rope.release();
           const intermission = client.match?.phase === 'intermission';
           if (settings.killcam && e.killerId && e.killerId !== localId && !race && !intermission && recorder.covers(recorder.clock)) {
-            killcam = { killerId: e.killerId, diedAt: recorder.clock, age: 0, shown: recorder.clock - KILLCAM_BEFORE };
+            killcam = { killerId: e.killerId, diedAt: recorder.clock, age: 0, shown: recorder.clock - KILLCAM_BEFORE, source: recorder, highlight: false };
           }
         } else if (e.killerId === localId && !spectator) {
           hud.hitMarker(true);
           audio.play('kill', { volume: 0.7 });
+        }
+        // A contender for the play of the match: airshots, long shots and multi kills score highest.
+        if (e.killerId && e.killerId !== e.playerId && !race && client.match?.phase === 'playing' && recorder.covers(recorder.clock)) {
+          const previous = lastKill.get(e.killerId) ?? -Infinity;
+          lastKill.set(e.killerId, recorder.clock);
+          const multi = recorder.clock - previous < 3;
+          const score = 1 + (e.midair ? 2.5 : 0) + Math.min(e.distance, 60) / 20 + (multi ? 1.5 : 0) + (e.cause === 'fall' ? 0.5 : 0);
+          if (!highlight || score > highlight.score) {
+            const how = [e.midair ? 'airshot' : '', multi ? 'multi kill' : '', e.distance > 25 ? `${Math.round(e.distance)} m` : ''].filter(Boolean).join(', ');
+            highlight = { score, killerId: e.killerId, t: recorder.clock, label: `${hud.name(e.killerId)}${how ? `: ${how}` : ''}`, source: null };
+          }
         }
         break;
       }
@@ -401,7 +491,10 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
 
   // --- spectating -----------------------------------------------------------------------------
 
-  const spec = { follow: true, target: null as string | null, pos: new THREE.Vector3(0, 20, 0), fire: false, grapple: false, jump: false, yaw: 0 };
+  // Watching: follow a player, fly a free camera, or look down on the whole map from above (with
+  // everyone pinned on screen, through walls). Space goes round the three.
+  const spec = { cam: 'follow' as 'follow' | 'free' | 'overhead', target: null as string | null, pos: new THREE.Vector3(0, 20, 0), fire: false, grapple: false, jump: false, yaw: 0, zoom: 1 };
+  const mapCenter = level.bounds.getCenter(new THREE.Vector3());
   /** Who to watch next: the living players in a fixed order, stepping `dir` from the current one. */
   const cycleTarget = (dir: number) => {
     const ids = [...client.remotes.values()].filter((r) => r.alive).map((r) => r.id).sort();
@@ -415,16 +508,16 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
   const spectate = (dt: number) => {
     const s = input.sample();
     if (s.fire && !spec.fire) {
-      spec.follow = true;
+      spec.cam = 'follow';
       cycleTarget(1);
     }
     if (s.grapple && !spec.grapple) {
-      spec.follow = true;
+      spec.cam = 'follow';
       cycleTarget(-1);
     }
     if (s.jump && !spec.jump) {
-      spec.follow = !spec.follow;
-      if (!spec.follow) {
+      spec.cam = spec.cam === 'follow' ? 'free' : spec.cam === 'free' ? 'overhead' : 'follow';
+      if (spec.cam === 'free') {
         // Free camera starts where the follow camera was, looking the same way.
         spec.pos.copy(camera.position);
         input.yaw = camera.rotation.y;
@@ -435,14 +528,12 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
     spec.grapple = s.grapple;
     spec.jump = s.jump;
     let target = spec.target ? client.remotes.get(spec.target) : undefined;
-    if (spec.follow && (!target || !target.alive)) {
+    if (spec.cam === 'follow' && !target) {
       // Stay on someone who died until they're back, unless they've left.
-      if (!target) {
-        cycleTarget(1);
-        target = spec.target ? client.remotes.get(spec.target) : undefined;
-      }
+      cycleTarget(1);
+      target = spec.target ? client.remotes.get(spec.target) : undefined;
     }
-    if (spec.follow && target) {
+    if (spec.cam === 'follow' && target) {
       spec.yaw += Math.atan2(Math.sin(target.yaw - spec.yaw), Math.cos(target.yaw - spec.yaw)) * Math.min(1, dt * 10);
       camGoal.copy(target.pos).y += PLAYER.eyeOffset + 0.4;
       aimDirection(spec.yaw, Math.min(target.pitch, 0.4) - 0.25, lookBack).negate();
@@ -450,6 +541,16 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
       camera.lookAt(fxAt.copy(camGoal).addScaledVector(lookBack, -6));
       const name = hud.name(target.id);
       hud.setSpectating(target.alive ? `Watching ${name}` : `Watching ${name} (respawning)`);
+      return;
+    }
+    if (spec.cam === 'overhead') {
+      // High over the middle, turned with the mouse, W and S to zoom.
+      spec.zoom = Math.min(1.8, Math.max(0.35, spec.zoom - s.forward * dt * 0.8));
+      const r = Math.max(40, level.extent * 1.25) * spec.zoom;
+      const tilt = 0.95;
+      camera.position.set(mapCenter.x + Math.sin(input.yaw) * r * Math.cos(tilt), mapCenter.y + r * Math.sin(tilt), mapCenter.z + Math.cos(input.yaw) * r * Math.cos(tilt));
+      camera.lookAt(mapCenter);
+      hud.setSpectating('Overhead: mouse turns, W/S zoom');
       return;
     }
     // Free camera: fly where you look.
@@ -460,6 +561,15 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
     camera.position.copy(spec.pos);
     camera.rotation.set(input.pitch, input.yaw, 0);
     hud.setSpectating('Free camera');
+  };
+
+  /** A teammate still standing, to watch while we're out of an elimination round. */
+  const teammateUp = (): RemotePlayer | undefined => {
+    const current = spec.target ? client.remotes.get(spec.target) : undefined;
+    if (current?.alive && current.team === me.team) return current;
+    const next = [...client.remotes.values()].find((r) => r.alive && r.team === me.team);
+    spec.target = next?.id ?? null;
+    return next;
   };
 
   // --- objective markers --------------------------------------------------------------------------
@@ -500,8 +610,20 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
       });
       // Carrying their flag: home is where it goes.
       if (me.flag >= 0 && myTeam >= 0 && !spectator) addMarker(fxAt.copy(sim.flags[myTeam].home).setY(sim.flags[myTeam].home.y + 2), TEAMS[myTeam].color, 'Capture');
+    } else if (hillView && client.match) {
+      const label = hillContested ? 'Contested' : hillHolder === localId && !spectator ? 'Holding' : hillHolder ? `${hud.name(hillHolder)} holds` : 'Hill';
+      const color = hillContested ? 0xffe060 : hillHolder === localId && !spectator ? 0x60ff90 : hillHolder ? 0xff5a4a : 0xffffff;
+      addMarker(fxAt.copy(hillView.position).setY(hillView.position.y + 3), color, label);
     } else if (race && raceView && !spectator && me.alive) {
       addMarker(raceView.centers[me.checkpoint], me.checkpoint === 0 ? 0xffe060 : 0x60ff90, me.checkpoint === 0 && me.lapTime >= 0 ? 'Finish' : me.checkpoint === 0 ? 'Start' : 'Next');
+    }
+    // From overhead, everyone is pinned on screen (through walls), in their team's color.
+    if (spectator && spec.cam === 'overhead') {
+      for (const r of client.remotes.values()) {
+        if (!r.alive) continue;
+        const color = r.team >= 0 ? TEAMS[r.team].color : 0xffffff;
+        addMarker(fxAt.copy(r.pos).setY(r.pos.y + 1.4), color, hud.name(r.id));
+      }
     }
     hud.setMarkers(markers);
   };
@@ -532,23 +654,29 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
     killcam.age += dt;
     if (killcam.age < DEATH_CAM_TIME) return false;
     const t = killcam.diedAt - KILLCAM_BEFORE + (killcam.age - DEATH_CAM_TIME);
-    if (t > killcam.diedAt + KILLCAM_AFTER) return false; // over: back to watching the body until we respawn
+    if (t > killcam.diedAt + KILLCAM_AFTER) {
+      clips.stop();
+      return false; // over: back to watching the body until we respawn
+    }
+    const source = killcam.source;
+    if (killcam.shown <= killcam.diedAt - KILLCAM_BEFORE) clips.start(renderer.domElement, killcam.highlight ? 'play of the match' : 'killcam');
     remoteView.setVisible(false);
-    const projectiles = recorder.sample(t, killcamPlayers);
+    const projectiles = source.sample(t, killcamPlayers);
     const killer = killcamPlayers.get(killcam.killerId);
     if (!killer) return false;
     killcamShown.clear();
     for (const [id, r] of killcamPlayers) if (id !== killcam.killerId || killer.vehicle >= 0) killcamShown.set(id, r);
     killcamView.names = remoteView.names;
     killcamView.teams = remoteView.teams;
+    killcamView.looks = looks;
     killcamView.localTeam = remoteView.localTeam;
     killcamView.sync(killcamShown, dt);
-    for (const b of recorder.blastsBetween(killcam.shown, t)) {
+    for (const b of source.blastsBetween(killcam.shown, t)) {
       effects.explosion(b.pos, b.normal, b.surface, b.radius);
       killcamView.blast(b.pos, b.radius);
       audio.play('explosion', { at: b.pos, volume: 1.4 });
     }
-    for (const id of recorder.firedBetween(killcam.shown, t)) if (id === killcam.killerId) viewModel.fire();
+    for (const id of source.firedBetween(killcam.shown, t)) if (id === killcam.killerId) viewModel.fire();
     killcam.shown = t;
     effects.update(projectiles, 1, dt);
     // Their speed, for the weapon's sway; their rope, from the hand we see.
@@ -622,6 +750,12 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
       shownPlayers.set(localId, self);
     }
     remoteView.names = hud.setNames(client.scores);
+    for (const s of client.scores) {
+      if (shownLooks.get(s.id) === s.look) continue;
+      shownLooks.set(s.id, s.look);
+      looks.set(s.id, decodeLook(s.look));
+    }
+    remoteView.looks = looks;
     const teams = new Map(client.teams);
     if (!spectator) teams.set(localId, me.team);
     remoteView.teams = teams;
@@ -634,11 +768,29 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
       recorded.set(localId, { ...self, pos: ride ? self.pos : lerpPos });
     }
     recorder.record(dt, recorded.values(), client.renderProjectiles);
+    // Once the moment after the best kill is in, keep a copy of it for the results screen.
+    if (highlight && !highlight.source && recorder.clock >= highlight.t + KILLCAM_AFTER) {
+      highlight.source = recorder.snapshot(highlight.t - KILLCAM_BEFORE - 0.1, highlight.t + KILLCAM_AFTER);
+    }
+    // The match is over: show the play of the match before the results.
+    const over = client.match?.phase === 'intermission';
+    if (over && highlight?.source && highlightShown !== client.match!.id && !spectator) {
+      highlightShown = client.match!.id;
+      endKillcam();
+      killcam = { killerId: highlight.killerId, diedAt: highlight.t, age: DEATH_CAM_TIME, shown: highlight.t - KILLCAM_BEFORE - 0.01, source: highlight.source, highlight: true };
+      hud.setHighlight(`PLAY OF THE MATCH · ${highlight.label}`);
+    }
+    if (!over && highlightShown >= 0 && highlight?.source) {
+      // A new match: start looking for the next one.
+      highlight = null;
+      lastKill.clear();
+    }
 
     // Camera: interpolated position, but the latest mouse look so aiming never lags. In a vehicle
     // it orbits behind a pivot above your seat (the sim aims along the same line), pulled in
     // short of any wall behind it.
     let replaying = false;
+    let teammateWatched: string | null = null;
     if (spectator) spectate(dt);
     else {
       if (ride && rideSeat) {
@@ -652,7 +804,11 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
       }
       camera.position.add(client.visualOffset);
       camera.rotation.set(input.pitch, input.yaw, 0);
-      replaying = !me.alive && playKillcam(dt);
+      replaying = (!me.alive || !!killcam?.highlight) && playKillcam(dt);
+      if (!replaying && killcam?.highlight) {
+        hud.setHighlight(null);
+        endKillcam();
+      }
       if (!replaying && killcam) {
         killcamView.dispose();
         remoteView.setVisible(true);
@@ -663,7 +819,16 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
         if (killcamRope) rope.release();
         killcamRope = false;
       }
-      if (deathCam && !me.alive && !replaying) {
+      // Out of an elimination round: after the killcam, watch a teammate who's still standing.
+      const watching = mode === 'elim' && !me.alive && !replaying && deathCam && deathCam.age > 2.5 ? teammateUp() : undefined;
+      if (watching) {
+        spec.yaw += Math.atan2(Math.sin(watching.yaw - spec.yaw), Math.cos(watching.yaw - spec.yaw)) * Math.min(1, dt * 10);
+        camGoal.copy(watching.pos).y += PLAYER.eyeOffset + 0.4;
+        aimDirection(spec.yaw, Math.min(watching.pitch, 0.4) - 0.25, lookBack).negate();
+        camera.position.copy(camGoal).addScaledVector(lookBack, sim.clearDistance(camGoal, lookBack, SPECTATE_DISTANCE));
+        camera.lookAt(fxAt.copy(camGoal).addScaledVector(lookBack, -6));
+        teammateWatched = `Watching ${hud.name(watching.id)}`;
+      } else if (deathCam && !me.alive && !replaying) {
         deathCam.age += dt;
         const corpse = remoteView.corpsePosition(localId);
         if (corpse) deathCam.target.copy(corpse);
@@ -709,6 +874,7 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
     itemsView?.update(dt);
     flagsView?.update(dt, client.flags);
     raceView?.update(dt, spectator ? -1 : me.checkpoint);
+    hillView?.update(dt, client.match?.hill ?? 0, hillContested ? 'contested' : !hillHolder ? 'free' : hillHolder === localId && !spectator ? 'mine' : 'theirs');
     ghost?.update(me.alive ? me.lapTime : -1);
     if (me.grapple) rope.follow(me.grapple.anchor, me.grapple.normal);
     rope.update(dt, camera.localToWorld(viewModel.ropeOrigin(fov, hand)), camera);
@@ -722,7 +888,16 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
     if (speedText !== shownSpeed) speedEl.textContent = shownSpeed = speedText;
     // No grapple from a seat.
     const grappleStowed = !!WEAPONS[me.primary].twoHanded || !!ride;
-    crosshair.classList.toggle('can-grapple', !spectator && !me.grapple && !grappleStowed && sim.grappleTarget(me, target) !== null);
+    const canGrapple = !spectator && me.alive && !me.grapple && !grappleStowed && sim.grappleTarget(me, target) !== null;
+    crosshair.classList.toggle('can-grapple', canGrapple);
+    // A soft tick as the grapple comes in range, so you can hear it without watching the crosshair.
+    grappleCue = Math.max(0, grappleCue - dt);
+    if (canGrapple && !couldGrapple && grappleCue === 0) {
+      audio.play('blip', { volume: 0.12, rate: 1.9 });
+      grappleCue = 0.35;
+    }
+    couldGrapple = canGrapple;
+    if (canGrapple && !coach) tips.show('grapple', 'The crosshair turned green: your grapple reaches. Hold {grapple} to swing from it, let go to fly.');
     crosshair.classList.toggle('grappling', !!me.grapple);
     hud.setHealth(me.health, me.armor, me.overdrive);
     hud.setProtected(me.alive && me.protectedFor > 0);
@@ -746,7 +921,7 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
     // What E would do: get out, or get into the nearest vehicle with room (in a race, start over).
     hud.setVehicle(ride ? { name: ride.config.name, health: ride.health, maxHealth: ride.config.health } : null);
     if (ride) hud.setPrompt(null);
-    else if (race && me.alive && !spectator && me.lapTime >= 0) hud.setPrompt('E', 'Restart');
+    else if (race && me.alive && !spectator && me.lapTime >= 0) hud.setPrompt(input.label('use'), 'Restart');
     else if (me.alive && !spectator && !race) {
       let near: (typeof sim.vehicles)[number] | null = null;
       let nearDist = Infinity;
@@ -758,8 +933,8 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
         }
       }
       if (!near) hud.setPrompt(null);
-      else if (near.seats[0] === null) hud.setPrompt('E', `${near.kind === 'heli' ? 'Fly' : 'Drive'} ${near.config.name}`);
-      else hud.setPrompt('E', `Ride ${near.config.name} as gunner`);
+      else if (near.seats[0] === null) hud.setPrompt(input.label('use'), `${near.kind === 'heli' ? 'Fly' : 'Drive'} ${near.config.name}`);
+      else hud.setPrompt(input.label('use'), `Ride ${near.config.name} as gunner`);
     } else hud.setPrompt(null);
 
     // Seeker lock box: the sim's lock box, scaled to the current FOV, plus a marker on whoever it's locking onto.
@@ -808,10 +983,25 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
             killcam: replaying,
           };
     hud.setDeath(deathInfo, me.respawnIn);
-    if (!spectator) hud.setSpectating(null);
+    if (!spectator) hud.setSpectating(teammateWatched);
     hud.setFlags(mode === 'ctf' ? client.flags : null, myTeam);
     hud.setRace(race && !spectator && !intermission ? { lapTime: me.alive ? me.lapTime : -1, ring: me.checkpoint, rings: sim.course.rings.length, best: ghost?.bestTime ?? 0 } : null);
     updateMarkers(myTeam);
+    // Tips for the first few games, as they become useful.
+    tips.update(dt);
+    coach?.update(me.checkpoint);
+    aliveFor = !spectator && me.alive ? aliveFor + dt : 0;
+    if (!coach && !spectator && !intermission) {
+      if (aliveFor > 2) {
+        if (mode === 'ctf') tips.show('ctf', "Capture the flag: grab their flag (follow 'Take') and bring it to your base while your own flag is home.");
+        else if (mode === 'koth') tips.show('koth', 'King of the hill: stand in the glowing ring with nobody else on it to score. It moves every minute.');
+        else if (mode === 'elim') tips.show('elim', "Elimination: no health regeneration and no respawns until the round's over. Stick with your team.");
+        else if (mode === 'instagib') tips.show('instagib', 'Instagib: one Hypersonic hit kills. Keep moving, and lead your shots.');
+        else if (race) tips.show('race', 'Fly through the rings in order; the clock starts at the first. {use} starts over.');
+        else tips.show('rocketjump', 'Rocket jump: look down, then {jump} and {fire} together. Your own rockets never hurt you.');
+      }
+      if (me.alive && me.health < 40 && !race) tips.show('health', 'Hurt? Health comes back after 5 seconds out of the fight, and health packs top you up.');
+    }
     hud.setScores(client.scores, client.match);
     hud.setMatch(client.match, client.scores);
     hud.setResults(client.match, client.scores);
@@ -832,11 +1022,17 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
     client,
     frame,
     receive: (msg) => client.receive(msg),
+    saveClip: () => clips.save(),
     applySettings() {
       cameraFx.baseFov = settings.fov;
     },
     dispose() {
       window.removeEventListener('resize', resize);
+      input.aimFriction = () => 1;
+      clips.stop();
+      hud.setHighlight(null);
+      coach?.dispose();
+      tips.dispose();
       input.vehicleMode = false;
       remoteView.dispose();
       killcamView.dispose();

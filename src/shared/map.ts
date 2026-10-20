@@ -4,6 +4,10 @@ import { DOCKYARD } from './maps/dockyard';
 import { facingCenter, quad, turnBox, turnPos } from './maps/helpers';
 import { SKYREACH } from './maps/skyreach';
 import { TEMPLE } from './maps/temple';
+import { TRAINING } from './maps/training';
+import { CANYON } from './maps/canyon';
+import { COLISEUM } from './maps/coliseum';
+import { FOUNDRY } from './maps/foundry';
 import type { VehicleKind } from './types';
 
 export type Vec3Tuple = [number, number, number];
@@ -117,6 +121,8 @@ export interface MapDef {
   title: string; // shown in menus and on the scoreboard
   blurb: string; // a line about it for the menu
   fragLimit?: number; // kills to win here, when the server doesn't set one: big maps play slower
+  /** A teaching course (Training): kept out of map lists and rotations, played from its own button. */
+  tutorial?: boolean;
   boxes: BoxDef[];
   crates: Vec3Tuple[];
   spawns: SpawnDef[];
@@ -126,6 +132,8 @@ export interface MapDef {
   flags?: [Vec3Tuple, Vec3Tuple];
   /** Rocket race: where racers start (on the floor) and the ring centers, ring 0 being the start/finish gate. */
   race?: { start: Vec3Tuple; rings: Vec3Tuple[] };
+  /** King of the hill: the spots (on the floor) the hill moves between. Default: under the mystery boxes. */
+  hills?: Vec3Tuple[];
   killY: number;
   botOrbit?: number; // radius of the circle wandering bots follow around the center
   vehicles?: VehicleDef[];
@@ -358,4 +366,17 @@ export const CITADEL: MapDef = {
   botOrbit: 50,
 };
 
-export const MAPS: Record<string, MapDef> = { arena: ARENA, citadel: CITADEL, dockyard: DOCKYARD, temple: TEMPLE, skyreach: SKYREACH };
+export const MAPS: Record<string, MapDef> = {
+  arena: ARENA,
+  citadel: CITADEL,
+  dockyard: DOCKYARD,
+  temple: TEMPLE,
+  skyreach: SKYREACH,
+  foundry: FOUNDRY,
+  coliseum: COLISEUM,
+  canyon: CANYON,
+  training: TRAINING,
+};
+
+/** The maps people play matches on (not the training course). */
+export const PLAYABLE_MAPS = Object.keys(MAPS).filter((name) => !MAPS[name].tutorial);

@@ -1,7 +1,8 @@
 import { Vector3 } from 'three';
 import type { GameMode } from './config';
-import type { Vec3Tuple } from './map';
+import type { MapDef, Vec3Tuple } from './map';
 import type { MissilePhase, PlayerState, ProjectileKind, SimEvent } from './sim';
+import type { Gain } from './progress';
 import type { PlayerInput, WeaponId } from './types';
 import type { VehicleState } from './vehicle';
 
@@ -33,6 +34,8 @@ export interface JoinMessage {
   name: string;
   version: number; // PROTOCOL_VERSION
   spectate: boolean; // watch instead of play
+  resume?: string; // the token from an earlier welcome: take back that player after a dropped connection
+  profile?: string; // the browser's secret profile key, for XP and stats (online only)
 }
 
 /** Switch between watching and playing. */
@@ -83,6 +86,9 @@ export interface ScoreEntry {
   team: number; // -1 outside team modes
   captures: number; // capture the flag
   bestLap: number; // race: seconds, 0 for none yet
+  look: string; // cosmetics: "tint/trail" (see progress.ts)
+  points: number; // king of the hill: seconds on the hill
+  level: number; // profile level, 0 for none (bots, practice)
 }
 
 export type MatchPhase = 'playing' | 'intermission';
@@ -99,6 +105,9 @@ export interface MatchState {
   nextMode: GameMode;
   winnerId: string | null; // set during intermission
   winnerTeam: number; // set during intermission in team modes; -1 for a draw
+  hill: number; // king of the hill: which spot the hill is on (-1 in other modes)
+  round: number; // elimination: the round under way (0 in other modes)
+  roundLeft: number; // elimination: seconds left in the round, or (between rounds, negative) until the next
 }
 
 /** A capture-the-flag flag: where its foot is, who has it, and whether it's at its base. */
@@ -139,6 +148,8 @@ export interface WelcomeMessage {
   mode: GameMode;
   spectator: boolean;
   match: MatchState;
+  token?: string; // proves who you are when reconnecting after a dropped connection (JoinMessage.resume)
+  custom?: MapDef; // the map itself, when it's one made in the editor (clients don't have it)
 }
 
 export interface RejectedMessage {
@@ -177,7 +188,14 @@ export interface SnapshotMessage {
   input: { queued: number; starved: number; dropped: number }; // the recipient's input stream health, for debugging
 }
 
-export type ServerMessage = WelcomeMessage | SnapshotMessage | RejectedMessage | PingMessage | ChatMessage;
+/** What you just earned online: XP, a level, unlocks, finished challenges. */
+export interface ProgressMessage {
+  type: 'progress';
+  gain: Gain;
+  xp: number; // total, after
+}
+
+export type ServerMessage = WelcomeMessage | SnapshotMessage | RejectedMessage | PingMessage | ChatMessage | ProgressMessage;
 
 export const MAX_NAME = 16;
 export const MAX_CHAT = 120;
@@ -203,7 +221,14 @@ export function parseClientMessage(data: unknown): ClientMessage | null {
   const m = data as Record<string, unknown>;
   switch (m.type) {
     case 'join':
-      return { type: 'join', name: cleanText(m.name, MAX_NAME), version: finite(m.version, 0, 1e6), spectate: m.spectate === true };
+      return {
+        type: 'join',
+        name: cleanText(m.name, MAX_NAME),
+        version: finite(m.version, 0, 1e6),
+        spectate: m.spectate === true,
+        ...(typeof m.resume === 'string' && /^[a-z0-9]{8,40}$/.test(m.resume) ? { resume: m.resume } : {}),
+        ...(typeof m.profile === 'string' && /^[a-f0-9]{32}$/.test(m.profile) ? { profile: m.profile } : {}),
+      };
     case 'spectate':
       return { type: 'spectate', on: m.on === true };
     case 'ack':
@@ -250,11 +275,13 @@ const tuple = (v: Vector3): Vec3Tuple => [v.x, v.y, v.z];
 export function compareScores(mode: GameMode): (a: ScoreEntry, b: ScoreEntry) => number {
   if (mode === 'race') return (a, b) => (a.bestLap || Infinity) - (b.bestLap || Infinity) || a.name.localeCompare(b.name);
   if (mode === 'ctf') return (a, b) => b.captures - a.captures || b.kills - a.kills || a.deaths - b.deaths || a.name.localeCompare(b.name);
+  if (mode === 'koth') return (a, b) => b.points - a.points || b.kills - a.kills || a.deaths - b.deaths || a.name.localeCompare(b.name);
   return (a, b) => b.kills - a.kills || a.deaths - b.deaths || a.name.localeCompare(b.name);
 }
 
 /** What a player's place is decided by, for the HUD: kills, captures, or a lap time. */
 export function hasScored(mode: GameMode, s: ScoreEntry): boolean {
+  if (mode === 'koth') return s.points > 0 || s.kills > 0;
   return mode === 'race' ? s.bestLap > 0 : mode === 'ctf' ? s.captures > 0 || s.kills > 0 : s.kills > 0;
 }
 

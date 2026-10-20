@@ -7,6 +7,8 @@ export class WsTransport implements Transport {
   onMessage: (msg: ServerMessage) => void = () => {};
   onClose: (reason: string) => void = () => {};
   received = 0;
+  /** The WebSocket close code, once closed: 1006 for a dropped link, 4xxx for the server turning us away. */
+  closeCode = 0;
   private readonly ws: WebSocket;
   private readonly decoder = new WireDecoder();
   private closed = false;
@@ -35,6 +37,7 @@ export class WsTransport implements Transport {
     this.ws.onclose = (e) => {
       if (this.closed) return;
       this.closed = true;
+      this.closeCode = e.code;
       this.onClose(e.reason || (e.code === 1006 ? "Couldn't reach the server." : 'Disconnected from the server.'));
     };
   }
