@@ -1,0 +1,63 @@
+// The cells of the skins' sprite atlas (drawn in sprites.ts), by name: kept apart from the drawing
+// so the skin recipes (skinfx.ts) can be read without a browser.
+
+export const ATLAS_GRID = 8;
+
+/** Frame numbers, by name. */
+export const SPRITE = {
+  dot: 0,
+  puff: 1,
+  bubble: 2,
+  heart: 3,
+  note: 4,
+  star: 5,
+  twinkle: 6,
+  petal: 7,
+  leaf: 8,
+  square: 9,
+  ring: 10,
+  feather: 11,
+  crane: 12,
+  bill: 13,
+  coin: 14,
+  duck: 15,
+  bat: 16,
+  snowflake: 17,
+  glyph: 18, // ...through 21: four of them
+  checker: 22,
+  crown: 23,
+  bee: 24,
+  ghost: 25,
+  skull: 26,
+  flake: 27,
+  blob: 28,
+  confetti: 29,
+  clock: 30,
+  diamond: 31,
+  toon: 32,
+  flag: 33,
+  pumpkin: 34,
+  shard: 35,
+  kaboom: 36,
+  pow: 37,
+  boom: 38,
+  wings: 39,
+  dragon: 40,
+  rocket: 41,
+  grid: 42,
+  swirl: 43,
+  melon: 44,
+  candy: 45,
+  ribbon: 46,
+  halftone: 47,
+  scale: 48,
+  splat: 49,
+  arc: 50,
+  chip: 51,
+  rock: 52,
+  streak: 53,
+  disc: 54,
+  cross: 55,
+} as const;
+
+export const GLYPHS = [SPRITE.glyph, SPRITE.glyph + 1, SPRITE.glyph + 2, SPRITE.glyph + 3];

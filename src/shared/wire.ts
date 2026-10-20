@@ -168,7 +168,7 @@ export class ByteReader {
 type Kind = 'u' | 'i' | 'b' | 'f' | 'd' | 'd3' | 's' | 'id' | 'ids' | 'mm' | 'mm3' | 'mrad' | 'q4' | 'tenths' | 'v3' | readonly string[];
 type Schema = readonly (readonly [string, Kind])[];
 
-const WEAPONS: readonly WeaponId[] = ['rocket', 'grenade', 'hypersonic', 'javelin', 'stinger', 'grapple'];
+const WEAPONS: readonly WeaponId[] = ['rocket', 'grenade', 'hypersonic', 'javelin', 'stinger', 'grapple', 'thunder'];
 const GAME_MODES = Object.keys(MODES) as GameMode[];
 
 /** Quantized integer form of a numeric field, for delta coding and comparing. */
@@ -473,7 +473,7 @@ const YOU: Schema = [
   ['lapTime', 'd'],
 ];
 
-const CAUSES = ['rocket', 'grenade', 'hypersonic', 'javelin', 'stinger', 'fall', 'vehicle', 'ram'] as const;
+const CAUSES = ['rocket', 'grenade', 'hypersonic', 'javelin', 'stinger', 'fall', 'vehicle', 'ram', 'thunder'] as const;
 /** Every event type's fields after `type` and `tick`. The order of this table is the wire's type numbering. */
 const EVENTS: Record<WireEvent['type'], Schema> = {
   fired: [['playerId', 'id'], ['weapon', WEAPONS]],
@@ -498,6 +498,7 @@ const EVENTS: Record<WireEvent['type'], Schema> = {
   vehicleHit: [['vehicle', 'u'], ['sourceId', 'id'], ['amount', 'f']],
   vehicleDestroyed: [['vehicle', 'u'], ['pos', 'v3'], ['normal', 'v3']],
   rammed: [['playerId', 'id'], ['vehicle', 'u'], ['speed', 'f']],
+  thunder: [['playerId', 'id'], ['pos', 'v3'], ['dir', 'v3']],
 };
 const EVENT_TYPES = Object.keys(EVENTS) as WireEvent['type'][];
 

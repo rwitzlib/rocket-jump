@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { allowedLook, applyStat, levelOf, newProfile, PREMIUM, type Gain, type LapRecord, type Look, type Profile, type StatEvent } from '../shared/progress';
+import { applyStat, lookFor, newProfile, PREMIUM, type Gain, type LapRecord, type Look, type Profile, type StatEvent } from '../shared/progress';
 
 // Where profiles and race records live: in memory, written to one JSON file in DATA_DIR a few
 // seconds after anything changes (and on shutdown). Without DATA_DIR nothing survives a restart,
@@ -137,7 +137,7 @@ export class Store {
   setLook(key: string, look: Look): Look | null {
     const p = this.find(key);
     if (!p) return null;
-    p.look = allowedLook(look, levelOf(p.xp), p.owned);
+    p.look = lookFor(p, look);
     this.changed();
     return p.look;
   }
@@ -237,7 +237,7 @@ export class Store {
     const stillPaid = [...this.purchases.values()].some((x) => x.profile === purchase.profile && x.sku === purchase.sku && x.status === 'paid');
     if (p && !stillPaid) {
       p.owned = (p.owned ?? []).filter((s) => s !== purchase.sku);
-      p.look = allowedLook(p.look, levelOf(p.xp), p.owned);
+      p.look = lookFor(p, p.look);
     }
     this.changed();
     return purchase;

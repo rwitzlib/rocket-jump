@@ -1,4 +1,4 @@
-export type WeaponId = 'rocket' | 'grenade' | 'hypersonic' | 'javelin' | 'stinger' | 'grapple';
+export type WeaponId = 'rocket' | 'grenade' | 'hypersonic' | 'javelin' | 'stinger' | 'thunder' | 'grapple';
 /** Primary weapons that need a lock on a player before they'll fire. */
 export type SeekerId = 'javelin' | 'stinger';
 /** Fire (left click) uses the primary weapon, grapple (right click) the secondary. */

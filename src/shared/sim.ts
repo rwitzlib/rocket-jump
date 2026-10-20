@@ -1,6 +1,6 @@
 import RAPIER from '@dimforge/rapier3d-compat';
 import { Euler, Quaternion, Vector3 } from 'three';
-import { COMBAT, CRATE, CTF, DT, GRAPPLE, GRAVITY, GRENADE, HELI, HYPERSONIC, ITEMS, LOADOUT, PICKUP, PLAYER, RACE, ROCKET, SEEKERS, VEHICLE_DAMAGE, VEHICLES, WEAPONS, type GameMode, type SeekerConfig, INSTAGIB } from './config';
+import { COMBAT, CRATE, CTF, DT, GRAPPLE, GRAVITY, GRENADE, HELI, HYPERSONIC, ITEMS, LOADOUT, PICKUP, PLAYER, RACE, ROCKET, SEEKERS, THUNDER, VEHICLE_DAMAGE, VEHICLES, WEAPONS, type GameMode, type SeekerConfig, INSTAGIB } from './config';
 import { Driving } from './driving';
 import type { SimEvent, StepMode } from './events';
 import { Flight } from './flight';
@@ -27,7 +27,7 @@ import { VehicleSim } from './vehicle';
 
 export type { SimEvent, StepMode, FlagAction } from './events';
 export { PlayerSim, type PlayerState, type HookState } from './player';
-export { isArmed, isSeeker, lockedOn, lockReady, type DeathCause, type MissilePhase, type Projectile, type ProjectileKind } from './projectile';
+export { isArmed, isSeeker, lockedOn, lockReady, type DeathCause, type MissilePhase, type PrimaryId, type Projectile, type ProjectileKind } from './projectile';
 export type { Flag, Item } from './rules';
 
 /**
@@ -770,6 +770,10 @@ export class GameSim {
     }
     this.updateLock(p, input.view);
     const kind = p.primary;
+    if (kind === 'thunder') {
+      if (input.fire && p.fireCooldown === 0) this.thunder(p, input, events, mode);
+      return;
+    }
     // Seekers only fire with a lock.
     if (input.fire && p.fireCooldown === 0 && kind !== 'grapple' && (!isSeeker(kind) || lockedOn(p))) {
       const pos = p.eye(new Vector3());
@@ -815,6 +819,76 @@ export class GameSim {
       p.lockProgress = 0;
       events.push({ type: 'fired', playerId: p.id, weapon: kind });
     }
+  }
+
+  /**
+   * A Thunder Gun blast (see THUNDER). Kicks the shooter back along their aim (predicted, like a
+   * rocket jump), then, on the server, throws everything in the cone: players (judged where the
+   * shooter saw them), vehicles and crates.
+   */
+  private thunder(p: PlayerSim, input: PlayerInput, events: SimEvent[], mode: StepMode) {
+    const origin = this.aimOrigin(p, new Vector3());
+    const dir = this.aimFrom(p, origin, input.view, new Vector3());
+    p.fireCooldown = THUNDER.reload;
+    p.reloading = true; // one shot in the mag
+    if (p.vehicle < 0) {
+      p.vel.addScaledVector(dir, -THUNDER.recoil);
+      p.grounded = false;
+    }
+    events.push({ type: 'fired', playerId: p.id, weapon: 'thunder' });
+    events.push({ type: 'thunder', playerId: p.id, pos: origin, dir });
+    if (mode !== 'authority' || this.mode === 'race') return;
+
+    // Overdrive: like blasts, it throws other players harder.
+    const boost = p.overdrive > 0 ? ITEMS.overdrive.knockback : 1;
+    const hurt = p.overdrive > 0 ? ITEMS.overdrive.damage : 1;
+    this.forEachTarget(p.id, input.view, p.vehicle, (id, center) => {
+      const target = this.players.get(id);
+      const power = target && this.thunderPower(origin, dir, center, PLAYER.radius);
+      if (!target || !power) return;
+      target.vel.addScaledVector(_dir, THUNDER.knockback * power * boost);
+      target.grounded = false;
+      // (Scaled down: a cone of air never counts as a direct hit, for the skins those unlock.)
+      events.push({ type: 'knockback', playerId: id, strength: power * 0.8, sourceId: p.id, shot: p.seq });
+      this.damage(target, Math.round(THUNDER.damage * power * hurt), p.id, events, 'thunder');
+    });
+    for (const v of this.vehicles) {
+      if (!v.alive || v.index === p.vehicle) continue;
+      const power = this.thunderPower(origin, dir, v.pos, Math.min(...v.config.size) / 2);
+      if (!power) continue;
+      v.vel.addScaledVector(_dir, THUNDER.knockback * THUNDER.vehicleKnockback * power * v.config.knockback);
+      this.driving.damageVehicle(v, THUNDER.damage * THUNDER.vehicleDamage * power * VEHICLE_DAMAGE, p.id, events);
+    }
+    for (const crate of this.crates) {
+      const t = crate.translation();
+      const power = this.thunderPower(origin, dir, _crate.set(t.x, t.y, t.z), CRATE.size / 2);
+      if (power) crate.applyImpulse(_dir.multiplyScalar(THUNDER.crateKnockback * power * crate.mass()), true);
+    }
+  }
+
+  /**
+   * How hard a Thunder Gun blast from `origin` along `dir` hits something at `center` (`radius`
+   * across), 0..1: 0 outside the cone or out of sight. Sets `_dir` to the way it's thrown: out from
+   * the muzzle, bent toward the aim, tilted up to at least THUNDER.lift.
+   */
+  private thunderPower(origin: Vector3, dir: Vector3, center: Vector3, radius: number): number {
+    _toTarget.subVectors(center, origin);
+    const dist = Math.max(_toTarget.length() - radius, 0);
+    if (dist > THUNDER.range) return 0;
+    const cos = _toTarget.length() > 1e-3 ? _toTarget.dot(dir) / _toTarget.length() : 1;
+    const minCos = Math.cos(THUNDER.cone);
+    if (cos < minCos && dist > THUNDER.closeRange) return 0;
+    if (!this.canSee(origin, center)) return 0;
+    const centered = Math.min(Math.max((cos - minCos) / (1 - minCos), 0), 1);
+    const near = 1 - dist / THUNDER.range;
+    const power = (THUNDER.farPower + (1 - THUNDER.farPower) * near) * (THUNDER.edgePower + (1 - THUNDER.edgePower) * centered);
+    _dir.copy(_toTarget).normalize().add(dir).normalize();
+    if (_dir.y < THUNDER.lift) {
+      const flat = Math.hypot(_dir.x, _dir.z);
+      const scale = flat > 1e-6 ? Math.sqrt(1 - THUNDER.lift * THUNDER.lift) / flat : 0;
+      _dir.set(_dir.x * scale, THUNDER.lift, _dir.z * scale);
+    }
+    return power;
   }
 
   /**

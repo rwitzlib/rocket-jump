@@ -71,7 +71,12 @@ interface Stats {
   streak: number;
   bestStreak: number;
   airshots: number;
+  lastKillAt: number; // the match clock (time left) at their last kill, for multikills
 }
+
+const MULTIKILL_WINDOW = 1.5; // seconds between two kills for the second to make a multikill
+const ROCKET_JUMP_STRENGTH = 0.35; // how much of a blast's full push on yourself counts as a rocket jump
+const DIRECT_HIT_STRENGTH = 0.9; // ...and on someone else, as a direct hit
 
 export interface ServerOptions {
   /** Rotation: map names in MAPS, each optionally with a mode, like "temple:ctf". */
@@ -360,7 +365,7 @@ export class GameServer {
       aim: new AimWatch(),
     };
     this.connections.set(id, conn);
-    this.stats.set(id, { streak: 0, bestStreak: 0, airshots: 0 });
+    this.stats.set(id, { streak: 0, bestStreak: 0, airshots: 0, lastKillAt: Infinity });
     if (!conn.spectator) this.addToSim(id);
     this.send(id, this.welcome(id));
     this.send(id, { type: 'ping', t: now() });
@@ -571,7 +576,7 @@ export class GameServer {
     const free = BOT_NAMES.filter((n) => !used.has(n) && ![...this.connections.values()].some((c) => c.name === n));
     const name = free.length ? free[Math.floor(Math.random() * free.length)] : `Bot ${this.nextBot}`;
     this.bots.set(id, { bot: new Bot(skill), name });
-    this.stats.set(id, { streak: 0, bestStreak: 0, airshots: 0 });
+    this.stats.set(id, { streak: 0, bestStreak: 0, airshots: 0, lastKillAt: Infinity });
     this.addToSim(id);
     return id;
   }
@@ -659,7 +664,7 @@ export class GameServer {
     this.betweenRounds = 0;
     if (advance) this.mapIndex = (this.mapIndex + 1) % this.rotation.length;
     this.match = this.newMatch(this.match.id + 1);
-    for (const s of this.stats.values()) Object.assign(s, { streak: 0, bestStreak: 0, airshots: 0 });
+    for (const s of this.stats.values()) Object.assign(s, { streak: 0, bestStreak: 0, airshots: 0, lastKillAt: Infinity });
     for (const c of this.connections.values()) c.aim.reset();
 
     if (this.mapName !== oldMap) {
@@ -825,6 +830,11 @@ export class GameServer {
       this.stat(e.playerId, { type: 'lap', map: this.mapName, time: Math.round(e.time * 1000) / 1000, best: e.best, path });
       if (conn) conn.lapPath = [];
     }
+    // Rocket jumps and direct hits, for the skins they unlock.
+    if (e.type === 'knockback' && this.sim.players.has(e.playerId)) {
+      if (e.sourceId === e.playerId && e.strength >= ROCKET_JUMP_STRENGTH) this.stat(e.playerId, { type: 'rocketJump' });
+      else if (e.sourceId !== e.playerId && e.strength >= DIRECT_HIT_STRENGTH && (this.options.botRewards || !this.bots.has(e.playerId))) this.stat(e.sourceId, { type: 'directHit' });
+    }
     if (e.type === 'damaged' && e.sourceId !== e.playerId && e.amount >= 20) {
       const shooter = this.connections.get(e.sourceId);
       if (shooter?.aim.hit()) this.onSuspect(e.sourceId, shooter.name, { hits: shooter.aim.hits, snaps: shooter.aim.snaps });
@@ -841,7 +851,10 @@ export class GameServer {
     killer.bestStreak = Math.max(killer.bestStreak, killer.streak);
     if (e.midair) killer.airshots++;
     if (!this.options.botRewards && this.bots.has(e.playerId)) return;
-    this.stat(e.killerId!, { type: 'kill', airshot: e.midair, cause: e.cause, streak: killer.streak });
+    this.stat(e.killerId!, { type: 'kill', airshot: e.midair, cause: e.cause, streak: killer.streak, bot: this.bots.has(e.playerId) });
+    const since = killer.lastKillAt - this.match.timeLeft;
+    if (since >= 0 && since <= MULTIKILL_WINDOW) this.stat(e.killerId!, { type: 'multikill' });
+    killer.lastKillAt = this.match.timeLeft;
   }
 
   /** Race: everyone's path through their lap under way, a sample every few ticks. */

@@ -7,6 +7,7 @@ type SoundName =
   | 'fire'
   | 'grenadeFire'
   | 'hypersonicFire'
+  | 'thunderFire'
   | 'bounce'
   | 'pickup'
   | 'lockTone'
@@ -115,6 +116,19 @@ function synthesize(ctx: BaseAudioContext): Record<SoundName | 'noise', AudioBuf
         lp(noise(), 9000) * env(t, 0.0005, 0.02) * 1.6 +
         whine(600 + 3400 * Math.exp(-t * 9)) * env(t, 0.002, 0.12) * 0.35 +
         thump(55 + 110 * Math.exp(-t * 30)) * env(t, 0.002, 0.06) * 0.9;
+    }),
+
+    // Thunder Gun: a deep boom with a crack on top, then a long rush of wind rolling off into a rumble.
+    thunderFire: build(1.4, () => {
+      const crack = lowpass(sr);
+      const rush = lowpass(sr);
+      const rumble = lowpass(sr);
+      const boom = sweep(sr);
+      return (t) =>
+        crack(noise(), 7000) * env(t, 0.0005, 0.03) * 0.9 +
+        boom(32 + 90 * Math.exp(-t * 10)) * env(t, 0.003, 0.25) * 1.4 +
+        rush(noise(), 300 + 2800 * Math.exp(-t * 3.5)) * env(t, 0.015, 0.4) * 1.3 +
+        rumble(noise(), 140) * env(t, 0.04, 0.55) * 2.5;
     }),
 
     // An unarmed grenade hitting something: a dull knock with a short metallic ring.

@@ -1,4 +1,4 @@
 {
   "extends": "./tsconfig.server.json",
-  "include": ["test", "scripts", "src/shared", "src/client/net/netclient.ts"]
+  "include": ["test", "scripts", "src/shared", "src/client/net/netclient.ts", "src/client/skinfx.ts", "src/client/spriteframes.ts"]
 }

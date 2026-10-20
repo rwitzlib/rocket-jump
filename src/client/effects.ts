@@ -1,10 +1,12 @@
 import * as THREE from 'three';
 import { TRAILS, type ExplosionId } from '../shared/progress';
 import { DecalGeometry } from 'three/examples/jsm/geometries/DecalGeometry.js';
-import { GRENADE, HYPERSONIC, ROCKET, SEEKERS } from '../shared/config';
+import { GRENADE, HYPERSONIC, ROCKET, SEEKERS, THUNDER } from '../shared/config';
 import { isArmed, type Projectile, type ProjectileKind } from '../shared/sim';
 import { Debris } from './debris';
 import { bubbleTexture, ParticleSystem, puffTexture } from './particles';
+import { BLAST_FX, TRAIL_FX, type BlastFx, type Burst, type Emit, type TrailFx } from './skinfx';
+import { ATLAS_GRID, spriteAtlas } from './sprites';
 import { buildDart, buildGrenade, buildMissile, buildRocket, GRENADE_LIGHT } from './weapons';
 
 const _pos = new THREE.Vector3();
@@ -38,7 +40,7 @@ const FLASH_TIME = 0.1;
 const BEAM_TIME = 0.7;
 const FLASH_COLOR = new THREE.Color(1.8, 1.4, 0.8);
 /** The parts every explosion style shares, in each one's colors: the white-hot core, the shockwave ring, the light. */
-const BLAST_TINTS: Record<ExplosionId, { flash: THREE.Color; ring: number; light: number }> = {
+const BLAST_TINTS: Partial<Record<ExplosionId, { flash: THREE.Color; ring: number; light: number }>> = {
   classic: { flash: FLASH_COLOR, ring: 0xffd8a0, light: 0xff9a40 },
   smoky: { flash: new THREE.Color(1.4, 1, 0.6), ring: 0xd8c8b0, light: 0xff8030 },
   firecracker: { flash: new THREE.Color(2, 1.2, 1), ring: 0xffb0a0, light: 0xff5030 },
@@ -47,6 +49,27 @@ const BLAST_TINTS: Record<ExplosionId, { flash: THREE.Color; ring: number; light
   bubblepop: { flash: new THREE.Color(0.5, 0.9, 1.1), ring: 0xb0f0ff, light: 0x80e0ff },
 };
 const POP_COLORS = [0xff3030, 0x40ff60, 0xffd040, 0x40a0ff];
+const BEAM_COLOR = new THREE.Color(0.6, 2.2, 2.8);
+const UP = new THREE.Vector3(0, 1, 0);
+const _side = new THREE.Vector3();
+const _dir = new THREE.Vector3();
+const _origin = new THREE.Vector3();
+const _swirl = new THREE.Vector3();
+
+/** The shared parts' colors for a style: its own, or a recipe's. */
+const tintCache = new Map<ExplosionId, { flash: THREE.Color; ring: number; light: number }>();
+function tintOf(style: ExplosionId) {
+  let tint = BLAST_TINTS[style] ?? tintCache.get(style);
+  if (!tint) {
+    const fx = BLAST_FX[style];
+    tint = fx ? { flash: new THREE.Color(...fx.tint.flash), ring: fx.tint.ring, light: fx.tint.light } : BLAST_TINTS.classic!;
+    tintCache.set(style, tint);
+  }
+  return tint;
+}
+
+const pick = <T>(x: T | readonly T[]): T => (Array.isArray(x) ? x[Math.floor(Math.random() * x.length)] : (x as T));
+const between = (r: readonly [number, number]) => r[0] + Math.random() * (r[1] - r[0]);
 const ARC_SPACING = 0.07; // meters between the dots a lightning trail's arcs are drawn with
 const LIGHT_TIME = 0.35;
 const DECAL_TIME = 12;
@@ -128,6 +151,28 @@ function verticalFade(): THREE.Texture {
   return new THREE.CanvasTexture(canvas);
 }
 
+/** A paint splat (white, for tinting): a blob with drops flung round it. */
+function splatTexture(): THREE.Texture {
+  const size = 128;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d')!;
+  ctx.fillStyle = 'rgba(255,255,255,0.92)';
+  const blob = (x: number, y: number, r: number) => {
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+  };
+  blob(64, 64, 30);
+  for (let i = 0; i < 14; i++) {
+    const a = (i / 14) * Math.PI * 2 + (i % 3) * 0.2;
+    const d = 26 + ((i * 29) % 30);
+    blob(64 + Math.cos(a) * d, 64 + Math.sin(a) * d, 4 + ((i * 7) % 9));
+    blob(64 + Math.cos(a) * d * 0.6, 64 + Math.sin(a) * d * 0.6, 8 + ((i * 5) % 6));
+  }
+  return new THREE.CanvasTexture(canvas);
+}
+
 function scorchTexture(): THREE.Texture {
   const size = 128;
   const canvas = document.createElement('canvas');
@@ -151,6 +196,7 @@ interface ProjectileMesh {
   light: THREE.MeshBasicMaterial | null; // a grenade's arming light
   spin: number; // a grenade's tumble so far, radians
   arc: THREE.Vector3 | null; // where a lightning trail's arc got to
+  steps: number; // trail steps laid so far
 }
 
 type Trail = (typeof TRAILS)[number];
@@ -166,6 +212,12 @@ export class Effects {
   readonly blast = new ParticleSystem(1200, THREE.NormalBlending, puffTexture(), 1.7);
   /** Soap bubbles, for the Bubbles trail and Bubble Pop. */
   readonly bubbles = new ParticleSystem(1500, THREE.NormalBlending, bubbleTexture(), 1.15);
+  /** The skins' shapes (hearts, ducks, "KABOOM!"...), from one atlas: solid ones, and glowing ones. */
+  private readonly atlas = spriteAtlas();
+  readonly sprites = new ParticleSystem(4000, THREE.NormalBlending, this.atlas, 1.1, ATLAS_GRID);
+  readonly glows = new ParticleSystem(4000, THREE.AdditiveBlending, this.atlas, 1.5, ATLAS_GRID);
+  private readonly scorch = scorchTexture();
+  private readonly splat = splatTexture();
   /** Effects waiting their turn (a firecracker's pops, a bolt's flickers): seconds until each. */
   private pending: { in: number; fn: () => void }[] = [];
   readonly debris: Debris;
@@ -203,8 +255,10 @@ export class Effects {
     // Both systems sit at the origin, so force the glow to draw after (on top of) the smoke.
     this.blast.points.renderOrder = 1;
     this.bubbles.points.renderOrder = 1;
+    this.sprites.points.renderOrder = 1;
     this.fire.points.renderOrder = 2;
-    scene.add(this.smoke.points, this.blast.points, this.bubbles.points, this.fire.points);
+    this.glows.points.renderOrder = 2;
+    scene.add(this.smoke.points, this.blast.points, this.bubbles.points, this.sprites.points, this.fire.points, this.glows.points);
     this.debris = new Debris(scene);
 
     // Pooled like the rings: a white-hot ball at the heart of each blast, and a column of light where someone respawns.
@@ -239,12 +293,11 @@ export class Effects {
       this.rings.push({ obj: ring, age: RING_TIME, radius: ROCKET.blastRadius });
     }
 
-    const decalTex = scorchTexture();
     for (let i = 0; i < MAX_DECALS; i++) {
       const decal = new THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>(
         this.decalPlaceholder,
         new THREE.MeshBasicMaterial({
-          map: decalTex,
+          map: this.scorch,
           transparent: true,
           depthWrite: false,
           polygonOffset: true,
@@ -286,6 +339,10 @@ export class Effects {
       this.blast.update(0);
       this.bubbles.emit({ pos: _pos, life: 1, size: [1, 1], color: [0xffffff, 0xffffff] });
       this.bubbles.update(0);
+      for (const sys of [this.sprites, this.glows]) {
+        sys.emit({ pos: _pos, life: 1, size: [1, 1], color: [0xffffff, 0xffffff], frame: 1, spin: 1 });
+        sys.update(0);
+      }
     } else {
       for (const obj of this.warmProjectiles) this.scene.remove(obj);
       this.warmProjectiles = [];
@@ -293,6 +350,8 @@ export class Effects {
       this.smoke.update(1e6);
       this.blast.update(1e6);
       this.bubbles.update(1e6);
+      this.sprites.update(1e6);
+      this.glows.update(1e6);
     }
     for (const obj of showcase) {
       obj.visible = on;
@@ -306,6 +365,8 @@ export class Effects {
     this.smoke.setViewport(heightPx, fov);
     this.blast.setViewport(heightPx, fov);
     this.bubbles.setViewport(heightPx, fov);
+    this.sprites.setViewport(heightPx, fov);
+    this.glows.setViewport(heightPx, fov);
   }
 
   /**
@@ -355,8 +416,12 @@ export class Effects {
         this.bubblePop(at, normal, r);
         break;
       default:
-        // Flash, then a fireball of solid cartoon puffs over a few glowing ones, sparks, and smoke
-        // that lingers and drifts up after the fire is gone.
+        if (BLAST_FX[style]) {
+          this.recipeBlast(at, normal, surface, r, BLAST_FX[style]!);
+          break;
+        }
+        // Classic: a flash, then a fireball of solid cartoon puffs over a few glowing ones, sparks,
+        // and smoke that lingers and drifts up after the fire is gone.
         this.fire.emit({ pos: at, life: 0.09, size: [r * 2.2, r * 2.6], color: [0xfff4d0, 0xffb060], alpha: 1 });
         this.fireball(at, normal, k, 18, [0xffd040, 0xe8401a]);
         for (let i = 0; i < 8; i++) {
@@ -367,7 +432,7 @@ export class Effects {
         this.sparks(at, normal, surface, 28, [0xfff0c0, 0xff7020]);
         this.smokeCloud(at, normal, 16, 0x5a5654, 0x9a9692, 0.65, 1);
     }
-    const tint = BLAST_TINTS[style];
+    const tint = tintOf(style);
 
     // Shockwave ring flat against the surface, sized to the real blast radius.
     const ring = oldest(this.rings);
@@ -378,8 +443,8 @@ export class Effects {
     ring.obj.position.copy(at).addScaledVector(normal, 0.05);
     ring.obj.quaternion.setFromUnitVectors(Z, normal);
 
-    // Scorch mark, only when the rocket hit something.
-    if (surface) this.addDecal(at, normal);
+    // Scorch mark (or a splat), only when the rocket hit something.
+    if (surface) this.addDecal(at, normal, BLAST_FX[style]?.decal);
 
     // Light flash: reuse the oldest light.
     const light = oldest(this.lights);
@@ -554,6 +619,129 @@ export class Effects {
     });
   }
 
+  /** An explosion from a recipe (skinfx.ts): the parts it lists, in the order they go off. */
+  private recipeBlast(at: THREE.Vector3, normal: THREE.Vector3, surface: boolean, r: number, fx: BlastFx) {
+    at = at.clone(); // (bursts may go off later: keep where)
+    normal = normal.clone();
+    const k = r / ROCKET.blastRadius;
+    if (fx.flash) this.fire.emit({ pos: at, life: 0.09, size: [r * 2.2 * (fx.flash.size ?? 1), r * 2.6 * (fx.flash.size ?? 1)], color: [...fx.flash.colors], alpha: 1 });
+    if (fx.fireball) this.fireball(at, normal, k * (fx.fireball.scale ?? 1), fx.fireball.count, [...fx.fireball.colors]);
+    if (fx.sparks) this.sparks(at, normal, surface, fx.sparks.count, [...fx.sparks.colors], fx.sparks.speed);
+    if (fx.smoke) this.smokeCloud(at, normal, fx.smoke.count, fx.smoke.dark, fx.smoke.light, fx.smoke.alpha, fx.smoke.scale);
+    for (const b of fx.bursts ?? []) this.shapeBurst(at, normal, surface, r, b);
+    for (let i = 1; i <= (fx.rings ?? 0); i++) {
+      this.after(i * 0.09, () => {
+        const ring = oldest(this.rings);
+        ring.age = 0;
+        ring.radius = r * (1 + i * 0.35);
+        ring.obj.visible = true;
+        ring.obj.material.color.setHex(fx.tint.ring);
+        ring.obj.position.copy(at).addScaledVector(normal, 0.05 + i * 0.02);
+        ring.obj.quaternion.setFromUnitVectors(Z, normal);
+      });
+    }
+    if (fx.bolts) {
+      const { count, colors, sky, reach = 1 } = fx.bolts;
+      if (sky) this.bolt(at.clone().add(_rand.set((Math.random() - 0.5) * 6, 18, (Math.random() - 0.5) * 6)), at, 1.1, 0.16, 0.5, [...colors], 2);
+      for (let i = 0; i < count; i++) {
+        randomInSphere(_rand).normalize();
+        if (surface) _rand.addScaledVector(normal, -_rand.dot(normal)).normalize();
+        const end = at.clone().addScaledVector(_rand, r * reach * (0.5 + Math.random() * 0.5)).addScaledVector(normal, 0.15);
+        this.after(Math.random() * 0.4, () => this.bolt(at, end, 0.35 * reach, 0.12, 0.28, [...colors], 1));
+      }
+    }
+    if (fx.beam) this.beam(at, new THREE.Color(...fx.beam));
+    if (fx.again) this.after(fx.again, () => this.recipeBlast(at, normal, surface, r * 0.85, { ...fx, again: undefined, rings: 0, beam: undefined }));
+  }
+
+  /** One of a recipe's bursts: a cloud of shapes thrown out of the blast (now, or after its delay). */
+  private shapeBurst(at: THREE.Vector3, normal: THREE.Vector3, surface: boolean, r: number, b: Burst) {
+    const run = () => {
+      const k = r / ROCKET.blastRadius;
+      const scale = Math.pow(k, 0.75);
+      const system = b.glow ? this.glows : this.sprites;
+      for (let i = 0; i < b.count; i++) {
+        randomInSphere(_dir).normalize();
+        if (b.flat) _dir.addScaledVector(normal, -_dir.dot(normal)).normalize();
+        else if (surface && _dir.dot(normal) < 0) _dir.reflect(normal);
+        _origin.copy(at).addScaledVector(normal, (b.lift ?? 0) * r);
+        if (b.scatter) _origin.add(randomInSphere(_rand).multiplyScalar(b.scatter * r));
+        _pos.copy(_origin).addScaledVector(_dir, (b.shell ?? 0) * r);
+        const life = between(b.life);
+        if (b.inward) _vel.subVectors(_origin, _pos).divideScalar(life);
+        else _vel.copy(_dir).multiplyScalar(between(b.speed) * k).addScaledVector(normal, (b.up ?? 0) * k);
+        if (b.swirl) _vel.add(_swirl.crossVectors(normal, _dir).normalize().multiplyScalar(b.swirl * k * (0.6 + Math.random() * 0.4)));
+        const size = between(b.size) * scale;
+        const color = pick(b.colors);
+        system.emit({
+          pos: _pos,
+          vel: _vel,
+          life,
+          size: [size, size * (b.grow ?? 1)],
+          color: [color, b.fade ?? color],
+          alpha: b.alpha ?? 1,
+          gravity: b.gravity,
+          drag: b.drag,
+          frame: pick(b.frame),
+          angle: b.spin ? Math.random() * Math.PI * 2 : 0,
+          spin: b.spin ? (Math.random() * 2 - 1) * b.spin : 0,
+          hold: b.hold,
+        });
+      }
+    };
+    if (b.delay) this.after(b.delay, run);
+    else run();
+  }
+
+  /** One step of a trail from a recipe: its plain smoke and flame (unless it has none) and its shapes. */
+  private layRecipe(entry: ProjectileMesh, fx: TrailFx, fire: [number, number], smoke: [number, number], hue: number) {
+    const at = entry.lastTrail;
+    const n = entry.steps++;
+    if (fx.smoke !== false) {
+      const { alpha = 0.7, life = 0.9, size = 1 } = fx.smoke ?? {};
+      randomInSphere(_rand).multiplyScalar(0.4 * size);
+      this.smoke.emit({ pos: at, vel: _rand, life: life + Math.random() * 0.5, size: [0.35 * size, 1.6 * size], color: smoke, alpha, drag: 1, gravity: -0.4 });
+    }
+    if (fx.flame !== false) this.fire.emit({ pos: at, life: 0.12, size: [0.5, 0.2], color: fire, alpha: 0.8 });
+    for (const e of fx.emits) this.layEmit(at, n, e, hue);
+  }
+
+  private layEmit(at: THREE.Vector3, n: number, e: Emit, hue: number) {
+    if (e.every && n % e.every) return;
+    if (e.chance !== undefined && Math.random() >= e.chance) return;
+    for (let i = 0; i < (e.count ?? 1); i++) this.layOne(at, n, e, hue);
+  }
+
+  private layOne(at: THREE.Vector3, n: number, e: Emit, hue: number) {
+    _pos.copy(at);
+    if (e.wave) {
+      // Side to side, across the direction of travel.
+      _side.crossVectors(_step, UP);
+      if (_side.lengthSq() < 1e-4) _side.set(1, 0, 0);
+      _pos.addScaledVector(_side.normalize(), e.wave.amp * Math.sin(((n * TRAIL_SPACING) / e.wave.length) * Math.PI * 2));
+    }
+    if (e.spread) _pos.add(randomInSphere(_rand).multiplyScalar(e.spread));
+    if (e.speed) randomInSphere(_vel).multiplyScalar(e.speed);
+    else _vel.set(0, 0, 0);
+    if (e.back) _vel.addScaledVector(_step, -e.back);
+    const color = e.hue ? _hue.setHSL((hue + n * 0.025) % 1, 1, 0.6).getHex() : pick(e.colors);
+    const size = between(e.size);
+    (e.glow ? this.glows : this.sprites).emit({
+      pos: _pos,
+      vel: _vel,
+      life: between(e.life),
+      size: [size, size * (e.grow ?? 1)],
+      color: [color, e.fade ?? color],
+      alpha: e.alpha ?? 1,
+      gravity: e.gravity,
+      drag: e.drag,
+      frame: pick(e.frame),
+      angle: e.spin ? Math.random() * Math.PI * 2 : 0,
+      spin: e.spin ? (Math.random() * 2 - 1) * e.spin : 0,
+      hold: e.hold,
+    });
+  }
+
   /** Runs `fn` `seconds` from now (in effect time, so a paused game waits). */
   private after(seconds: number, fn: () => void) {
     this.pending.push({ in: seconds, fn });
@@ -600,17 +788,54 @@ export class Effects {
     }
   }
 
-  /** A column of light where a player has just respawned. */
-  beam(feet: THREE.Vector3) {
+  /** A column of light where a player has just respawned (or, colored, a Divine blast). */
+  beam(feet: THREE.Vector3, color: THREE.Color = BEAM_COLOR) {
     const beam = oldest(this.beams);
     beam.age = 0;
     beam.obj.visible = true;
+    beam.obj.material.color.copy(color);
     beam.obj.position.copy(feet);
     for (let i = 0; i < 16; i++) {
       randomInSphere(_rand);
       _pos.copy(feet).add(_rand.setY(Math.abs(_rand.y) * 2));
       _vel.set(0, 2 + Math.random() * 3, 0);
       this.fire.emit({ pos: _pos, vel: _vel, life: 0.5 + Math.random() * 0.4, size: [0.12, 0.03], color: [0xe0ffff, 0x40c0ff], alpha: 1, drag: 1 });
+    }
+  }
+
+  /**
+   * A Thunder Gun blast from `at` along `dir`: a flash at the muzzle, rings of air rushing out and
+   * widening to fill the cone, and a gust of haze and streaks behind them.
+   */
+  thunderWave(at: THREE.Vector3, dir: THREE.Vector3) {
+    _side.crossVectors(dir, Math.abs(dir.y) > 0.95 ? Z : UP).normalize();
+    _swirl.crossVectors(_side, dir);
+    const spread = Math.tan(THUNDER.cone);
+    const speed = THUNDER.range * 2.6; // the rings reach the end of the cone in about a third of a second
+    _origin.copy(at).addScaledVector(dir, 0.8);
+    this.fire.emit({ pos: _origin, life: 0.12, size: [1.6, 3.4], color: [0xffffff, 0x9ad8ff], alpha: 1 });
+    for (let ring = 0; ring < 3; ring++) {
+      const lag = ring * 0.18; // later rings start slower and stay tighter
+      for (let i = 0; i < 28; i++) {
+        const a = (i / 28) * Math.PI * 2 + ring * 0.3;
+        _dir.copy(_side).multiplyScalar(Math.cos(a)).addScaledVector(_swirl, Math.sin(a));
+        _vel.copy(dir).addScaledVector(_dir, spread).multiplyScalar(speed * (1 - lag));
+        _pos.copy(_origin).addScaledVector(_dir, 0.15);
+        // A pale ring of air that shows against the sky, with a bright blue rim that glows over it.
+        this.smoke.emit({ pos: _pos, vel: _vel, life: 0.4, size: [0.5, 1.8], color: [0xffffff, 0xd8ecff], alpha: 0.55, drag: 2.5 });
+        this.fire.emit({ pos: _pos, vel: _vel, life: 0.3, size: [0.4, 1], color: [0xc8f0ff, 0x2a88ff], alpha: 0.9, drag: 2.5 });
+      }
+    }
+    for (let i = 0; i < 28; i++) {
+      // Somewhere inside the cone, more of it near the middle.
+      const a = Math.random() * Math.PI * 2;
+      const r = spread * Math.sqrt(Math.random());
+      _dir.copy(_side).multiplyScalar(Math.cos(a) * r).addScaledVector(_swirl, Math.sin(a) * r).add(dir);
+      _vel.copy(_dir).multiplyScalar(speed * (0.3 + Math.random() * 0.5));
+      this.smoke.emit({ pos: _origin, vel: _vel, life: 0.5 + Math.random() * 0.4, size: [0.5, 3.2], color: [0xf4f8ff, 0xc8d4e0], alpha: 0.4, drag: 4 });
+      if (i % 2) continue;
+      _vel.copy(_dir).multiplyScalar(speed * (0.8 + Math.random() * 0.4));
+      this.fire.emit({ pos: _origin, vel: _vel, life: 0.25, size: [0.12, 0.04], color: [0xffffff, 0x6cc8ff], alpha: 1, drag: 2 });
     }
   }
 
@@ -667,6 +892,8 @@ export class Effects {
     this.smoke.update(dt);
     this.blast.update(dt);
     this.bubbles.update(dt);
+    this.sprites.update(dt);
+    this.glows.update(dt);
 
     this.debris.update(dt);
     for (const f of this.flashes) {
@@ -713,7 +940,7 @@ export class Effects {
    * surface facing roughly the same way as the one hit, so at an edge or a corner it stops at the
    * edge instead of hanging out into the air (which a flat disc did).
    */
-  private addDecal(at: THREE.Vector3, normal: THREE.Vector3) {
+  private addDecal(at: THREE.Vector3, normal: THREE.Vector3, splat?: number) {
     const size = (1.4 + Math.random() * 0.5) * 2;
     _decalSize.set(size, size, DECAL_DEPTH * 2);
     _euler.setFromQuaternion(_q.setFromUnitVectors(Z, normal).multiply(_spin.setFromAxisAngle(Z, Math.random() * Math.PI * 2)));
@@ -736,6 +963,9 @@ export class Effects {
     entry.age = 0;
     decal.visible = true;
     decal.material.opacity = 1;
+    // (Swapping one texture for another needs no new shader.)
+    decal.material.map = splat === undefined ? this.scorch : this.splat;
+    decal.material.color.setHex(splat ?? 0xffffff);
   }
 
   private syncProjectiles(projectiles: readonly Projectile[], alpha: number, dt: number) {
@@ -751,7 +981,7 @@ export class Effects {
         // Only for projectiles seen right as they're fired; one that first shows up mid-flight stays on its path.
         const offset = new THREE.Vector3();
         if (r.life > LIFETIME[r.kind] - MUZZLE_BLEND_TIME / 2) this.muzzleOffset?.(r.ownerId, offset);
-        entry = { mesh, lastTrail: r.prevPos.clone().add(offset), seen: frame, offset, age: 0, light, spin: 0, arc: null };
+        entry = { mesh, lastTrail: r.prevPos.clone().add(offset), seen: frame, offset, age: 0, light, spin: 0, arc: null, steps: 0 };
         this.projectileMeshes.set(r.id, entry);
       }
       entry.seen = frame;
@@ -788,6 +1018,11 @@ export class Effects {
         }
         if (trail?.id === 'bubbles') {
           this.layBubble(lastTrail, fire as [number, number], smoke as [number, number]);
+          continue;
+        }
+        const fx = trail && TRAIL_FX[trail.id];
+        if (fx) {
+          this.layRecipe(entry, fx, fire as [number, number], smoke as [number, number], r.id * 0.17);
           continue;
         }
         randomInSphere(_rand).multiplyScalar(0.4);

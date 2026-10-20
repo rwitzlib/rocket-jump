@@ -12,27 +12,48 @@ export interface ParticleSpec {
   alpha?: number; // peak opacity
   gravity?: number; // m/s² downward (negative = rises)
   drag?: number; // fraction of velocity lost per second (exponential)
+  /** Which cell of an atlas texture to draw (see sprites.ts); 0 for a system with a plain texture. */
+  frame?: number;
+  angle?: number; // radians, starting rotation
+  spin?: number; // radians per second
+  /** Stays at full strength until near the end (a falling leaf), instead of fading out all along. */
+  hold?: boolean;
 }
 
 const VERT = /* glsl */ `
   attribute float size;
   attribute vec4 color;
+  attribute vec2 sprite; // atlas frame, rotation
   uniform float scale;
   varying vec4 vColor;
+  varying vec2 vSprite;
   void main() {
     vec4 mv = modelViewMatrix * vec4(position, 1.0);
-    gl_PointSize = size * scale / -mv.z;
+    // (A rotated sprite's corners reach past the point's square: grow it to fit them.)
+    gl_PointSize = size * scale / -mv.z * (sprite.y == 0.0 ? 1.0 : 1.4142);
     gl_Position = projectionMatrix * mv;
     vColor = color;
+    vSprite = sprite;
   }
 `;
 
 const FRAG = /* glsl */ `
   uniform sampler2D map;
   uniform float intensity;
+  uniform float grid; // cells across an atlas; 1 for a plain texture
   varying vec4 vColor;
+  varying vec2 vSprite;
   void main() {
-    vec4 tex = texture2D(map, gl_PointCoord);
+    vec2 pc = gl_PointCoord;
+    if (vSprite.y != 0.0) {
+      vec2 d = (pc - 0.5) * 1.4142;
+      float c = cos(vSprite.y), s = sin(vSprite.y);
+      pc = vec2(c * d.x - s * d.y, s * d.x + c * d.y) + 0.5;
+      if (pc.x < 0.0 || pc.x > 1.0 || pc.y < 0.0 || pc.y > 1.0) discard;
+    }
+    // An atlas cell, the right way up. (A plain texture keeps the orientation it always had.)
+    vec2 uv = grid > 1.0 ? vec2((mod(vSprite.x, grid) + pc.x) / grid, 1.0 - (floor(vSprite.x / grid) + pc.y) / grid) : pc;
+    vec4 tex = texture2D(map, uv);
     float a = tex.a * vColor.a;
     if (a < 0.003) discard;
     // The texture's own shading (a puff lit from above) times the particle's color; intensity above 1
@@ -140,12 +161,17 @@ export class ParticleSystem {
   private readonly alpha: Float32Array;
   private readonly gravity: Float32Array;
   private readonly drag: Float32Array;
+  private readonly sprite: Float32Array; // frame, angle (drawn)
+  private readonly spin: Float32Array;
+  private readonly hold: Uint8Array;
 
   constructor(
     private readonly max: number,
     blending: THREE.Blending,
     texture?: THREE.Texture,
     intensity = 1,
+    /** Cells across, when `texture` is an atlas. */
+    grid = 1,
   ) {
     this.position = new Float32Array(max * 3);
     this.velocity = new Float32Array(max * 3);
@@ -160,15 +186,19 @@ export class ParticleSystem {
     this.alpha = new Float32Array(max);
     this.gravity = new Float32Array(max);
     this.drag = new Float32Array(max);
+    this.sprite = new Float32Array(max * 2);
+    this.spin = new Float32Array(max);
+    this.hold = new Uint8Array(max);
 
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(this.position, 3).setUsage(THREE.DynamicDrawUsage));
     geo.setAttribute('size', new THREE.BufferAttribute(this.sizes, 1).setUsage(THREE.DynamicDrawUsage));
     geo.setAttribute('color', new THREE.BufferAttribute(this.colors, 4).setUsage(THREE.DynamicDrawUsage));
+    geo.setAttribute('sprite', new THREE.BufferAttribute(this.sprite, 2).setUsage(THREE.DynamicDrawUsage));
 
     sharedTexture.tex ??= softDot();
     this.material = new THREE.ShaderMaterial({
-      uniforms: { map: { value: texture ?? sharedTexture.tex }, scale: { value: 500 }, intensity: { value: intensity } },
+      uniforms: { map: { value: texture ?? sharedTexture.tex }, scale: { value: 500 }, intensity: { value: intensity }, grid: { value: grid } },
       vertexShader: VERT,
       fragmentShader: FRAG,
       blending,
@@ -209,6 +239,11 @@ export class ParticleSystem {
     this.alpha[i] = s.alpha ?? 1;
     this.gravity[i] = s.gravity ?? 0;
     this.drag[i] = s.drag ?? 0;
+    this.sprite[i * 2] = s.frame ?? 0;
+    // (A rotation of exactly 0 means "not rotated" to the shader, which then skips the work.)
+    this.sprite[i * 2 + 1] = s.angle ?? (s.spin ? 1e-4 : 0);
+    this.spin[i] = s.spin ?? 0;
+    this.hold[i] = s.hold ? 1 : 0;
   }
 
   update(dt: number) {
@@ -234,8 +269,9 @@ export class ParticleSystem {
       for (let k = 0; k < 3; k++) {
         this.colors[c + k] = this.color0[p + k] + (this.color1[p + k] - this.color0[p + k]) * t;
       }
-      // Quick fade-in, long fade-out.
-      this.colors[c + 3] = this.alpha[i] * Math.min(1, t * 12) * (1 - t) * (1 - t);
+      // Quick fade-in, then a long fade-out (or, held, a short one at the end).
+      this.colors[c + 3] = this.alpha[i] * Math.min(1, t * 12) * (this.hold[i] ? Math.min(1, (1 - t) * 4) : (1 - t) * (1 - t));
+      if (this.spin[i]) this.sprite[i * 2 + 1] += this.spin[i] * dt;
       i++;
     }
 
@@ -244,6 +280,7 @@ export class ParticleSystem {
     geo.attributes.position.needsUpdate = true;
     geo.attributes.size.needsUpdate = true;
     geo.attributes.color.needsUpdate = true;
+    geo.attributes.sprite.needsUpdate = true;
   }
 
   private moveParticle(from: number, to: number) {
@@ -261,5 +298,8 @@ export class ParticleSystem {
     this.alpha[to] = this.alpha[from];
     this.gravity[to] = this.gravity[from];
     this.drag[to] = this.drag[from];
+    this.sprite.copyWithin(to * 2, from * 2, from * 2 + 2);
+    this.spin[to] = this.spin[from];
+    this.hold[to] = this.hold[from];
   }
 }

@@ -178,7 +178,7 @@ rooms.onStat = (room, id, profile, name, e) => {
   const gain = store.apply(profile, name, e);
   const p = store.find(profile)!;
   if (gain.levelUp) room.server.setLook(id, encodeLook(wornLook(p)), gain.level);
-  if (gain.xp > 0) sendTo(id, { type: 'progress', gain, xp: p.xp });
+  if (gain.xp > 0 || gain.unlocked.length) sendTo(id, { type: 'progress', gain, xp: p.xp });
   if (e.type === 'lap' && store.rank(e.map, p.id) === 1 && store.board(e.map).laps[0].time === e.time) {
     log('record', { map: e.map, name, time: e.time });
   }

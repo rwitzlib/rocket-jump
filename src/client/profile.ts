@@ -1,5 +1,5 @@
 import { MAPS, PLAYABLE_MAPS } from '../shared/map';
-import { decodeLook, encodeLook, EXPLOSIONS, formatPrice, hasAll, PREMIUM, SETS, TINTS, TRAILS, type LapRecord, type Look, type ProfileView } from '../shared/progress';
+import { decodeLook, encodeLook, EXPLOSIONS, formatPrice, hasAll, PREMIUM, SEASONS, seasonUnlock, SETS, statUnlock, TINTS, TRAILS, type LapRecord, type Look, type ProfileView, type StatKey } from '../shared/progress';
 import { formatLap } from './objectives';
 import { SkinPreview } from './skinpreview';
 
@@ -118,6 +118,47 @@ const el = <K extends keyof HTMLElementTagNameMap>(tag: K, className = '', text 
 };
 
 const hex = (c: number) => `#${c.toString(16).padStart(6, '0')}`;
+
+/** What each lifetime count is called, for "100 airshots" on a locked skin. */
+const STAT_NAMES: Record<StatKey, [string, string]> = {
+  kills: ['kill', 'kills'],
+  deaths: ['death', 'deaths'],
+  airshots: ['airshot', 'airshots'],
+  captures: ['capture', 'captures'],
+  matches: ['match', 'matches'],
+  wins: ['win', 'wins'],
+  laps: ['lap', 'laps'],
+  bestStreak: ['streak', 'best streak'],
+  rocketJumps: ['rocket jump', 'rocket jumps'],
+  directHits: ['direct hit', 'direct hits'],
+  multikills: ['multikill', 'multikills'],
+  kothWins: ['KOTH win', 'KOTH wins'],
+  botKills: ['bot kill', 'bot kills'],
+  dailies: ['daily', 'dailies'],
+  weeklies: ['weekly', 'weeklies'],
+  personalBests: ['lap record', 'lap records'],
+};
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const monthDay = ([m, d]: readonly [number, number]) => `${MONTHS[m - 1]} ${d}`;
+
+/** Why a skin is locked, short (for its button) and long (for its tooltip); null if it isn't. */
+function lockOf(item: { level: number; name: string; price?: number }, v: ProfileView): { short: string; long: string } | null {
+  if (item.price !== undefined) return null; // (bought, not earned)
+  if (item.level > v.level) return { short: `Level ${item.level}`, long: `${item.name}: unlocks at level ${item.level}` };
+  const stat = statUnlock(item);
+  const have = stat ? (v.stats[stat[0]] ?? 0) : 0;
+  if (stat && have < stat[1]) {
+    const [one, many] = STAT_NAMES[stat[0]];
+    return { short: `${stat[1]} ${stat[1] === 1 ? one : many}`, long: `${item.name}: unlocks at ${stat[1]} ${stat[1] === 1 ? one : many} (${have} so far)` };
+  }
+  const season = seasonUnlock(item);
+  if (season && !(v.earned ?? []).includes(`season:${season}`)) {
+    const { name, from, to } = SEASONS[season];
+    return { short: name, long: `${item.name}: play a match during ${name} (${monthDay(from)} to ${monthDay(to)}) to earn it for good` };
+  }
+  return null;
+}
 
 const until = (t: number) => {
   const h = Math.max(0, Math.round((t - Date.now()) / 3600000));
@@ -382,14 +423,15 @@ export class ProfilePanel {
         // Premium skins show only where they can be bought (or once they have been).
         if (premium && !owned && !v.shop) continue;
         const forSale = premium && !owned;
-        const locked = item.level > v.level;
+        const lock = lockOf(item, v);
+        const locked = !!lock;
         const b = el('button', `look${item.id === current ? ' worn' : ''}${locked ? ' locked' : ''}${premium ? ' premium' : ''}`);
         const swatch = el('span', 'swatch');
         swatch.style.background = item.id === 'auto' ? 'conic-gradient(#3d9cf0, #f0a830, #a860f0, #40c878, #f05a80, #3d9cf0)' : item.id === 'rainbow' ? 'linear-gradient(90deg, red, orange, yellow, lime, cyan, blue, violet)' : hex(item.color);
-        b.append(swatch, el('span', '', locked ? `Level ${item.level}` : item.name));
+        b.append(swatch, el('span', '', lock ? lock.short : item.name));
         if (forSale) b.append(el('span', 'price', formatPrice(item.price!)));
         else if (premium) b.append(el('span', 'owned-tag', '★'));
-        b.title = locked ? `${item.name}: unlocks at level ${item.level}` : forSale ? (v.account ? `Buy ${item.name} for ${formatPrice(item.price!)}` : `${item.name}: sign in with Discord to buy it`) : item.name;
+        b.title = lock ? lock.long : forSale ? (v.account ? `Buy ${item.name} for ${formatPrice(item.price!)}` : `${item.name}: sign in with Discord to buy it`) : item.name;
         b.disabled = locked;
         // Trying it on: the character wears it while it's hovered (or focused), bought or not.
         const tryOn = () => this.preview?.wear(wear(item.id));

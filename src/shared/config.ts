@@ -152,6 +152,28 @@ export const SEEKERS: Record<SeekerId, SeekerConfig & { climb?: number; climbAng
   },
 };
 
+/**
+ * The Thunder Gun: no projectile, just one blast of air in a cone in front of you. Everyone in it
+ * (and in sight) is thrown away from you, harder the closer and more centered they are, but it
+ * barely hurts: its kills are whatever it throws people into, off a ledge or into the sea. One shot
+ * in the mag, then a reload. It kicks you back just as hard, so a shot at your feet is a big jump.
+ */
+export const THUNDER = {
+  reload: 2.2,
+  range: 16, // meters to the far end of the cone
+  cone: 0.5, // half-angle, radians (about 29°)
+  closeRange: 1.6, // anyone this close to the muzzle is caught, cone or not: it's too wide up close to miss
+  knockback: 42, // velocity change at point blank, dead center: well over a Hypersonic's direct hit
+  farPower: 0.4, // push at the far end of the cone, relative to point blank
+  edgePower: 0.6, // push at the edge of the cone, relative to its center line
+  lift: 0.4, // minimum upward component of the push, so people fly instead of sliding
+  damage: 35, // at point blank, scaling with the push
+  recoil: 19, // your own velocity change, straight back along your aim: about a good rocket jump's
+  crateKnockback: 28,
+  vehicleKnockback: 0.6, // vehicles are heavy: they take this much of a player's shove...
+  vehicleDamage: 0.5, // ...and this much of the damage
+};
+
 export const GRAPPLE = {
   range: 70,
   pullAccel: 38,
@@ -180,7 +202,7 @@ export const NET = {
 };
 
 /** Bump whenever client and server stop understanding each other; mismatched clients are told to reload. */
-export const PROTOCOL_VERSION = 4;
+export const PROTOCOL_VERSION = 5;
 
 /**
  * - ffa: free-for-all deathmatch, first to the frag limit.
@@ -295,6 +317,7 @@ export const WEAPONS: Record<WeaponId, { slot: WeaponSlot; name: string; twoHand
   hypersonic: { slot: 'primary', name: 'Hypersonic' },
   javelin: { slot: 'primary', name: 'Javelin', twoHanded: true },
   stinger: { slot: 'primary', name: 'Stinger' },
+  thunder: { slot: 'primary', name: 'Thunder Gun' },
   grapple: { slot: 'secondary', name: 'Grapple' },
 };
 

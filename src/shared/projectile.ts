@@ -6,7 +6,7 @@ import type { SeekerId, WeaponId } from './types';
 // launchers' lock rules. Flight.ts moves them.
 
 /** 'vehicle': blown up inside one. 'ram': run over. */
-export type DeathCause = ProjectileKind | 'fall' | 'vehicle' | 'ram';
+export type DeathCause = ProjectileKind | 'thunder' | 'fall' | 'vehicle' | 'ram';
 
 export const isSeeker = (w: WeaponId): w is SeekerId => w in SEEKERS;
 
@@ -22,8 +22,11 @@ export function lockReady(weapon: SeekerId | null, p: { lockTarget: string | nul
 
 export type MissilePhase = 'climb' | 'turn' | 'terminal';
 
-/** Every primary weapon fires a projectile of the same name. */
-export type ProjectileKind = Exclude<WeaponId, 'grapple'>;
+/** The weapons that go in the primary slot. */
+export type PrimaryId = Exclude<WeaponId, 'grapple'>;
+
+/** Every primary weapon but the Thunder Gun (a cone of air, see THUNDER) fires a projectile of the same name. */
+export type ProjectileKind = Exclude<PrimaryId, 'thunder'>;
 
 /**
  * Rockets fly straight at a constant speed and explode on anything. Grenades fall and bounce off

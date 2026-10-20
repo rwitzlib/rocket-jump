@@ -284,7 +284,14 @@ straight on, and your warning goes away. Grapple sideways about a third of a sec
 that's a clean dodge, and against a Javelin it turns a kill into a wound. Too early and the missile turns back onto you;
 too late and it hits.
 
-Tuning is in `GRENADE`, `HYPERSONIC`, `SEEKERS`, `WEAPONS`, `PICKUP` and `ITEMS` in `shared/config.ts`, and the
+The **Thunder Gun** fires no projectile: one blast of air fills a 16 m cone in front of you (about 29° each way, and
+anyone right at the muzzle). Everyone in it and in sight is thrown away from you, as far as 20 m from close up and less
+toward the end of the cone or its edges, but takes only up to 35 damage. Its kills are whatever it throws people into:
+off a ledge, into the sea or the molten pit. It also shoves vehicles and crates. One shot in the mag, then a 2.2 s
+reload. It kicks you straight back along your aim, so a shot at your feet is a jump half again as high as a rocket
+jump.
+
+Tuning is in `GRENADE`, `HYPERSONIC`, `SEEKERS`, `THUNDER`, `WEAPONS`, `PICKUP` and `ITEMS` in `shared/config.ts`, and the
 modes in `MODES`, `TEAMS`, `TDM`, `CTF` and `RACE`.
 
 The grapple hooks players and crates as well as walls. Hooking a player is a tug of war: you're pulled in and they get

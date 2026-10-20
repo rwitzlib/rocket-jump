@@ -40,4 +40,5 @@ export type SimEvent =
   | { type: 'exited'; playerId: string; vehicle: number }
   | { type: 'vehicleHit'; vehicle: number; sourceId: string; amount: number }
   | { type: 'vehicleDestroyed'; vehicle: number; pos: Vector3; normal: Vector3 }
-  | { type: 'rammed'; playerId: string; vehicle: number; speed: number };
+  | { type: 'rammed'; playerId: string; vehicle: number; speed: number }
+  | { type: 'thunder'; playerId: string; pos: Vector3; dir: Vector3 }; // a Thunder Gun blast: from the shooter's eye, along their aim

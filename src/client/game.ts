@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { DT, GRAPPLE, GRENADE, HELI, HYPERSONIC, PLAYER, ROCKET, SEEKERS, TEAMS, WEAPONS, type GameMode } from '../shared/config';
+import { DT, GRAPPLE, GRENADE, HELI, HYPERSONIC, PLAYER, ROCKET, SEEKERS, TEAMS, THUNDER, WEAPONS, type GameMode } from '../shared/config';
 import { MAPS } from '../shared/map';
 import { aimDirection } from '../shared/movement';
 import type { ServerMessage } from '../shared/protocol';
@@ -39,6 +39,8 @@ import { ViewModel } from './viewmodel';
 const VIEWMODEL_FOV = 60; // weapons get their own FOV so changing the world FOV does not warp them
 /** How long the camera watches our body fly before the killcam takes over. */
 const DEATH_CAM_TIME = 0.75;
+/** The play of the match replays in slow motion so it is easier to follow. */
+const HIGHLIGHT_SPEED = 0.5;
 const SPECTATE_DISTANCE = 4.5;
 const FREE_CAM_SPEED = 18; // m/s
 
@@ -260,14 +262,15 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
       }
       case 'fired': {
         recorder.fired(e.playerId);
-        const sound = e.weapon === 'grenade' ? 'grenadeFire' : e.weapon === 'hypersonic' ? 'hypersonicFire' : 'fire';
+        const sound = e.weapon === 'grenade' ? 'grenadeFire' : e.weapon === 'hypersonic' ? 'hypersonicFire' : e.weapon === 'thunder' ? 'thunderFire' : 'fire';
         // Missiles share the rocket's launch sound: a deep one for the javelin, a sharp one for the stinger.
         const rate = e.weapon === 'javelin' ? 0.75 : e.weapon === 'stinger' ? 1.35 : 1;
         if (mine) {
           viewModel.fire();
-          input.rumble(0.15, 60);
+          const thunder = e.weapon === 'thunder';
+          input.rumble(thunder ? 0.5 : 0.15, thunder ? 200 : 60);
           audio.play(sound, { volume: 0.8, rate });
-          cameraFx.shake(e.weapon === 'grenade' ? 0.08 : e.weapon === 'javelin' || e.weapon === 'hypersonic' ? 0.18 : 0.12);
+          cameraFx.shake(e.weapon === 'grenade' ? 0.08 : e.weapon === 'javelin' || e.weapon === 'hypersonic' ? 0.18 : thunder ? 0.4 : 0.12);
         } else {
           remoteView.fired(e.playerId);
           const at = playerPos(e.playerId);
@@ -276,6 +279,9 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
         }
         break;
       }
+      case 'thunder':
+        effects.thunderWave(e.pos, e.dir);
+        break;
       case 'bounce':
         effects.bounce(e.pos, e.normal, e.speed);
         audio.play('bounce', { at: e.pos, volume: Math.min(0.3 + e.speed / 15, 1), rate: 0.9 + Math.random() * 0.2 });
@@ -650,11 +656,14 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
   const lerpPos = new THREE.Vector3();
 
   /** One frame of the killcam: everyone as they were, seen through the killer's eyes. */
-  const playKillcam = (dt: number): boolean => {
+  const playKillcam = (frameDt: number): boolean => {
     if (!killcam) return false;
-    killcam.age += dt;
+    killcam.age += frameDt;
     if (killcam.age < DEATH_CAM_TIME) return false;
-    const t = killcam.diedAt - KILLCAM_BEFORE + (killcam.age - DEATH_CAM_TIME);
+    // Replay time from here on: everything below runs on it, so slow motion slows it all.
+    const speed = killcam.highlight ? HIGHLIGHT_SPEED : 1;
+    const dt = frameDt * speed;
+    const t = killcam.diedAt - KILLCAM_BEFORE + (killcam.age - DEATH_CAM_TIME) * speed;
     if (t > killcam.diedAt + KILLCAM_AFTER) {
       clips.stop();
       return false; // over: back to watching the body until we respawn
@@ -853,7 +862,7 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
     const seeker = lockWeapon ? SEEKERS[lockWeapon] : null;
     const reloading = grenades && me.reloading;
     const reloaded = 1 - me.fireCooldown / GRENADE.reload;
-    const cooldown = seeker ? seeker.cooldown : me.primary === 'hypersonic' ? HYPERSONIC.cooldown : ROCKET.cooldown;
+    const cooldown = seeker ? seeker.cooldown : me.primary === 'hypersonic' ? HYPERSONIC.cooldown : me.primary === 'thunder' ? THUNDER.reload : ROCKET.cooldown;
     const fireReady = grenades ? (reloading ? reloaded : 1) : 1 - me.fireCooldown / cooldown;
     const fireCharge = grenades ? (reloading ? reloaded : me.drum / GRENADE.drum) : fireReady;
     const grappleReady = 1 - me.grappleCooldown / GRAPPLE.cooldown;

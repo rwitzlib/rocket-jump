@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import type { ProjectileKind } from '../shared/sim';
+import type { PrimaryId } from '../shared/sim';
 
 // Weapon and projectile models, shared by the first-person view, other players and the rockets in
 // flight, so everyone's launcher looks the same up close and across the map. All face -Z. Built from
@@ -490,13 +490,76 @@ export function buildDart(): THREE.Group {
   return root;
 }
 
+// --- Thunder Gun -----------------------------------------------------------------------------
+
+const brass = new THREE.MeshStandardMaterial({ color: 0xb08a4a, metalness: 0.55, roughness: 0.35 });
+const windGlow = new THREE.MeshStandardMaterial({ color: 0xd8f6ff, emissive: 0x6cc8ff, emissiveIntensity: 2.2 });
+const coilGlowDim = new THREE.MeshStandardMaterial({ color: 0xb8e8ff, emissive: 0x3a9ae0, emissiveIntensity: 1.1 });
+
+const thunderGeo = {
+  // A short barrel that flares into a wide bell: the turbine's intake, open at the front.
+  bell: lathe(
+    [
+      [0.07, -0.42],
+      [0.1, -0.4],
+      [0.1, 0.3],
+      [0.115, 0.4],
+      [0.16, 0.54],
+      [0.175, 0.62],
+      [0.175, 0.67],
+      [0.155, 0.68],
+      [0.138, 0.63],
+    ],
+    24,
+  ),
+  bellRing: new THREE.TorusGeometry(0.168, 0.014, 8, 28),
+  innerRing: new THREE.TorusGeometry(0.12, 0.009, 6, 24),
+  hub: new THREE.CylinderGeometry(0.04, 0.055, 0.08, 14).rotateX(Math.PI / 2),
+  blade: new THREE.BoxGeometry(0.018, 0.1, 0.012),
+  housing: new THREE.BoxGeometry(0.24, 0.22, 0.4),
+  housingTop: new THREE.BoxGeometry(0.18, 0.04, 0.34),
+  tank: new THREE.CylinderGeometry(0.04, 0.04, 0.36, 14).rotateX(Math.PI / 2),
+  tankCap: new THREE.SphereGeometry(0.04, 12, 8),
+  band: new THREE.CylinderGeometry(0.104, 0.104, 0.04, 20).rotateX(Math.PI / 2),
+  coil: new THREE.TorusGeometry(0.044, 0.007, 6, 14),
+  fin: new THREE.BoxGeometry(0.012, 0.05, 0.3),
+};
+
+/**
+ * Thunder Gun: a brass-banded barrel out of a boxy housing that flares into a turbine bell, the fan
+ * glowing inside it, with a pressure tank wound in glowing coils slung low on each side.
+ */
+export function buildThunderGun(accent: THREE.Material = DEFAULT_ACCENT): LauncherModel {
+  const g = thunderGeo;
+  const root = new THREE.Group();
+  root.add(part(g.bell, gunmetal), part(g.bellRing, brass, 0, 0, -0.66), part(g.innerRing, windGlow, 0, 0, -0.58));
+  root.add(part(g.band, brass, 0, 0, -0.26), part(g.band, accent, 0, 0, -0.14));
+  root.add(part(g.housing, dark, 0, -0.01, 0.12), part(g.housingTop, gunmetal, 0, 0.12, 0.12));
+  // The fan, deep in the bell.
+  root.add(part(g.hub, dark, 0, 0, -0.52));
+  for (let k = 0; k < 6; k++) {
+    const blade = part(g.blade, windGlow, 0, 0, -0.52);
+    blade.rotation.z = (k / 6) * Math.PI * 2;
+    blade.translateY(0.065);
+    root.add(blade);
+  }
+  for (const side of [-1, 1]) {
+    const x = side * 0.115;
+    root.add(part(g.tank, steel, x, -0.07, -0.18), part(g.tankCap, brass, x, -0.07, -0.36));
+    for (let k = 0; k < 3; k++) root.add(part(g.coil, coilGlowDim, x, -0.07, -0.3 + k * 0.07));
+  }
+  for (let k = -1; k <= 1; k++) root.add(part(g.fin, accent, k * 0.05, 0.155, 0.12));
+  return finishLauncher(root, -0.64, 0.14, new THREE.Vector3(-0.121, -0.04, 0.12));
+}
+
 /** Every primary weapon's model, by weapon. */
-export const PRIMARY_MODELS: Record<ProjectileKind, (accent?: THREE.Material) => LauncherModel> = {
+export const PRIMARY_MODELS: Record<PrimaryId, (accent?: THREE.Material) => LauncherModel> = {
   rocket: buildLauncher,
   grenade: buildGrenadeLauncher,
   hypersonic: buildHypersonic,
   javelin: buildJavelin,
   stinger: buildStinger,
+  thunder: buildThunderGun,
 };
 
 // --- Missiles --------------------------------------------------------------------------------

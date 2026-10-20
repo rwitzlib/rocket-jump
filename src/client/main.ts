@@ -548,7 +548,7 @@ async function main() {
       case 'progress': {
         // What we just earned: a line in the corner, more for a level or a finished challenge.
         const g = msg.gain;
-        hud.xpGained(g.xp, g.reasons[0]?.replace(/ \+\d+$/, '') ?? '');
+        if (g.xp > 0) hud.xpGained(g.xp, g.reasons[0]?.replace(/ \+\d+$/, '') ?? '');
         for (const c of g.completed) {
           hud.medal('CHALLENGE COMPLETE', c, 'notice', 0x7cf0a0);
           chat.add(null, `Challenge complete: ${c}`);
@@ -558,6 +558,11 @@ async function main() {
           audio.play('medal', { volume: 0.8 });
           chat.add(null, `You reached level ${g.level}!${g.unlocked.length ? ` Unlocked ${g.unlocked.join(', ')}: wear it from Profile, Skins.` : ''}`);
           showLevel(g.level);
+        } else if (g.unlocked.length) {
+          // A skin earned by a count (1000 rocket jumps) or a season, not a level.
+          hud.medal('SKIN UNLOCKED', g.unlocked.join(', '), 'big', 0xffb347);
+          audio.play('medal', { volume: 0.8 });
+          chat.add(null, `Unlocked ${g.unlocked.join(', ')}: wear it from Profile, Skins.`);
         }
         break;
       }

@@ -136,7 +136,11 @@ export interface ProjectileState {
 /** Position then rotation quaternion: [x, y, z, qx, qy, qz, qw]. */
 export type CrateState = number[];
 
-type WireOf<E> = E extends { pos: Vector3; normal: Vector3 } ? Omit<E, 'pos' | 'normal'> & { pos: Vec3Tuple; normal: Vec3Tuple } : E;
+type WireOf<E> = E extends { pos: Vector3; normal: Vector3 }
+  ? Omit<E, 'pos' | 'normal'> & { pos: Vec3Tuple; normal: Vec3Tuple }
+  : E extends { pos: Vector3; dir: Vector3 }
+    ? Omit<E, 'pos' | 'dir'> & { pos: Vec3Tuple; dir: Vec3Tuple }
+    : E;
 export type WireEvent = WireOf<SimEvent> & { tick: number };
 
 /** Sent on joining, and again whenever the server changes map or mode, or you start or stop spectating. */
@@ -287,11 +291,13 @@ export function hasScored(mode: GameMode, s: ScoreEntry): boolean {
 
 export function toWireEvent(e: SimEvent, tick: number): WireEvent {
   if (e.type === 'explosion' || e.type === 'bounce' || e.type === 'vehicleDestroyed') return { ...e, pos: tuple(e.pos), normal: tuple(e.normal), tick };
+  if (e.type === 'thunder') return { ...e, pos: tuple(e.pos), dir: tuple(e.dir), tick };
   return { ...e, tick };
 }
 
 export function fromWireEvent(w: WireEvent): SimEvent {
   const { tick: _, ...e } = w;
   if (e.type === 'explosion' || e.type === 'bounce' || e.type === 'vehicleDestroyed') return { ...e, pos: new Vector3(...e.pos), normal: new Vector3(...e.normal) };
+  if (e.type === 'thunder') return { ...e, pos: new Vector3(...e.pos), dir: new Vector3(...e.dir) };
   return e;
 }

@@ -1,5 +1,5 @@
 import { Vector3 } from 'three';
-import { DT, GRAVITY, GRENADE, HYPERSONIC, ROCKET } from './config';
+import { DT, GRAVITY, GRENADE, HYPERSONIC, ROCKET, THUNDER } from './config';
 import { isSeeker, type GameSim, type PlayerSim } from './sim';
 import type { PlayerInput } from './types';
 
@@ -183,7 +183,10 @@ export class Bot {
     const target = this.updateTarget(p, sim);
     if (target) {
       this.aimAt(p, target, input);
-      input.forward = 0.3; // strafe around them rather than running into its own splash
+      // A Thunder Gun only reaches so far: close in until they're well inside the cone.
+      const thunder = p.primary === 'thunder';
+      const outOfReach = thunder && target.pos.distanceTo(p.pos) > THUNDER.range * 0.7;
+      input.forward = outOfReach ? 1 : 0.3; // strafe around them rather than running into its own splash
       if (goal) {
         // Shooting on the move: keep heading for the objective, whichever way it's aiming.
         const along = Math.atan2(-dx, -dz) - input.yaw;
@@ -192,7 +195,7 @@ export class Bot {
       }
       this.reaction -= DT;
       const skill = BOT_SKILLS[this.skill];
-      if (this.reaction <= 0 && p.fireCooldown === 0 && Math.random() < DT / (DT + skill.hesitate)) {
+      if (this.reaction <= 0 && p.fireCooldown === 0 && !outOfReach && Math.random() < DT / (DT + skill.hesitate)) {
         input.fire = true;
         this.errYaw = (Math.random() * 2 - 1) * skill.aimError;
         this.errPitch = (Math.random() * 2 - 1) * skill.aimError;
@@ -300,11 +303,12 @@ export class Bot {
   private aimAt(p: PlayerSim, target: PlayerSim, input: PlayerInput) {
     p.eye(_eye);
     const grenade = p.primary === 'grenade';
-    // Seekers steer themselves: just keep the target centered in the lock box.
+    const thunder = p.primary === 'thunder';
+    // Seekers steer themselves: just keep the target centered in the lock box. A Thunder Gun hits at once.
     const speed = grenade ? GRENADE.speed : p.primary === 'hypersonic' ? HYPERSONIC.speed : ROCKET.speed;
-    const flight = isSeeker(p.primary) ? 0 : target.pos.distanceTo(_eye) / speed;
+    const flight = isSeeker(p.primary) || thunder ? 0 : target.pos.distanceTo(_eye) / speed;
     _aim.copy(target.pos).addScaledVector(target.vel, flight);
-    if (target.grounded && BOT_SKILLS[this.skill].splash) _aim.y -= 0.8; // the floor at their feet: splash is easier to land than a direct hit
+    if (target.grounded && BOT_SKILLS[this.skill].splash && !thunder) _aim.y -= 0.8; // the floor at their feet: splash is easier to land than a direct hit
     if (grenade) _aim.y += 0.5 * GRAVITY * flight * flight; // lob it: aim above by as much as it will drop
     _aim.sub(_eye);
     input.yaw = Math.atan2(-_aim.x, -_aim.z) + this.errYaw;
