@@ -2030,9 +2030,10 @@ button.link {
 }
 
 .level-chip {
-  margin-left: 6px;
-  padding: 1px 7px;
-  border-radius: 9px;
+  flex: none;
+  padding: 4px 10px;
+  border-radius: 12px;
+  white-space: nowrap;
   background: rgba(255, 179, 71, 0.18);
   color: var(--accent-2);
   font-size: 11px;
@@ -2161,6 +2162,112 @@ button.link {
 .look.locked {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+/* Skins tab: the list, and the character wearing them beside it. */
+.skins-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 230px;
+  gap: 18px;
+  align-items: start;
+}
+
+/* (Hints elsewhere tuck up under the field above; here that would run into the last row of skins.) */
+.skins-list > .hint {
+  margin: 12px 0 0;
+}
+
+.skins-side {
+  position: sticky;
+  top: 0;
+  text-align: center;
+}
+
+.skins-side .hint {
+  margin: 6px 0 0;
+  font-size: 12px;
+}
+
+.skin-preview {
+  display: block;
+  width: 100%;
+  height: 340px;
+  border-radius: 10px;
+  background: radial-gradient(ellipse at 50% 70%, rgba(255, 179, 71, 0.1), rgba(255, 255, 255, 0.02) 70%);
+}
+
+@media (max-width: 640px) {
+  .skins-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .skins-side {
+    position: static;
+    order: -1;
+  }
+
+  .skin-preview {
+    height: 220px;
+  }
+}
+
+/* Premium skins: a price tag until bought. */
+.look.premium {
+  border-color: rgba(255, 207, 122, 0.45);
+}
+
+.look .price {
+  margin-left: auto;
+  color: #ffcf7a;
+  font-weight: 700;
+}
+
+.look .owned-tag {
+  margin-left: auto;
+  color: #ffcf7a;
+  font-size: 11px;
+}
+
+/* Signed in (or not), above the skins. */
+.account-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  margin-bottom: 4px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 14px;
+}
+
+.account-bar > span {
+  flex: 1 1 200px;
+  margin: 0;
+}
+
+.account-bar button {
+  flex: none;
+  width: auto;
+  margin: 0;
+  padding: 6px 12px;
+  font-size: 13px;
+}
+
+.discord {
+  background: #5865f2;
+  border-color: #5865f2;
+  color: #fff;
+}
+
+.shop-note {
+  margin: 8px 0 0;
+  color: #ffcf7a;
+  font-size: 13px;
+}
+
+.shop-note.error {
+  color: #ffb4a8;
 }
 
 .swatch {

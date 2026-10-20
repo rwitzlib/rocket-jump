@@ -15,6 +15,15 @@
       "port": 5173
     },
     {
+      "name": "dev-server",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "run",
+        "dev:server"
+      ],
+      "port": 8080
+    },
+    {
       "name": "server",
       "runtimeExecutable": "npm",
       "runtimeArgs": [

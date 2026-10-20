@@ -23,7 +23,8 @@ import { WsTransport } from './net/wsclient';
 import { PerfOverlay } from './perf';
 import { MapEditor } from './editor';
 import { decodeMapCode } from '../shared/custommap';
-import { profileKey, ProfilePanel } from './profile';
+import { profileKey, ProfilePanel, rememberedLook, rememberLook } from './profile';
+import { encodeLook, type ProfileView } from '../shared/progress';
 import { hasTrained } from './tutorial';
 import { isTouchDevice, TouchControls } from './touch';
 import { MenuBackdrop } from './menubackdrop';
@@ -337,6 +338,8 @@ async function main() {
     chip.textContent = `Level ${level}`;
   };
   const profilePanel = new ProfilePanel(apiBase, showLevel);
+  // Back from signing in with Discord, or from buying a skin.
+  void profilePanel.handleReturn();
   $('open-profile').addEventListener('click', () => {
     track('profile-open');
     void profilePanel.open();
@@ -498,6 +501,9 @@ async function main() {
         if (restarted) chat.add(null, 'The server restarted, so this is a new match.');
         s.id = msg.id;
         s.token = msg.token ?? s.token;
+        // Practice runs its server in the page, with no profiles: tell it what we wear.
+        const worn = s.practice && first ? rememberedLook() : null;
+        if (worn && s.transport instanceof Loopback) s.transport.server.setLook(msg.id, encodeLook(worn.look), worn.level);
         clearTimeout(s.joinTimer);
         // A new map, a new mode, or starting or stopping spectating: a fresh game.
         const g = s.game;
@@ -830,6 +836,11 @@ async function main() {
 
   // --- the map editor --------------------------------------------------------------------------
 
+  /**
+   * Whether players can open the editor. Off for now: the menu button is hidden and shared map links
+   * don't open it. Dev builds (npm run dev) keep it, to go on working on it.
+   */
+  const EDITOR_ENABLED = import.meta.env.DEV;
   let backToEditor = false;
   const editorMode = $<HTMLSelectElement>('editor-mode');
   for (const [mode, def] of Object.entries(MODES)) editorMode.append(new Option(def.name, mode));
@@ -865,6 +876,7 @@ async function main() {
     show('editor');
     editor!.open(map);
   };
+  $('open-editor').hidden = !EDITOR_ENABLED;
   $('open-editor').addEventListener('click', () => {
     track('editor-open');
     openEditor();
@@ -873,7 +885,8 @@ async function main() {
   practiceButton.disabled = false;
   show('menu');
   // A shared map link: straight into the editor with it.
-  if (params.get('mapcode')) {
+  if (params.get('mapcode') && !EDITOR_ENABLED) showError("Shared maps aren't open yet. Check back soon!");
+  else if (params.get('mapcode')) {
     void decodeMapCode(params.get('mapcode')!).then((map) => {
       if (map) openEditor(map);
       else showError("That map link is broken (it may have been cut short when it was copied).");
@@ -885,7 +898,11 @@ async function main() {
     if (key) {
       void fetch(`${apiBase()}/profile`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ key }) })
         .then((r) => (r.ok ? r.json() : null))
-        .then((v: { level?: number } | null) => v?.level && showLevel(v.level))
+        .then((v: ProfileView | null) => {
+          if (!v?.level) return;
+          showLevel(v.level);
+          rememberLook(v);
+        })
         .catch(() => {});
     }
   }

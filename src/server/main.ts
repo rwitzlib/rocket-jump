@@ -7,7 +7,10 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import { DT, MATCH, MODES, type GameMode } from '../shared/config';
 import { MAPS, PLAYABLE_MAPS } from '../shared/map';
 import { VOTE_KICK } from '../shared/moderation';
-import { allowedLook, decodeLook, encodeLook, levelOf, newProfile, viewProfile } from '../shared/progress';
+import Stripe from 'stripe';
+import { decodeLook, encodeLook, levelOf, newProfile, viewProfile, wornLook, type Profile } from '../shared/progress';
+import { DiscordAuth, safeReturn } from './auth';
+import { Shop } from './shop';
 import { Store } from './store';
 import { Analytics, CLIENT_EVENTS, statsPage, type ClientEvent } from './analytics';
 import { parseClientMessage, type ServerMessage } from '../shared/protocol';
@@ -43,6 +46,22 @@ import { decodeClientMessage, WireEncoder } from '../shared/wire';
 //   REGION=EU West        where this server is, shown in server lists
 //   SERVERS=Name|https://host,...   other Rocket Jump servers to list in the menu (with their ping)
 //   STATIC_DIR=dist       where the built client is
+//
+// Signing in and the skin shop (both off unless set; a .env file next to package.json is read too):
+//
+//   PUBLIC_URL=https://rocketjump.gg   this server's address, for Discord to send players back to
+//                                      (default http://localhost:PORT)
+//   PUBLIC_ORIGINS=https://rocketjump.gg,...   pages that may ask for a sign-in or checkout and be
+//                                      sent back (default: PUBLIC_URL's; any localhost when unset)
+//   DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET   Discord sign-in (redirect: PUBLIC_URL/auth/discord/callback)
+//   STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET   the shop (webhook: PUBLIC_URL/stripe/webhook)
+
+// (Real environment variables win over the file.)
+try {
+  process.loadEnvFile();
+} catch {
+  // no .env: fine
+}
 
 const env = (name: string, fallback: number) => {
   const v = Number(process.env[name]);
@@ -74,6 +93,24 @@ const sockets = new Map<string, { ws: WebSocket; wire: WireEncoder; room: Room; 
 const store = new Store(process.env.DATA_DIR || null);
 const analytics = new Analytics(process.env.DATA_DIR || null);
 const STATS_KEY = process.env.STATS_KEY ?? '';
+const PUBLIC_URL = (process.env.PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
+const PUBLIC_ORIGINS = process.env.PUBLIC_ORIGINS
+  ? process.env.PUBLIC_ORIGINS.split(',').map((o) => o.trim().replace(/\/$/, ''))
+  : process.env.PUBLIC_URL
+    ? [new URL(PUBLIC_URL).origin]
+    : []; // (any localhost page)
+const discord =
+  process.env.DISCORD_CLIENT_ID && process.env.DISCORD_CLIENT_SECRET
+    ? new DiscordAuth({ clientId: process.env.DISCORD_CLIENT_ID, clientSecret: process.env.DISCORD_CLIENT_SECRET, redirectUri: `${PUBLIC_URL}/auth/discord/callback` })
+    : null;
+/** Puts a profile's look on anyone playing as it right now (after a purchase, a refund, a change). */
+function relook(p: Profile) {
+  for (const [id, s] of sockets) if (s.profile && store.idFor(s.profile) === p.id) s.room.server.setLook(id, encodeLook(wornLook(p)), levelOf(p.xp));
+}
+const shop =
+  process.env.STRIPE_SECRET_KEY && process.env.STRIPE_WEBHOOK_SECRET
+    ? new Shop(new Stripe(process.env.STRIPE_SECRET_KEY), process.env.STRIPE_WEBHOOK_SECRET, store, relook)
+    : null;
 const REGION = process.env.REGION ?? '';
 /** Other servers to list: "Name|https://host" entries, comma separated. */
 const SERVERS = (process.env.SERVERS ?? '')
@@ -121,7 +158,7 @@ const banKey = (room: Room, addr: string) => `${room.code}|${addr}`;
 rooms.onStat = (room, id, profile, name, e) => {
   const gain = store.apply(profile, name, e);
   const p = store.find(profile)!;
-  if (gain.levelUp) room.server.setLook(id, encodeLook(allowedLook(p.look, gain.level)), gain.level);
+  if (gain.levelUp) room.server.setLook(id, encodeLook(wornLook(p)), gain.level);
   if (gain.xp > 0) sendTo(id, { type: 'progress', gain, xp: p.xp });
   if (e.type === 'lap' && store.rank(e.map, p.id) === 1 && store.board(e.map).laps[0].time === e.time) {
     log('record', { map: e.map, name, time: e.time });
@@ -188,22 +225,128 @@ function readJson(req: import('node:http').IncomingMessage, done: (body: Record<
 const validKey = (key: unknown): key is string => typeof key === 'string' && /^[a-f0-9]{32}$/.test(key);
 
 /**
- * POST /profile { key }: your profile (level, stats, challenges, look). A key that's never played
- * online gets a blank one, not saved. POST /profile/look { key, tint, trail } puts on a look.
+ * POST /profile { key }: your profile (level, stats, challenges, look, account, skins bought). A key
+ * that's never played online gets a blank one, not saved. POST /profile/look { key, tint, trail }
+ * puts on a look.
  */
 function profileRequest(req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse, look: boolean) {
   readJson(req, (body) => {
     if (!body || !validKey(body.key)) return json(res, 400, { error: 'No profile key.' });
     const key = body.key;
     if (look) {
-      const worn = store.setLook(key, decodeLook(`${String(body.tint)}/${String(body.trail)}/${String(body.explosion)}`));
-      const p = store.find(key)!;
+      store.setLook(key, decodeLook(`${String(body.tint)}/${String(body.trail)}/${String(body.explosion)}`));
       // Anyone playing with this profile right now changes too.
-      for (const [id, s] of sockets) if (s.profile === key) s.room.server.setLook(id, encodeLook(worn), levelOf(p.xp));
+      relook(store.find(key)!);
     }
     const p = store.find(key) ?? newProfile(Store.idOf(key), '', Date.now());
-    json(res, 200, viewProfile(p, Date.now()));
+    json(res, 200, { ...viewProfile(p, Date.now()), signIn: !!discord, shop: !!shop });
   });
+}
+
+/** Sign-ins and checkouts: a few a minute from one address. */
+const accountTimes = new Map<string, number[]>();
+function accountAllowed(addr: string): boolean {
+  const now = Date.now();
+  const recent = (accountTimes.get(addr) ?? []).filter((t) => now - t < 60000);
+  if (recent.length >= 10) return false;
+  recent.push(now);
+  accountTimes.set(addr, recent);
+  if (accountTimes.size > 5000) accountTimes.clear();
+  return true;
+}
+
+/** The sign-in and shop requests (see auth.ts and shop.ts). Says whether it was one. */
+function accountRequest(req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse, url: URL): boolean {
+  const path = url.pathname;
+  const posts = ['/auth/discord', '/auth/claim', '/auth/signout', '/shop/checkout'];
+  if (posts.includes(path) && req.method === 'OPTIONS') {
+    res.writeHead(204, { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'POST', 'access-control-allow-headers': 'content-type' }).end();
+    return true;
+  }
+  const addr = String(req.headers['x-forwarded-for'] ?? req.socket.remoteAddress ?? '').split(',')[0].trim();
+  if (path === '/auth/discord/callback' && req.method === 'GET') {
+    if (!discord) {
+      json(res, 404, { error: 'Not found' });
+      return true;
+    }
+    void discord
+      .callback(url.searchParams, (from, user) => {
+        const { key, profile } = store.signIn(from, user);
+        log('signin', { profile: profile.id, discord: user.id, newKey: !!key });
+        return { key, name: user.name };
+      })
+      .then((to) => {
+        if (to) res.writeHead(302, { location: to, 'cache-control': 'no-store' }).end();
+        else res.writeHead(400, { 'content-type': 'text/plain' }).end('That sign-in link has expired. Go back to the game and try again.');
+      });
+    return true;
+  }
+  if (path === '/stripe/webhook' && req.method === 'POST') {
+    if (!shop) {
+      json(res, 404, { error: 'Not found' });
+      return true;
+    }
+    const chunks: Buffer[] = [];
+    let size = 0;
+    req.on('data', (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > 1024 * 1024) req.destroy();
+      else chunks.push(chunk);
+    });
+    req.on('end', () => {
+      let did: string;
+      try {
+        did = shop.webhook(Buffer.concat(chunks), String(req.headers['stripe-signature'] ?? ''));
+      } catch (err) {
+        log('webhook-rejected', { error: (err as Error).message });
+        return json(res, 400, { error: 'Bad signature' });
+      }
+      log('webhook', { did });
+      json(res, 200, { received: true });
+    });
+    return true;
+  }
+  if (!posts.includes(path)) return false;
+  if (req.method !== 'POST') {
+    json(res, 405, { error: 'POST only' });
+    return true;
+  }
+  readJson(req, (body) => {
+    if (path === '/auth/claim') {
+      const claim = discord?.claim(body?.code);
+      return claim ? json(res, 200, claim) : json(res, 400, { error: 'That sign-in has expired. Try again.' });
+    }
+    if (!body || !validKey(body.key)) return json(res, 400, { error: 'No profile key.' });
+    const key = body.key;
+    if (path === '/auth/signout') {
+      store.signOut(key);
+      return json(res, 200, { ok: true });
+    }
+    if (!accountAllowed(addr)) return json(res, 429, { error: 'Too many tries just now. Wait a minute.' });
+    const returnTo = safeReturn(body.returnTo, PUBLIC_ORIGINS);
+    if (!returnTo) return json(res, 400, { error: "Can't send you back to that page." });
+    if (path === '/auth/discord') {
+      if (!discord) return json(res, 503, { error: "Signing in isn't set up on this server." });
+      return json(res, 200, { url: discord.start(store.idFor(key), returnTo) });
+    }
+    // /shop/checkout
+    if (!shop) return json(res, 503, { error: "The shop isn't set up on this server." });
+    const p = store.find(key);
+    if (!p) return json(res, 403, { error: 'Sign in with Discord to buy skins.' });
+    shop
+      .checkout(p, String(body.sku), returnTo)
+      .then((result) => {
+        if ('url' in result) {
+          log('checkout', { profile: p.id, sku: body.sku });
+          json(res, 200, result);
+        } else json(res, result.status, { error: result.error });
+      })
+      .catch((err: unknown) => {
+        log('checkout-failed', { profile: p.id, sku: body.sku, error: (err as Error).message });
+        json(res, 502, { error: "Couldn't reach the payment service. Try again in a moment." });
+      });
+  });
+  return true;
 }
 
 /** POST /rooms: checks the request and the address's recent rooms, then opens one. */
@@ -288,6 +431,7 @@ const http = createServer((req, res) => {
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }).end(statsPage(report, { profiles: store.profileCount, rooms: rooms.count, connected: sockets.size }));
     return;
   }
+  if (accountRequest(req, res, url)) return;
   if (url.pathname === '/profile' || url.pathname === '/profile/look') {
     if (req.method === 'OPTIONS') {
       res.writeHead(204, { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'POST', 'access-control-allow-headers': 'content-type' }).end();
@@ -421,7 +565,7 @@ wss.on('connection', (ws, req) => {
     if (msg.type === 'join' && msg.profile && !socket.profile) {
       socket.profile = msg.profile;
       const p = store.profile(msg.profile, msg.name);
-      game.setLook(id, encodeLook(allowedLook(p.look, levelOf(p.xp))), levelOf(p.xp));
+      game.setLook(id, encodeLook(wornLook(p)), levelOf(p.xp));
     }
   });
   ws.on('close', () => {
@@ -485,7 +629,7 @@ setInterval(() => {
 }, 60000);
 
 http.listen(PORT, HOST, () => {
-  log('listening', { url: `http://localhost:${PORT}`, maps: game.options.maps.join(','), static: STATIC_DIR, data: process.env.DATA_DIR || '(memory only)', profiles: store.profileCount });
+  log('listening', { url: `http://localhost:${PORT}`, maps: game.options.maps.join(','), static: STATIC_DIR, data: process.env.DATA_DIR || '(memory only)', profiles: store.profileCount, signIn: !!discord, shop: !!shop });
 });
 
 function log(event: string, data: Record<string, unknown>) {

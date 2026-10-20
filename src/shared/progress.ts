@@ -46,6 +46,10 @@ export const TINTS = [
   { id: 'white', name: 'Arctic', color: 0xe4eaf2, level: 12 },
   { id: 'black', name: 'Stealth', color: 0x30343e, level: 15 },
   { id: 'gold', name: 'Gold', color: 0xe8b830, level: 20 },
+  // Premium: bought rather than earned (see PREMIUM). Prices in US cents.
+  { id: 'crimson', name: 'Crimson', color: 0xc8202c, level: 1, price: 199 },
+  { id: 'neon', name: 'Neon', color: 0x9cff3a, level: 1, price: 199 },
+  { id: 'midnight', name: 'Midnight', color: 0x283a9a, level: 1, price: 199 },
 ] as const;
 
 /** Rocket trails: the flame's two colors and the smoke's. */
@@ -58,10 +62,38 @@ export const TRAILS = [
   { id: 'gold', name: 'Gilded', fire: [0xfff0a0, 0xe0a010], smoke: [0xe8d8a0, 0x9a8040], level: 11 },
   { id: 'void', name: 'Void', fire: [0xff60e0, 0x200830], smoke: [0x302030, 0x100810], level: 14 },
   { id: 'rainbow', name: 'Rainbow', fire: [0xffffff, 0xff0000], smoke: [0xf0f0f0, 0xb0b0b0], level: 25 },
+  // Premium.
+  { id: 'sunburst', name: 'Sunburst', fire: [0xfff4b0, 0xff3d7f], smoke: [0xffc0d8, 0xa05070], level: 1, price: 299 },
+  { id: 'aurora', name: 'Aurora', fire: [0xc0fff0, 0x20e0a0], smoke: [0xb0e0ff, 0x6040a0], level: 1, price: 299 },
+  { id: 'inferno', name: 'Inferno', fire: [0xffffff, 0xff2000], smoke: [0x404040, 0x101010], level: 1, price: 299 },
 ] as const;
 
 /** Explosions: how your blasts look. Only the base one so far; more will unlock by level. */
 export const EXPLOSIONS = [{ id: 'classic', name: 'Classic', color: 0xff8a30, level: 1 }] as const;
+
+/**
+ * Premium skins, the ones sold in the shop: a level doesn't unlock them, buying one does (with a
+ * Discord sign-in, so it isn't lost with the browser's key). A profile's `owned` lists their skus.
+ */
+export interface PremiumSkin {
+  sku: string; // "tint:crimson"
+  kind: 'tint' | 'trail';
+  id: string;
+  name: string; // "Crimson armor"
+  price: number; // US cents
+}
+
+const priced = <T extends object>(item: T): item is T & { price: number } => 'price' in item;
+
+export const PREMIUM: PremiumSkin[] = [
+  ...TINTS.filter(priced).map((t) => ({ sku: `tint:${t.id}`, kind: 'tint' as const, id: t.id, name: `${t.name} armor`, price: t.price })),
+  ...TRAILS.filter(priced).map((t) => ({ sku: `trail:${t.id}`, kind: 'trail' as const, id: t.id, name: `${t.name} trail`, price: t.price })),
+];
+
+/** Whether a skin can be worn with these purchases: free ones always, premium ones once bought. */
+const wearable = (kind: PremiumSkin['kind'], item: object & { id: string }, owned: readonly string[]) => !priced(item) || owned.includes(`${kind}:${item.id}`);
+
+export const formatPrice = (cents: number) => `$${(cents / 100).toFixed(2)}`;
 
 export type TintId = (typeof TINTS)[number]['id'];
 export type TrailId = (typeof TRAILS)[number]['id'];
@@ -87,10 +119,13 @@ export function decodeLook(text: string | undefined): Look {
   };
 }
 
-/** A look this level may wear; anything locked (or missing, from before it existed) goes back to the default. */
-export function allowedLook(look: Partial<Look>, level: number): Look {
-  const tint = TINTS.find((t) => t.id === look.tint && t.level <= level)?.id ?? 'auto';
-  const trail = TRAILS.find((t) => t.id === look.trail && t.level <= level)?.id ?? 'classic';
+/**
+ * A look this level (and these purchases) may wear; anything locked, not bought (or refunded), or
+ * missing (from before it existed) goes back to the default.
+ */
+export function allowedLook(look: Partial<Look>, level: number, owned: readonly string[] = []): Look {
+  const tint = TINTS.find((t) => t.id === look.tint && t.level <= level && wearable('tint', t, owned))?.id ?? 'auto';
+  const trail = TRAILS.find((t) => t.id === look.trail && t.level <= level && wearable('trail', t, owned))?.id ?? 'classic';
   const explosion = EXPLOSIONS.find((t) => t.id === look.explosion && t.level <= level)?.id ?? 'classic';
   return { tint, trail, explosion };
 }
@@ -98,8 +133,8 @@ export function allowedLook(look: Partial<Look>, level: number): Look {
 /** Skins that unlock on reaching exactly this level, for the level-up message. */
 export function unlocksAt(level: number): string[] {
   return [
-    ...TINTS.filter((t) => t.level === level).map((t) => `${t.name} armor`),
-    ...TRAILS.filter((t) => t.level === level).map((t) => `${t.name} trail`),
+    ...TINTS.filter((t) => t.level === level && !priced(t)).map((t) => `${t.name} armor`),
+    ...TRAILS.filter((t) => t.level === level && !priced(t)).map((t) => `${t.name} trail`),
     ...EXPLOSIONS.filter((t) => t.level === level && level > 1).map((t) => `${t.name} explosion`),
   ];
 }
@@ -202,7 +237,14 @@ export interface Profile {
   daily: { period: string; progress: number[] };
   weekly: { period: string; progress: number[] };
   bestLaps: Record<string, number>; // map -> seconds
+  /** The Discord account it's tied to, once they sign in (optional: only buying needs it). */
+  account?: { provider: 'discord'; id: string; name: string };
+  /** Premium skins bought, by sku. */
+  owned?: string[];
 }
+
+/** The look a profile wears right now, as far as its level and purchases allow. */
+export const wornLook = (p: Profile): Look => allowedLook(p.look, levelOf(p.xp), p.owned);
 
 export function newProfile(id: string, name: string, now: number): Profile {
   return {
@@ -323,6 +365,12 @@ export interface ProfileView {
   weekly: { text: string; progress: number; target: number }[];
   dailyEnds: number; // ms timestamp
   weeklyEnds: number;
+  /** Who they're signed in as, if they are. */
+  account: { provider: 'discord'; name: string } | null;
+  owned: string[];
+  /** What this server offers: Discord sign-in, and the shop (both need setting up). */
+  signIn?: boolean;
+  shop?: boolean;
 }
 
 export function viewProfile(p: Profile, now: number): ProfileView {
@@ -342,12 +390,14 @@ export function viewProfile(p: Profile, now: number): ProfileView {
     levelXp: p.xp - xpForLevel(level),
     levelSize: xpForLevel(level + 1) - xpForLevel(level),
     stats: p.stats,
-    look: allowedLook(p.look, level),
+    look: allowedLook(p.look, level, p.owned),
     bestLaps: p.bestLaps,
     daily: list(p.daily.period, p.daily.progress, false),
     weekly: list(p.weekly.period, p.weekly.progress, true),
     dailyEnds: day + 86400000,
     weeklyEnds: new Date(weekKey(now)).getTime() + 7 * 86400000,
+    account: p.account ? { provider: p.account.provider, name: p.account.name } : null,
+    owned: p.owned ?? [],
   };
 }
 
