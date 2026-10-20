@@ -1,5 +1,5 @@
 import { MAPS, PLAYABLE_MAPS } from '../shared/map';
-import { EXPLOSIONS, formatPrice, PREMIUM, TINTS, TRAILS, type LapRecord, type Look, type ProfileView } from '../shared/progress';
+import { decodeLook, encodeLook, EXPLOSIONS, formatPrice, PREMIUM, TINTS, TRAILS, type LapRecord, type Look, type ProfileView } from '../shared/progress';
 import { formatLap } from './objectives';
 import { SkinPreview } from './skinpreview';
 
@@ -12,6 +12,29 @@ import { SkinPreview } from './skinpreview';
 // keep) or ?purchase=SKU (the server grants it when Stripe says it's paid; we wait for that).
 
 const KEY = 'rocket-jump:profile';
+const WORN = 'rocket-jump:look';
+
+/**
+ * Keeps what the profile wears (and its level), as the server last said, so practice games (which
+ * run in the page, with no server to ask) can dress you the same, offline too.
+ */
+export function rememberLook(view: Pick<ProfileView, 'look' | 'level'>) {
+  try {
+    localStorage.setItem(WORN, JSON.stringify({ look: encodeLook(view.look), level: view.level }));
+  } catch {
+    // storage blocked: practice shows the default look
+  }
+}
+
+/** The look last remembered, or null if there's none. */
+export function rememberedLook(): { look: Look; level: number } | null {
+  try {
+    const saved = JSON.parse(localStorage.getItem(WORN) ?? 'null') as { look?: string; level?: number } | null;
+    return saved?.look ? { look: decodeLook(saved.look), level: saved.level ?? 1 } : null;
+  } catch {
+    return null;
+  }
+}
 
 /** This browser's profile key, made the first time it's asked for. Null if storage is blocked. */
 export function profileKey(): string | null {
@@ -247,6 +270,7 @@ export class ProfilePanel {
     }
     try {
       this.view = await fetchProfile(this.base(), key);
+      rememberLook(this.view);
       this.onLevel(this.view.level);
       this.render();
     } catch {
@@ -335,6 +359,7 @@ export class ProfilePanel {
       if (!key) return;
       try {
         this.view = await wearLook(this.base(), key, look);
+        rememberLook(this.view);
         this.render();
       } catch {
         // stays as it was

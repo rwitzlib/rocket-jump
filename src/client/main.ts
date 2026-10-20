@@ -23,7 +23,8 @@ import { WsTransport } from './net/wsclient';
 import { PerfOverlay } from './perf';
 import { MapEditor } from './editor';
 import { decodeMapCode } from '../shared/custommap';
-import { profileKey, ProfilePanel } from './profile';
+import { profileKey, ProfilePanel, rememberedLook, rememberLook } from './profile';
+import { encodeLook, type ProfileView } from '../shared/progress';
 import { hasTrained } from './tutorial';
 import { isTouchDevice, TouchControls } from './touch';
 import { MenuBackdrop } from './menubackdrop';
@@ -500,6 +501,9 @@ async function main() {
         if (restarted) chat.add(null, 'The server restarted, so this is a new match.');
         s.id = msg.id;
         s.token = msg.token ?? s.token;
+        // Practice runs its server in the page, with no profiles: tell it what we wear.
+        const worn = s.practice && first ? rememberedLook() : null;
+        if (worn && s.transport instanceof Loopback) s.transport.server.setLook(msg.id, encodeLook(worn.look), worn.level);
         clearTimeout(s.joinTimer);
         // A new map, a new mode, or starting or stopping spectating: a fresh game.
         const g = s.game;
@@ -894,7 +898,11 @@ async function main() {
     if (key) {
       void fetch(`${apiBase()}/profile`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ key }) })
         .then((r) => (r.ok ? r.json() : null))
-        .then((v: { level?: number } | null) => v?.level && showLevel(v.level))
+        .then((v: ProfileView | null) => {
+          if (!v?.level) return;
+          showLevel(v.level);
+          rememberLook(v);
+        })
         .catch(() => {});
     }
   }
