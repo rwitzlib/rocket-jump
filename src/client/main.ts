@@ -832,6 +832,11 @@ async function main() {
 
   // --- the map editor --------------------------------------------------------------------------
 
+  /**
+   * Whether players can open the editor. Off for now: the menu button is hidden and shared map links
+   * don't open it. Dev builds (npm run dev) keep it, to go on working on it.
+   */
+  const EDITOR_ENABLED = import.meta.env.DEV;
   let backToEditor = false;
   const editorMode = $<HTMLSelectElement>('editor-mode');
   for (const [mode, def] of Object.entries(MODES)) editorMode.append(new Option(def.name, mode));
@@ -867,6 +872,7 @@ async function main() {
     show('editor');
     editor!.open(map);
   };
+  $('open-editor').hidden = !EDITOR_ENABLED;
   $('open-editor').addEventListener('click', () => {
     track('editor-open');
     openEditor();
@@ -875,7 +881,8 @@ async function main() {
   practiceButton.disabled = false;
   show('menu');
   // A shared map link: straight into the editor with it.
-  if (params.get('mapcode')) {
+  if (params.get('mapcode') && !EDITOR_ENABLED) showError("Shared maps aren't open yet. Check back soon!");
+  else if (params.get('mapcode')) {
     void decodeMapCode(params.get('mapcode')!).then((map) => {
       if (map) openEditor(map);
       else showError("That map link is broken (it may have been cut short when it was copied).");

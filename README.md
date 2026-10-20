@@ -84,7 +84,7 @@ everyone. **Profile, Race records**
 has the fastest laps on every map. There are no accounts: the browser keeps a secret key, and the server
 keeps the profile (in `DATA_DIR`).
 
-**Map editor.** Build a map from boxes and place spawns, mystery boxes, items, flags, race rings and hill spots,
+**Map editor** (turned off for players for now: hidden from the menu, and map links don't open it; `npm run dev` still has it). Build a map from boxes and place spawns, mystery boxes, items, flags, race rings and hill spots,
 then **Play it** (practice, any mode), **Host online** (opens a room on it; the map goes to everyone who joins)
 or **Share link** (the whole map, compressed into a link that opens it in the editor). Maps save in the browser,
 and export and import as JSON.
