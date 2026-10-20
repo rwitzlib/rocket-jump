@@ -2163,6 +2163,65 @@ button.link {
   cursor: not-allowed;
 }
 
+/* Premium skins: a price tag until bought. */
+.look.premium {
+  border-color: rgba(255, 207, 122, 0.45);
+}
+
+.look .price {
+  margin-left: auto;
+  color: #ffcf7a;
+  font-weight: 700;
+}
+
+.look .owned-tag {
+  margin-left: auto;
+  color: #ffcf7a;
+  font-size: 11px;
+}
+
+/* Signed in (or not), above the skins. */
+.account-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  margin-bottom: 4px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 14px;
+}
+
+.account-bar > span {
+  flex: 1 1 200px;
+  margin: 0;
+}
+
+.account-bar button {
+  flex: none;
+  width: auto;
+  margin: 0;
+  padding: 6px 12px;
+  font-size: 13px;
+}
+
+.discord {
+  background: #5865f2;
+  border-color: #5865f2;
+  color: #fff;
+}
+
+.shop-note {
+  margin: 8px 0 0;
+  color: #ffcf7a;
+  font-size: 13px;
+}
+
+.shop-note.error {
+  color: #ffb4a8;
+}
+
 .swatch {
   flex: none;
   width: 18px;

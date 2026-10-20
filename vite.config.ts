@@ -18,6 +18,8 @@ export default defineConfig({
       '/servers': { target: `http://${GAME_SERVER}` },
       '/event': { target: `http://${GAME_SERVER}` },
       '/health': { target: `http://${GAME_SERVER}` },
+      '/auth': { target: `http://${GAME_SERVER}` },
+      '/shop': { target: `http://${GAME_SERVER}` },
     },
   },
 });

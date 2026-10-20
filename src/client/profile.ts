@@ -1,10 +1,14 @@
 import { MAPS, PLAYABLE_MAPS } from '../shared/map';
-import { EXPLOSIONS, TINTS, TRAILS, type LapRecord, type Look, type ProfileView } from '../shared/progress';
+import { EXPLOSIONS, formatPrice, PREMIUM, TINTS, TRAILS, type LapRecord, type Look, type ProfileView } from '../shared/progress';
 import { formatLap } from './objectives';
 
 // The player's online profile, as the menu shows it: level and XP, lifetime stats, the day's and
 // week's challenges, the skins their level has unlocked, and the race records on every map. The
 // server keeps it all; this browser only holds the secret key that says whose it is.
+//
+// Signing in with Discord is optional and only needed to buy premium skins (Stripe Checkout). Both
+// leave the page and come back to it: with #signin=CODE (swapped for the key this browser should
+// keep) or ?purchase=SKU (the server grants it when Stripe says it's paid; we wait for that).
 
 const KEY = 'rocket-jump:profile';
 
@@ -24,14 +28,45 @@ export function profileKey(): string | null {
   }
 }
 
+function setProfileKey(key: string) {
+  try {
+    localStorage.setItem(KEY, key);
+  } catch {
+    // storage blocked: nothing to keep it in
+  }
+}
+
+/** Forgets this browser's key (signing out): the next one asked for is a fresh, anonymous profile. */
+function forgetProfileKey() {
+  try {
+    localStorage.removeItem(KEY);
+  } catch {
+    // as above
+  }
+}
+
+/** POSTs JSON; a failure throws with the server's message, if it gave one. */
 async function post<T>(base: string, path: string, body: object): Promise<T> {
   const res = await fetch(`${base}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
-  if (!res.ok) throw new Error(String(res.status));
+  if (!res.ok) {
+    const error = await res
+      .json()
+      .then((b: { error?: string }) => b.error)
+      .catch(() => undefined);
+    throw new Error(error ?? `The server said ${res.status}.`);
+  }
   return (await res.json()) as T;
 }
 
+/** This page, to come back to after Discord or Checkout. */
+const here = () => `${location.origin}${location.pathname}`;
+
 export const fetchProfile = (base: string, key: string) => post<ProfileView>(base, '/profile', { key });
 export const wearLook = (base: string, key: string, look: Look) => post<ProfileView>(base, '/profile/look', { key, ...look });
+const startSignIn = (base: string, key: string) => post<{ url: string }>(base, '/auth/discord', { key, returnTo: here() });
+const claimSignIn = (base: string, code: string) => post<{ key: string | null; name: string }>(base, '/auth/claim', { code });
+const signOut = (base: string, key: string) => post<{ ok: boolean }>(base, '/auth/signout', { key });
+const startCheckout = (base: string, key: string, sku: string) => post<{ url: string }>(base, '/shop/checkout', { key, sku, returnTo: here() });
 
 export interface Board {
   map: string;
@@ -66,6 +101,9 @@ export class ProfilePanel {
   private tab = 'overview';
   private view: ProfileView | null = null;
   private boardMap = PLAYABLE_MAPS[0];
+  /** A line under the skins: how a sign-in or purchase went. */
+  private notice: { text: string; error?: boolean } | null = null;
+  private busy = false;
 
   constructor(
     private readonly base: () => string,
@@ -74,15 +112,125 @@ export class ProfilePanel {
   ) {
     for (const tab of this.root.querySelectorAll<HTMLElement>('.tab')) {
       tab.addEventListener('click', () => {
-        this.tab = tab.dataset.tab!;
-        for (const t of this.root.querySelectorAll<HTMLElement>('.tab')) t.classList.toggle('active', t === tab);
+        this.select(tab.dataset.tab!);
         this.render();
       });
     }
   }
 
+  private select(name: string) {
+    this.tab = name;
+    for (const t of this.root.querySelectorAll<HTMLElement>('.tab')) t.classList.toggle('active', t.dataset.tab === name);
+  }
+
+  /**
+   * Back from signing in or from Checkout (the page's address says which): finishes up and opens
+   * the Skins tab to show how it went. Call once, when the page loads.
+   */
+  async handleReturn() {
+    const hash = new URLSearchParams(location.hash.slice(1));
+    const query = new URLSearchParams(location.search);
+    const code = hash.get('signin');
+    const failed = hash.get('signin-error');
+    const purchase = query.get('purchase');
+    if (!code && !failed && !purchase) return;
+    // Tidy the address so a reload doesn't do it again.
+    query.delete('purchase');
+    history.replaceState(null, '', `${location.pathname}${query.size ? `?${query}` : ''}`);
+    this.select('skins');
+    if (failed) this.notice = { text: failed === 'denied' ? 'Sign-in cancelled.' : "Couldn't sign in with Discord. Try again in a moment.", error: true };
+    if (code) {
+      try {
+        const result = await claimSignIn(this.base(), code);
+        if (result.key) setProfileKey(result.key);
+        this.notice = { text: `Signed in as ${result.name}.${result.key ? ' Your profile from that account is loaded.' : ''}` };
+      } catch (err) {
+        this.notice = { text: (err as Error).message, error: true };
+      }
+    }
+    if (purchase === 'cancelled') this.notice = { text: 'Purchase cancelled: nothing was charged.' };
+    await this.open(true);
+    if (purchase && purchase !== 'cancelled') await this.awaitPurchase(purchase);
+  }
+
+  /** Stripe tells the server a payment went through a moment after the page comes back: wait for it. */
+  private async awaitPurchase(sku: string) {
+    const name = PREMIUM.find((s) => s.sku === sku)?.name ?? 'your skin';
+    for (let i = 0; i < 20; i++) {
+      if (this.view?.owned.includes(sku)) {
+        this.notice = { text: `Thanks! ${name} is yours. Click it to wear it.` };
+        this.render();
+        return;
+      }
+      this.notice = { text: `Payment received. Waiting for ${name} to arrive…` };
+      this.render();
+      await new Promise((r) => setTimeout(r, 1500));
+      await this.refresh();
+    }
+    this.notice = { text: `${name} hasn't arrived yet. Some payment methods take a while: it'll show up here once the payment clears.` };
+    this.render();
+  }
+
+  private async signIn() {
+    const key = profileKey();
+    if (!key || this.busy) return;
+    this.busy = true;
+    try {
+      location.href = (await startSignIn(this.base(), key)).url;
+    } catch (err) {
+      this.notice = { text: (err as Error).message, error: true };
+      this.render();
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  private async signOut() {
+    const key = profileKey();
+    if (!key || !confirm('Sign out? This browser starts a fresh profile; sign in again to get yours back.')) return;
+    await signOut(this.base(), key).catch(() => {});
+    forgetProfileKey();
+    this.notice = { text: 'Signed out.' };
+    await this.refresh();
+  }
+
+  private async buy(sku: string) {
+    const key = profileKey();
+    if (!key || this.busy) return;
+    this.busy = true;
+    this.notice = { text: 'Opening checkout…' };
+    this.render();
+    try {
+      location.href = (await startCheckout(this.base(), key, sku)).url;
+    } catch (err) {
+      this.notice = { text: (err as Error).message, error: true };
+      this.render();
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  /** Who they're signed in as, or the button to sign in (when this server can). */
+  private accountBar(v: ProfileView): HTMLElement | null {
+    if (!v.signIn && !v.account) return null;
+    const bar = el('div', 'account-bar');
+    if (v.account) {
+      const who = el('span', '', 'Signed in with Discord as ');
+      who.append(el('b', '', v.account.name));
+      const out = el('button', 'ghost', 'Sign out');
+      out.addEventListener('click', () => void this.signOut());
+      bar.append(who, out);
+    } else {
+      const button = el('button', 'discord', 'Sign in with Discord');
+      button.addEventListener('click', () => void this.signIn());
+      bar.append(el('span', 'hint', v.shop ? 'Optional. Sign in to buy premium skins and keep them on any browser.' : 'Optional. Keeps your profile safe if this browser forgets it.'), button);
+    }
+    return bar;
+  }
+
   /** Opens it and fetches the latest. */
-  async open() {
+  async open(keepNotice = false) {
+    if (!keepNotice) this.notice = null;
     this.root.hidden = false;
     this.body.replaceChildren(el('p', 'hint', 'Loading…'));
     await this.refresh();
@@ -138,7 +286,7 @@ export class ProfilePanel {
       cell.append(el('b', '', String(value)), el('span', '', label));
       grid.append(cell);
     }
-    const note = el('p', 'hint', 'XP, stats and challenges count in online games. Your profile is tied to this browser.');
+    const note = el('p', 'hint', v.account ? `XP, stats and challenges count in online games. Your profile is tied to your Discord account (${v.account.name}).` : 'XP, stats and challenges count in online games. Your profile is tied to this browser.');
     return [head, bar, xp, grid, note];
   }
 
@@ -175,36 +323,54 @@ export class ProfilePanel {
         // stays as it was
       }
     };
-    const section = (title: string, items: readonly { id: string; name: string; level: number; color: number }[], current: string, wear: (id: string) => Look) => {
+    const section = (title: string, kind: 'tint' | 'trail' | 'explosion', items: readonly { id: string; name: string; level: number; color: number; price?: number }[], current: string, wear: (id: string) => Look) => {
       const wrap = el('div', 'looks');
       for (const item of items) {
+        const sku = `${kind}:${item.id}`;
+        const premium = item.price !== undefined;
+        const owned = v.owned.includes(sku);
+        // Premium skins show only where they can be bought (or once they have been).
+        if (premium && !owned && !v.shop) continue;
+        const forSale = premium && !owned;
         const locked = item.level > v.level;
-        const b = el('button', `look${item.id === current ? ' worn' : ''}${locked ? ' locked' : ''}`);
+        const b = el('button', `look${item.id === current ? ' worn' : ''}${locked ? ' locked' : ''}${premium ? ' premium' : ''}`);
         const swatch = el('span', 'swatch');
         swatch.style.background = item.id === 'auto' ? 'conic-gradient(#3d9cf0, #f0a830, #a860f0, #40c878, #f05a80, #3d9cf0)' : item.id === 'rainbow' ? 'linear-gradient(90deg, red, orange, yellow, lime, cyan, blue, violet)' : hex(item.color);
         b.append(swatch, el('span', '', locked ? `Level ${item.level}` : item.name));
-        b.title = locked ? `${item.name}: unlocks at level ${item.level}` : item.name;
+        if (forSale) b.append(el('span', 'price', formatPrice(item.price!)));
+        else if (premium) b.append(el('span', 'owned-tag', '★'));
+        b.title = locked ? `${item.name}: unlocks at level ${item.level}` : forSale ? (v.account ? `Buy ${item.name} for ${formatPrice(item.price!)}` : `${item.name}: sign in with Discord to buy it`) : item.name;
         b.disabled = locked;
-        b.addEventListener('click', () => void pick(wear(item.id)));
+        b.addEventListener('click', () => {
+          if (!forSale) void pick(wear(item.id));
+          else if (v.account) void this.buy(sku);
+          else void this.signIn();
+        });
         wrap.append(b);
       }
       return [el('h3', '', title), wrap];
     };
+    const bar = this.accountBar(v);
+    const notice = this.notice ? [el('p', `shop-note${this.notice.error ? ' error' : ''}`, this.notice.text)] : [];
     return [
-      ...section('Armor', TINTS, v.look.tint, (id) => ({ ...v.look, tint: id as Look['tint'] })),
+      ...(bar ? [bar] : []),
+      ...notice,
+      ...section('Armor', 'tint', TINTS, v.look.tint, (id) => ({ ...v.look, tint: id as Look['tint'] })),
       ...section(
         'Rocket trail',
+        'trail',
         TRAILS.map((t) => ({ ...t, color: t.fire[1] })),
         v.look.trail,
         (id) => ({ ...v.look, trail: id as Look['trail'] }),
       ),
       ...section(
         'Explosions',
+        'explosion',
         EXPLOSIONS,
         v.look.explosion,
         (id) => ({ ...v.look, explosion: id as Look['explosion'] }),
       ),
-      el('p', 'hint', 'Armor color shows outside team games. Everyone sees your trail. More explosions are on the way.'),
+      el('p', 'hint', `Armor color shows outside team games. Everyone sees your trail. More explosions are on the way.${v.shop ? ' Gold-edged skins are premium: buying one supports the game.' : ''}`),
     ];
   }
 

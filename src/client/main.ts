@@ -337,6 +337,8 @@ async function main() {
     chip.textContent = `Level ${level}`;
   };
   const profilePanel = new ProfilePanel(apiBase, showLevel);
+  // Back from signing in with Discord, or from buying a skin.
+  void profilePanel.handleReturn();
   $('open-profile').addEventListener('click', () => {
     track('profile-open');
     void profilePanel.open();
