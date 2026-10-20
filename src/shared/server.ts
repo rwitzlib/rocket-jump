@@ -931,7 +931,7 @@ export class GameServer {
         team: p.team,
         captures: p.captures,
         bestLap: Math.round(p.bestLap * 1000) / 1000,
-        look: conn?.look ?? 'auto/classic',
+        look: conn?.look ?? encodeLook(DEFAULT_LOOK),
         points: Math.floor(p.points),
         level: conn?.level ?? 0,
       });

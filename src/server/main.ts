@@ -7,7 +7,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import { DT, MATCH, MODES, type GameMode } from '../shared/config';
 import { MAPS, PLAYABLE_MAPS } from '../shared/map';
 import { VOTE_KICK } from '../shared/moderation';
-import { decodeLook, encodeLook, levelOf, newProfile, viewProfile } from '../shared/progress';
+import { allowedLook, decodeLook, encodeLook, levelOf, newProfile, viewProfile } from '../shared/progress';
 import { Store } from './store';
 import { Analytics, CLIENT_EVENTS, statsPage, type ClientEvent } from './analytics';
 import { parseClientMessage, type ServerMessage } from '../shared/protocol';
@@ -121,7 +121,7 @@ const banKey = (room: Room, addr: string) => `${room.code}|${addr}`;
 rooms.onStat = (room, id, profile, name, e) => {
   const gain = store.apply(profile, name, e);
   const p = store.find(profile)!;
-  if (gain.levelUp) room.server.setLook(id, encodeLook(p.look), gain.level);
+  if (gain.levelUp) room.server.setLook(id, encodeLook(allowedLook(p.look, gain.level)), gain.level);
   if (gain.xp > 0) sendTo(id, { type: 'progress', gain, xp: p.xp });
   if (e.type === 'lap' && store.rank(e.map, p.id) === 1 && store.board(e.map).laps[0].time === e.time) {
     log('record', { map: e.map, name, time: e.time });
@@ -196,7 +196,7 @@ function profileRequest(req: import('node:http').IncomingMessage, res: import('n
     if (!body || !validKey(body.key)) return json(res, 400, { error: 'No profile key.' });
     const key = body.key;
     if (look) {
-      const worn = store.setLook(key, decodeLook(`${String(body.tint)}/${String(body.trail)}`));
+      const worn = store.setLook(key, decodeLook(`${String(body.tint)}/${String(body.trail)}/${String(body.explosion)}`));
       const p = store.find(key)!;
       // Anyone playing with this profile right now changes too.
       for (const [id, s] of sockets) if (s.profile === key) s.room.server.setLook(id, encodeLook(worn), levelOf(p.xp));
@@ -421,7 +421,7 @@ wss.on('connection', (ws, req) => {
     if (msg.type === 'join' && msg.profile && !socket.profile) {
       socket.profile = msg.profile;
       const p = store.profile(msg.profile, msg.name);
-      game.setLook(id, encodeLook(p.look), levelOf(p.xp));
+      game.setLook(id, encodeLook(allowedLook(p.look, levelOf(p.xp))), levelOf(p.xp));
     }
   });
   ws.on('close', () => {

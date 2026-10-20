@@ -1,9 +1,9 @@
 import { MAPS, PLAYABLE_MAPS } from '../shared/map';
-import { TINTS, TRAILS, type LapRecord, type Look, type ProfileView } from '../shared/progress';
+import { EXPLOSIONS, TINTS, TRAILS, type LapRecord, type Look, type ProfileView } from '../shared/progress';
 import { formatLap } from './objectives';
 
 // The player's online profile, as the menu shows it: level and XP, lifetime stats, the day's and
-// week's challenges, the looks their level has unlocked, and the race records on every map. The
+// week's challenges, the skins their level has unlocked, and the race records on every map. The
 // server keeps it all; this browser only holds the secret key that says whose it is.
 
 const KEY = 'rocket-jump:profile';
@@ -108,7 +108,7 @@ export class ProfilePanel {
     if (!v) return;
     if (this.tab === 'overview') this.body.replaceChildren(...this.overview(v));
     else if (this.tab === 'challenges') this.body.replaceChildren(...this.challenges(v));
-    else if (this.tab === 'looks') this.body.replaceChildren(...this.looks(v));
+    else if (this.tab === 'skins') this.body.replaceChildren(...this.skins(v));
     else void this.records();
   }
 
@@ -164,7 +164,7 @@ export class ProfilePanel {
     return out;
   }
 
-  private looks(v: ProfileView): HTMLElement[] {
+  private skins(v: ProfileView): HTMLElement[] {
     const pick = async (look: Look) => {
       const key = profileKey();
       if (!key) return;
@@ -198,7 +198,13 @@ export class ProfilePanel {
         v.look.trail,
         (id) => ({ ...v.look, trail: id as Look['trail'] }),
       ),
-      el('p', 'hint', 'Armor color shows outside team games. Everyone sees your trail.'),
+      ...section(
+        'Explosions',
+        EXPLOSIONS,
+        v.look.explosion,
+        (id) => ({ ...v.look, explosion: id as Look['explosion'] }),
+      ),
+      el('p', 'hint', 'Armor color shows outside team games. Everyone sees your trail. More explosions are on the way.'),
     ];
   }
 

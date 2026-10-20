@@ -79,7 +79,8 @@ joining a full server watches until a place comes free, then gets in automatical
 
 **Profiles.** Online play earns XP (kills, airshots, captures, laps, matches and wins) toward levels, and counts
 lifetime stats. Three daily and three weekly challenges (the same for everyone) pay extra. Levels unlock
-armor colors and rocket trails, worn from **Profile, Looks** and seen by everyone. **Profile, Race records**
+skins (armor colors and rocket trails so far, plus the base explosion), worn from **Profile, Skins** and seen by
+everyone. **Profile, Race records**
 has the fastest laps on every map. There are no accounts: the browser keeps a secret key, and the server
 keeps the profile (in `DATA_DIR`).
 

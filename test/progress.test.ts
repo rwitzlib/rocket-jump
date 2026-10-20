@@ -74,11 +74,13 @@ test('challenges are the same for everyone on a day, and complete once', () => {
   assert.equal(viewProfile(p, now + 86400000).daily[0].progress, 0);
 });
 
-test('looks are limited to what the level has unlocked', () => {
-  assert.deepEqual(allowedLook({ tint: 'gold', trail: 'rainbow' }, 1), { tint: 'auto', trail: 'classic' });
-  assert.deepEqual(allowedLook({ tint: 'gold', trail: 'ember' }, 20), { tint: 'gold', trail: 'ember' });
-  assert.deepEqual(decodeLook(encodeLook({ tint: 'teal', trail: 'frost' })), { tint: 'teal', trail: 'frost' });
-  assert.deepEqual(decodeLook('nonsense'), { tint: 'auto', trail: 'classic' });
+test('skins are limited to what the level has unlocked', () => {
+  assert.deepEqual(allowedLook({ tint: 'gold', trail: 'rainbow', explosion: 'classic' }, 1), { tint: 'auto', trail: 'classic', explosion: 'classic' });
+  assert.deepEqual(allowedLook({ tint: 'gold', trail: 'ember', explosion: 'classic' }, 20), { tint: 'gold', trail: 'ember', explosion: 'classic' });
+  assert.deepEqual(decodeLook(encodeLook({ tint: 'teal', trail: 'frost', explosion: 'classic' })), { tint: 'teal', trail: 'frost', explosion: 'classic' });
+  assert.deepEqual(decodeLook('nonsense'), { tint: 'auto', trail: 'classic', explosion: 'classic' });
+  // A profile saved before explosions existed still reads fine.
+  assert.deepEqual(allowedLook({ tint: 'blue', trail: 'classic' }, 3), { tint: 'blue', trail: 'classic', explosion: 'classic' });
 });
 
 test('the store keeps profiles and race records across a restart', () => {

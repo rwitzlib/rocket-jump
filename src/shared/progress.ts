@@ -60,37 +60,48 @@ export const TRAILS = [
   { id: 'rainbow', name: 'Rainbow', fire: [0xffffff, 0xff0000], smoke: [0xf0f0f0, 0xb0b0b0], level: 25 },
 ] as const;
 
+/** Explosions: how your blasts look. Only the base one so far; more will unlock by level. */
+export const EXPLOSIONS = [{ id: 'classic', name: 'Classic', color: 0xff8a30, level: 1 }] as const;
+
 export type TintId = (typeof TINTS)[number]['id'];
 export type TrailId = (typeof TRAILS)[number]['id'];
+export type ExplosionId = (typeof EXPLOSIONS)[number]['id'];
 
-/** What a player wears, as it goes over the wire: "tint/trail". */
+/** What a player wears (their skins), as it goes over the wire: "tint/trail/explosion". */
 export interface Look {
   tint: TintId;
   trail: TrailId;
+  explosion: ExplosionId;
 }
 
-export const DEFAULT_LOOK: Look = { tint: 'auto', trail: 'classic' };
+export const DEFAULT_LOOK: Look = { tint: 'auto', trail: 'classic', explosion: 'classic' };
 
-export const encodeLook = (look: Look) => `${look.tint}/${look.trail}`;
+export const encodeLook = (look: Look) => `${look.tint}/${look.trail}/${look.explosion}`;
 
 export function decodeLook(text: string | undefined): Look {
-  const [tint, trail] = (text ?? '').split('/');
+  const [tint, trail, explosion] = (text ?? '').split('/');
   return {
     tint: TINTS.find((t) => t.id === tint)?.id ?? 'auto',
     trail: TRAILS.find((t) => t.id === trail)?.id ?? 'classic',
+    explosion: EXPLOSIONS.find((t) => t.id === explosion)?.id ?? 'classic',
   };
 }
 
-/** A look this level may wear; anything locked goes back to the default. */
-export function allowedLook(look: Look, level: number): Look {
+/** A look this level may wear; anything locked (or missing, from before it existed) goes back to the default. */
+export function allowedLook(look: Partial<Look>, level: number): Look {
   const tint = TINTS.find((t) => t.id === look.tint && t.level <= level)?.id ?? 'auto';
   const trail = TRAILS.find((t) => t.id === look.trail && t.level <= level)?.id ?? 'classic';
-  return { tint, trail };
+  const explosion = EXPLOSIONS.find((t) => t.id === look.explosion && t.level <= level)?.id ?? 'classic';
+  return { tint, trail, explosion };
 }
 
-/** Cosmetics that unlock on reaching exactly this level, for the level-up message. */
+/** Skins that unlock on reaching exactly this level, for the level-up message. */
 export function unlocksAt(level: number): string[] {
-  return [...TINTS.filter((t) => t.level === level).map((t) => `${t.name} armor`), ...TRAILS.filter((t) => t.level === level).map((t) => `${t.name} trail`)];
+  return [
+    ...TINTS.filter((t) => t.level === level).map((t) => `${t.name} armor`),
+    ...TRAILS.filter((t) => t.level === level).map((t) => `${t.name} trail`),
+    ...EXPLOSIONS.filter((t) => t.level === level && level > 1).map((t) => `${t.name} explosion`),
+  ];
 }
 
 // --- what the game server reports -------------------------------------------------------------
@@ -331,7 +342,7 @@ export function viewProfile(p: Profile, now: number): ProfileView {
     levelXp: p.xp - xpForLevel(level),
     levelSize: xpForLevel(level + 1) - xpForLevel(level),
     stats: p.stats,
-    look: p.look,
+    look: allowedLook(p.look, level),
     bestLaps: p.bestLaps,
     daily: list(p.daily.period, p.daily.progress, false),
     weekly: list(p.weekly.period, p.weekly.progress, true),

@@ -549,7 +549,7 @@ async function main() {
         if (g.levelUp) {
           hud.medal(`LEVEL ${g.level}`, g.unlocked.length ? `Unlocked: ${g.unlocked.join(', ')}` : 'Level up!', 'big', 0xffb347);
           audio.play('medal', { volume: 0.8 });
-          chat.add(null, `You reached level ${g.level}!${g.unlocked.length ? ` Unlocked ${g.unlocked.join(', ')}: wear it from Profile, Looks.` : ''}`);
+          chat.add(null, `You reached level ${g.level}!${g.unlocked.length ? ` Unlocked ${g.unlocked.join(', ')}: wear it from Profile, Skins.` : ''}`);
           showLevel(g.level);
         }
         break;
