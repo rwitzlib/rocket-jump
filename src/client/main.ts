@@ -20,6 +20,7 @@ import { ReconnectingTransport } from './net/reconnect';
 import { NetOverlay } from './net/netoverlay';
 import type { Transport } from './net/transport';
 import { WsTransport } from './net/wsclient';
+import { serverOverride } from './net/serverparam';
 import { PerfOverlay } from './perf';
 import { MapEditor } from './editor';
 import { decodeMapCode } from '../shared/custommap';
@@ -38,10 +39,11 @@ import { hasSavedSettings, LIMITS, loadSettings, saveSettings, type CrosshairSty
 // URL options, mostly for development:
 //   ?net=loopback&ping=100&jitter=10&loss=0.02&bots=2   practice behind a fake network, with the N overlay
 //   ?map=citadel&mode=ctf                               preselects the practice map and mode
-//   ?server=ws://host:8080/ws                           plays online against another server
+//   ?server=ws://host:8080/ws                           plays online against another server (dev builds only)
 //   ?room=ABCDE                                         joins that room straight away (an invite link)
 
 const params = new URLSearchParams(location.search);
+const SERVER = serverOverride(location.search, import.meta.env.DEV);
 const numParam = (name: string, fallback: number) => Number(params.get(name) ?? fallback) || 0;
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.querySelector<T>(`#${id}`)!;
 
@@ -61,15 +63,14 @@ interface Session {
 
 /** The game server's WebSocket address, for a room. */
 function roomUrl(room: string): string {
-  const base = new URLSearchParams(location.search).get('server') ?? WsTransport.defaultUrl();
+  const base = SERVER ?? WsTransport.defaultUrl();
   return room === MAIN_ROOM ? base : `${base}${base.includes('?') ? '&' : '?'}room=${encodeURIComponent(room)}`;
 }
 
 /** Where the game server's HTTP endpoints (/rooms) are: this page's origin, or the ?server one's. */
 function apiBase(): string {
-  const server = new URLSearchParams(location.search).get('server');
-  if (!server) return '';
-  const url = new URL(server);
+  if (!SERVER) return '';
+  const url = new URL(SERVER);
   return `${url.protocol === 'wss:' ? 'https:' : 'http:'}//${url.host}`;
 }
 
@@ -774,7 +775,7 @@ async function main() {
     if (!s) return;
     const link = new URL(location.href);
     link.search = '';
-    if (params.get('server')) link.searchParams.set('server', params.get('server')!);
+    if (SERVER) link.searchParams.set('server', SERVER);
     link.searchParams.set('room', s.room);
     const button = $('copy-invite');
     try {
@@ -811,9 +812,9 @@ async function main() {
   async function refreshServerStatus() {
     clearTimeout(statusTimer);
     if (screen !== 'menu') return;
-    if (params.get('server')) {
+    if (SERVER) {
       onlineButton.disabled = watchButton.disabled = false;
-      onlineStatus.textContent = params.get('server')!;
+      onlineStatus.textContent = SERVER;
       return;
     }
     try {

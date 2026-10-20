@@ -80,6 +80,8 @@ export class Rooms {
   onSuspect: (room: Room, id: string, name: string, detail: { hits: number; snaps: number }) => void = () => {};
   onDeath: (map: string, x: number, z: number, cause: string) => void = () => {};
   onMatchOver: (mode: GameMode, map: string, people: number) => void = () => {};
+  /** A room's tick threw: for the server's log. The room carries on. */
+  onError: (room: Room, err: unknown) => void = () => {};
   /** Something for a player's profile happened in a room. */
   onStat: (room: Room, id: string, profile: string, name: string, e: StatEvent) => void = () => {};
 
@@ -117,7 +119,7 @@ export class Rooms {
     if (this.rooms.size >= this.limits.maxRooms) return { error: 'The server has as many rooms as it can run. Join one of them, or try again later.' };
     let code: string;
     do {
-      code = Array.from({ length: CODE_LENGTH }, () => CODE_LETTERS[Math.floor(Math.random() * CODE_LETTERS.length)]).join('');
+      code = randomCode();
     } while (this.rooms.has(code));
     // A map from the editor joins the list of maps while its room is open.
     const custom = req.custom ? `${CUSTOM_PREFIX}${code.toLowerCase()}` : null;
@@ -132,6 +134,7 @@ export class Rooms {
       mode: req.mode,
       minPlayers: req.bots,
       botSkill: req.skill,
+      botRewards: false,
     });
     const room: Room = { code, name: req.name, server, public: !req.private, main: false, idle: 0 };
     this.hook(room);
@@ -155,7 +158,12 @@ export class Rooms {
   /** One tick of every room. Rooms that have sat empty long enough close (never the main one). */
   tick() {
     for (const [code, r] of this.rooms) {
-      r.server.tick();
+      // One room going wrong mustn't take the others (and the process) down with it.
+      try {
+        r.server.tick();
+      } catch (err) {
+        this.onError(r, err);
+      }
       r.idle = r.server.playerCount ? 0 : r.idle + DT;
       if (!r.main && r.idle > this.limits.idleTimeout) {
         r.server.sim.world.free();
@@ -164,4 +172,12 @@ export class Rooms {
       }
     }
   }
+}
+
+/** A room code from a secure random source, so private rooms' codes can't be predicted. */
+function randomCode(): string {
+  const bytes = new Uint8Array(CODE_LENGTH);
+  globalThis.crypto.getRandomValues(bytes);
+  // (256 isn't a multiple of the 31 letters, but the skew is under 1%: fine for a room code.)
+  return Array.from(bytes, (b) => CODE_LETTERS[b % CODE_LETTERS.length]).join('');
 }

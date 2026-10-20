@@ -128,9 +128,13 @@ export class Store {
     return gain;
   }
 
-  /** Puts on a look, as far as the profile's level and purchases allow. */
-  setLook(key: string, look: Look): Look {
-    const p = this.profile(key);
+  /**
+   * Puts on a look, as far as the profile's level and purchases allow. Only on a profile that exists
+   * (null otherwise): made-up keys mustn't be able to fill the store.
+   */
+  setLook(key: string, look: Look): Look | null {
+    const p = this.find(key);
+    if (!p) return null;
     p.look = allowedLook(look, levelOf(p.xp), p.owned);
     this.changed();
     return p.look;
