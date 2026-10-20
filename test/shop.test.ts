@@ -221,22 +221,44 @@ test('sign-in returns only to our own pages, and its codes work once', async () 
   assert.equal(url.searchParams.get('scope'), 'identify');
   const state = url.searchParams.get('state')!;
 
-  const forged = await auth.callback(new URLSearchParams({ state: 'made-up', code: 'good' }), () => ({ key: null, name: '' }));
+  const forged = await auth.callback(new URLSearchParams({ state: 'made-up', code: 'good' }));
   assert.equal(forged, null);
-  let signedInAs = '';
-  const back = await auth.callback(new URLSearchParams({ state, code: 'good' }), (from, user) => {
-    signedInAs = `${from}/${user.id}`;
-    return { key: 'k'.repeat(32), name: user.name };
-  });
-  assert.equal(signedInAs, 'profile1/d1');
+  const back = await auth.callback(new URLSearchParams({ state, code: 'good' }));
   assert.match(back!, /^http:\/\/localhost:5173\/#signin=[a-f0-9]{32}$/);
-  assert.equal(await auth.callback(new URLSearchParams({ state, code: 'good' }), () => ({ key: null, name: '' })), null, 'a state works once');
+  assert.equal(await auth.callback(new URLSearchParams({ state, code: 'good' })), null, 'a state works once');
   const code = back!.split('=')[1];
-  assert.deepEqual(auth.claim(code), { key: 'k'.repeat(32), name: 'Ace' });
-  assert.equal(auth.claim(code), null, 'and so does a claim');
+  let signedInAs = '';
+  const signIn = (from: string, user: { id: string }) => {
+    signedInAs = `${from}/${user.id}`;
+    return { key: 'k'.repeat(32) };
+  };
+  assert.equal(auth.claim(code, 'someone-else', signIn), null, 'only the profile that started it may claim it');
+  assert.equal(signedInAs, '', 'and nothing is linked until it does');
+  assert.deepEqual(auth.claim(code, 'profile1', signIn), { key: 'k'.repeat(32), name: 'Ace' });
+  assert.equal(signedInAs, 'profile1/d1');
+  assert.equal(auth.claim(code, 'profile1', signIn), null, 'and so does a claim');
 
   const denied = new URL(auth.start('profile1', 'http://localhost:5173/')).searchParams.get('state')!;
-  assert.equal(await auth.callback(new URLSearchParams({ state: denied, error: 'access_denied' }), () => ({ key: null, name: '' })), 'http://localhost:5173/#signin-error=denied');
+  assert.equal(await auth.callback(new URLSearchParams({ state: denied, error: 'access_denied' })), 'http://localhost:5173/#signin-error=denied');
+});
+
+test("a sign-in link someone else started can't tie your Discord account to their profile", async () => {
+  const store = new Store(null);
+  const auth = new DiscordAuth({ clientId: 'c', clientSecret: 's', redirectUri: 'http://localhost:8080/auth/discord/callback' }, async () => ({ id: 'victim', name: 'Vic' }));
+  const attacker = newKey();
+  store.profile(attacker, 'Mallory');
+  // The attacker starts a sign-in for their own profile and sends the Discord link to the victim,
+  // who approves it: their browser comes back with the code, and claims it with its own key.
+  const state = new URL(auth.start(store.idFor(attacker), 'http://localhost:5173/')).searchParams.get('state')!;
+  const back = await auth.callback(new URLSearchParams({ state, code: 'x' }));
+  const code = back!.split('=')[1];
+  const victim = newKey();
+  const link = (from: string, user: { id: string; name: string }) => store.signIn(from, user);
+  assert.equal(auth.claim(code, store.idFor(victim), link), null);
+  assert.equal(store.find(attacker)!.account, undefined, "the attacker's profile isn't tied to the victim's Discord");
+  // So when the victim signs in for real, they keep their own profile.
+  const own = store.signIn(store.idFor(victim), { id: 'victim', name: 'Vic' });
+  assert.equal(own.profile.id, store.idFor(victim));
 });
 
 test('accounts, aliases and purchases survive a restart', () => {

@@ -88,7 +88,7 @@ const here = () => `${location.origin}${location.pathname}`;
 export const fetchProfile = (base: string, key: string) => post<ProfileView>(base, '/profile', { key });
 export const wearLook = (base: string, key: string, look: Look) => post<ProfileView>(base, '/profile/look', { key, ...look });
 const startSignIn = (base: string, key: string) => post<{ url: string }>(base, '/auth/discord', { key, returnTo: here() });
-const claimSignIn = (base: string, code: string) => post<{ key: string | null; name: string }>(base, '/auth/claim', { code });
+const claimSignIn = (base: string, code: string, key: string) => post<{ key: string | null; name: string }>(base, '/auth/claim', { code, key });
 const signOut = (base: string, key: string) => post<{ ok: boolean }>(base, '/auth/signout', { key });
 const startCheckout = (base: string, key: string, sku: string) => post<{ url: string }>(base, '/shop/checkout', { key, sku, returnTo: here() });
 
@@ -165,9 +165,11 @@ export class ProfilePanel {
     history.replaceState(null, '', `${location.pathname}${query.size ? `?${query}` : ''}`);
     this.select('skins');
     if (failed) this.notice = { text: failed === 'denied' ? 'Sign-in cancelled.' : "Couldn't sign in with Discord. Try again in a moment.", error: true };
-    if (code) {
+    const key = profileKey();
+    if (code && key) {
       try {
-        const result = await claimSignIn(this.base(), code);
+        // (Only this browser's key, the one that started the sign-in, can claim it.)
+        const result = await claimSignIn(this.base(), code, key);
         if (result.key) setProfileKey(result.key);
         this.notice = { text: `Signed in as ${result.name}.${result.key ? ' Your profile from that account is loaded.' : ''}` };
       } catch (err) {

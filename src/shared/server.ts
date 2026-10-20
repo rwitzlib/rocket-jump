@@ -94,6 +94,11 @@ export interface ServerOptions {
    * back with their score and place. 0: gone at once.
    */
   reconnectGrace: number;
+  /**
+   * Whether beating bots earns XP. Off in rooms players open, where they pick the bots (easy ones,
+   * as many as they like): there it's people who count, so XP can't be farmed alone.
+   */
+  botRewards: boolean;
 }
 
 const BOT_NAMES = ['Rocko', 'Splash', 'Boomer', 'Hookshot', 'Gibs', 'Strafe', 'Kaboom', 'Ricochet', 'Nitro', 'Zipline', 'Frag', 'Dropkick', 'Skyhook', 'Blastoff'];
@@ -150,6 +155,7 @@ export class GameServer {
       maxSpectators: 8,
       botSkill: 'auto',
       reconnectGrace: 0,
+      botRewards: true,
       ...options,
     };
     this.rotation = parseRotation(this.options.maps, this.options.mode);
@@ -802,7 +808,8 @@ export class GameServer {
   private track(e: SimEvent) {
     if (this.match.phase !== 'playing') return;
     if (e.type === 'flag' && e.action === 'captured' && e.playerId) this.stat(e.playerId, { type: 'capture' });
-    if (e.type === 'lap') {
+    // (Not on maps from the editor: anyone can make a lap there as short as they like.)
+    if (e.type === 'lap' && !this.mapName.startsWith(CUSTOM_PREFIX)) {
       const conn = this.connections.get(e.playerId);
       // The lap's path, if we saw all of it: the ghost a record lap leaves for everyone to chase.
       const path = conn && conn.lapPath.length >= (e.time / DT / LAP_SAMPLE) * 3 * 0.9 ? conn.lapPath : [];
@@ -824,6 +831,7 @@ export class GameServer {
     killer.streak++;
     killer.bestStreak = Math.max(killer.bestStreak, killer.streak);
     if (e.midair) killer.airshots++;
+    if (!this.options.botRewards && this.bots.has(e.playerId)) return;
     this.stat(e.killerId!, { type: 'kill', airshot: e.midair, cause: e.cause, streak: killer.streak });
   }
 
@@ -845,6 +853,7 @@ export class GameServer {
     const scores = this.scores().sort(compareScores(this.mode));
     const people = scores.filter((s) => !s.bot).length;
     this.onMatchOver(this.mode, this.mapName, people);
+    if (!this.options.botRewards && people < 2) return; // a match against nobody but bots you picked
     scores.forEach((s, i) => {
       const conn = this.connections.get(s.id);
       if (!conn?.profile || conn.spectator || this.mode === 'race') return;
