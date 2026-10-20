@@ -7,11 +7,13 @@ import { randomBytes } from 'node:crypto';
 //   POST /auth/discord { key, returnTo }  -> { url }: where to send the browser to sign in
 //   GET  /auth/discord/callback            Discord sends the browser back here; we send it on to
 //                                          returnTo#signin=CODE (or #signin-error=REASON)
-//   POST /auth/claim { code }              -> { key, name }: the key that browser should keep now
+//   POST /auth/claim { code, key }         -> { key, name }: the key that browser should keep now
 //                                          (null: keep the one it has)
 //
 // The browser's key never goes in a URL: the sign-in is tracked by a random `state`, and the
-// result comes back as a one-time code the page swaps for the key over a POST.
+// result comes back as a one-time code the page swaps for the key over a POST. Nothing is linked
+// until that claim, and only the browser that started the sign-in (the same key) can make it: a
+// Discord link someone else started, sent to you, can't tie your Discord account to their profile.
 
 const STATE_LIFE = 10 * 60000; // ms to finish signing in
 const CLAIM_LIFE = 2 * 60000;
@@ -45,7 +47,7 @@ export function safeReturn(returnTo: unknown, allowed: readonly string[]): strin
 
 export class DiscordAuth {
   private readonly pending = new Map<string, { profile: string; returnTo: string; expires: number }>();
-  private readonly claims = new Map<string, { key: string | null; name: string; expires: number }>();
+  private readonly claims = new Map<string, { profile: string; user: DiscordUser; expires: number }>();
 
   constructor(
     private readonly config: DiscordConfig,
@@ -69,10 +71,10 @@ export class DiscordAuth {
   }
 
   /**
-   * Discord sent the browser back. Finishes the sign-in with `signIn` (the store's) and says where
-   * to send the browser: back to the game, with a code to claim (or the reason it didn't work).
+   * Discord sent the browser back. Finds out who they are and says where to send the browser: back
+   * to the game, with a code to claim (or the reason it didn't work).
    */
-  async callback(query: URLSearchParams, signIn: (profile: string, user: DiscordUser) => { key: string | null; name: string }): Promise<string | null> {
+  async callback(query: URLSearchParams): Promise<string | null> {
     const state = query.get('state') ?? '';
     const pending = this.pending.get(state);
     this.pending.delete(state);
@@ -86,19 +88,21 @@ export class DiscordAuth {
       console.error('Discord sign-in failed', err);
       return `${pending.returnTo}#signin-error=failed`;
     }
-    const result = signIn(pending.profile, user);
     const claim = token();
-    this.claims.set(claim, { ...result, expires: Date.now() + CLAIM_LIFE });
+    this.claims.set(claim, { profile: pending.profile, user, expires: Date.now() + CLAIM_LIFE });
     return `${pending.returnTo}#signin=${claim}`;
   }
 
-  /** The page swaps its one-time code for the result. */
-  claim(code: unknown): { key: string | null; name: string } | null {
+  /**
+   * The page swaps its one-time code for the result, saying which profile it is (`from`, the id of
+   * its key). Only the profile that started the sign-in may: then `signIn` (the store's) links it.
+   */
+  claim(code: unknown, from: string, signIn: (profile: string, user: DiscordUser) => { key: string | null }): { key: string | null; name: string } | null {
     if (typeof code !== 'string') return null;
     const claim = this.claims.get(code);
+    if (!claim || claim.expires < Date.now() || claim.profile !== from) return null;
     this.claims.delete(code);
-    if (!claim || claim.expires < Date.now()) return null;
-    return { key: claim.key, name: claim.name };
+    return { key: signIn(claim.profile, claim.user).key, name: claim.user.name };
   }
 
   private expire() {

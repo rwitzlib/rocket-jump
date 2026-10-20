@@ -10,6 +10,7 @@ import { VOTE_KICK } from '../shared/moderation';
 import Stripe from 'stripe';
 import { decodeLook, encodeLook, levelOf, newProfile, viewProfile, wornLook, type Profile } from '../shared/progress';
 import { DiscordAuth, safeReturn } from './auth';
+import { basicPassword, clientAddr, ConnectionCap, RateLimiter, sameSecret, securityHeaders } from './guard';
 import { Shop } from './shop';
 import { Store } from './store';
 import { Analytics, CLIENT_EVENTS, statsPage, type ClientEvent } from './analytics';
@@ -42,7 +43,13 @@ import { decodeClientMessage, WireEncoder } from '../shared/wire';
 //   RECONNECT_GRACE=30    seconds a player whose connection drops is held for them to come back
 //   DATA_DIR=/data        where profiles (XP, stats, challenges), race records and the server's
 //                         numbers are saved; unset, they're kept in memory only and lost on restart
-//   STATS_KEY=secret      turns on /stats?key=secret: players, sessions, early leavers, modes, maps
+//   STATS_KEY=secret      turns on /stats (HTTP Basic auth, any user name, this as the password):
+//                         players, sessions, early leavers, modes, maps
+//   TRUST_PROXY=0         how many proxies of ours sit in front (a TLS proxy, a load balancer): only
+//                         then is X-Forwarded-For believed, for rate limits and vote-kick bans
+//   TRUST_CLOUDFLARE=0    1: Cloudflare may be in front of those (its orange-cloud proxy). Its
+//                         CF-Connecting-IP is believed only on requests that came from its addresses
+//   MAX_CONNECTIONS_PER_ADDRESS=8   WebSockets one address may hold open at once
 //   REGION=EU West        where this server is, shown in server lists
 //   SERVERS=Name|https://host,...   other Rocket Jump servers to list in the menu (with their ping)
 //   STATIC_DIR=dist       where the built client is
@@ -72,6 +79,10 @@ const PORT = env('PORT', 8080);
 const HOST = process.env.HOST ?? '0.0.0.0';
 const STATIC_DIR = resolve(process.env.STATIC_DIR ?? 'dist');
 const MAX_MESSAGE = 16 * 1024; // bytes: an input packet is well under 1 KB
+const JOIN_DEADLINE = 10000; // ms a new connection has to say who it is
+const TRUST_PROXY = Math.max(0, Math.floor(env('TRUST_PROXY', 0)));
+const TRUST_CLOUDFLARE = process.env.TRUST_CLOUDFLARE === '1' || process.env.TRUST_CLOUDFLARE === 'true';
+const addrOf = (req: import('node:http').IncomingMessage) => clientAddr(req, TRUST_PROXY, TRUST_CLOUDFLARE);
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -118,6 +129,10 @@ const SERVERS = (process.env.SERVERS ?? '')
   .map((entry) => entry.split('|').map((s) => s.trim()))
   .filter(([name, url]) => name && /^https?:\/\/[^\s]+$/.test(url ?? ''))
   .map(([name, url]) => ({ name, url: url.replace(/\/$/, '') }));
+const HTTPS = PUBLIC_URL.startsWith('https:');
+/** Headers for every response; the page's (with its Content Security Policy) for HTML. */
+const API_HEADERS = securityHeaders({ https: HTTPS, page: false, connect: [] });
+const PAGE_HEADERS = securityHeaders({ https: HTTPS, page: true, connect: SERVERS.map((s) => new URL(s.url).origin) });
 
 /** Sends one message to one connection, outside the game server's own sending (progress news). */
 function sendTo(id: string, msg: ServerMessage) {
@@ -170,6 +185,11 @@ rooms.onSuspect = (room, id, name, detail) => {
   log('suspect', { id, room: room.code, name, ...detail, addr: socket?.addr, map: room.server.mapName });
   analytics.suspect();
 };
+let roomErrors = 0;
+rooms.onError = (room, err) => {
+  // (Logged the first time and then now and again, not 60 times a second.)
+  if (roomErrors++ % 600 === 0) log('room-error', { room: room.code, error: (err as Error)?.stack ?? String(err), count: roomErrors });
+};
 rooms.onDeath = (map, x, z) => analytics.death(map, x, z);
 rooms.onMatchOver = (mode, map, people) => {
   if (people > 0) analytics.match();
@@ -185,23 +205,27 @@ rooms.onKick = (room, id) => {
   socket.ws.close(4403, 'You were voted out of that game.');
 };
 
-/** Opening rooms is limited per address: a few a minute. */
-const ROOM_CREATE_LIMIT = 3;
-const roomsOpened = new Map<string, number[]>();
+// Per address, a minute at a time: opening rooms, menu events (so the numbers can't be flooded),
+// sign-ins and checkouts, and changing looks.
+const roomsOpened = new RateLimiter(3, 60000);
+const menuEvents = new RateLimiter(30, 60000);
+const accountTries = new RateLimiter(10, 60000);
+const profileWrites = new RateLimiter(30, 60000);
+/** WebSockets open per address. */
+const connections = new ConnectionCap(Math.max(1, env('MAX_CONNECTIONS_PER_ADDRESS', 8)));
 
 const json = (res: import('node:http').ServerResponse, status: number, body: unknown) =>
-  res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', 'access-control-allow-origin': '*' }).end(JSON.stringify(body));
+  res.writeHead(status, { ...API_HEADERS, 'content-type': 'application/json', 'cache-control': 'no-store', 'access-control-allow-origin': '*' }).end(JSON.stringify(body));
 
-/** Menu events: a few a minute from one address, so the numbers can't be flooded. */
-const eventTimes = new Map<string, number[]>();
-function eventAllowed(addr: string): boolean {
-  const now = Date.now();
-  const recent = (eventTimes.get(addr) ?? []).filter((t) => now - t < 60000);
-  if (recent.length >= 30) return false;
-  recent.push(now);
-  eventTimes.set(addr, recent);
-  if (eventTimes.size > 5000) eventTimes.clear();
-  return true;
+/** Runs a request's handler; anything it throws is a 500 for that request, not the end of the server. */
+function guarded(res: import('node:http').ServerResponse, handle: () => void) {
+  try {
+    handle();
+  } catch (err) {
+    log('http-error', { error: (err as Error)?.stack ?? String(err) });
+    if (!res.headersSent) json(res, 500, { error: 'Something went wrong.' });
+    else res.end();
+  }
 }
 
 /** Reads a small JSON body (or null if it isn't one). */
@@ -213,12 +237,13 @@ function readJson(req: import('node:http').IncomingMessage, done: (body: Record<
     if (body.length > 2048) req.destroy();
   });
   req.on('end', () => {
+    let parsed: unknown = null;
     try {
-      const parsed = JSON.parse(body) as unknown;
-      done(parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : null);
+      parsed = JSON.parse(body) as unknown;
     } catch {
-      done(null);
+      // not JSON
     }
+    done(parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : null);
   });
 }
 
@@ -227,32 +252,24 @@ const validKey = (key: unknown): key is string => typeof key === 'string' && /^[
 /**
  * POST /profile { key }: your profile (level, stats, challenges, look, account, skins bought). A key
  * that's never played online gets a blank one, not saved. POST /profile/look { key, tint, trail }
- * puts on a look.
+ * puts on a look: only on a profile that exists (made by playing online), so made-up keys can't
+ * fill the server with profiles.
  */
 function profileRequest(req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse, look: boolean) {
-  readJson(req, (body) => {
-    if (!body || !validKey(body.key)) return json(res, 400, { error: 'No profile key.' });
-    const key = body.key;
-    if (look) {
-      store.setLook(key, decodeLook(`${String(body.tint)}/${String(body.trail)}/${String(body.explosion)}`));
-      // Anyone playing with this profile right now changes too.
-      relook(store.find(key)!);
-    }
-    const p = store.find(key) ?? newProfile(Store.idOf(key), '', Date.now());
-    json(res, 200, { ...viewProfile(p, Date.now()), signIn: !!discord, shop: !!shop });
-  });
-}
-
-/** Sign-ins and checkouts: a few a minute from one address. */
-const accountTimes = new Map<string, number[]>();
-function accountAllowed(addr: string): boolean {
-  const now = Date.now();
-  const recent = (accountTimes.get(addr) ?? []).filter((t) => now - t < 60000);
-  if (recent.length >= 10) return false;
-  recent.push(now);
-  accountTimes.set(addr, recent);
-  if (accountTimes.size > 5000) accountTimes.clear();
-  return true;
+  const addr = addrOf(req);
+  readJson(req, (body) =>
+    guarded(res, () => {
+      if (!body || !validKey(body.key)) return json(res, 400, { error: 'No profile key.' });
+      const key = body.key;
+      if (look) {
+        if (!profileWrites.allow(addr)) return json(res, 429, { error: 'Too many changes just now. Wait a minute.' });
+        // (Anyone playing with this profile right now changes too.)
+        if (store.setLook(key, decodeLook(`${String(body.tint)}/${String(body.trail)}/${String(body.explosion)}`))) relook(store.find(key)!);
+      }
+      const p = store.find(key) ?? newProfile(Store.idOf(key), '', Date.now());
+      json(res, 200, { ...viewProfile(p, Date.now()), signIn: !!discord, shop: !!shop });
+    }),
+  );
 }
 
 /** The sign-in and shop requests (see auth.ts and shop.ts). Says whether it was one. */
@@ -260,24 +277,24 @@ function accountRequest(req: import('node:http').IncomingMessage, res: import('n
   const path = url.pathname;
   const posts = ['/auth/discord', '/auth/claim', '/auth/signout', '/shop/checkout'];
   if (posts.includes(path) && req.method === 'OPTIONS') {
-    res.writeHead(204, { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'POST', 'access-control-allow-headers': 'content-type' }).end();
+    res.writeHead(204, { ...API_HEADERS, 'access-control-allow-origin': '*', 'access-control-allow-methods': 'POST', 'access-control-allow-headers': 'content-type' }).end();
     return true;
   }
-  const addr = String(req.headers['x-forwarded-for'] ?? req.socket.remoteAddress ?? '').split(',')[0].trim();
+  const addr = addrOf(req);
   if (path === '/auth/discord/callback' && req.method === 'GET') {
     if (!discord) {
       json(res, 404, { error: 'Not found' });
       return true;
     }
     void discord
-      .callback(url.searchParams, (from, user) => {
-        const { key, profile } = store.signIn(from, user);
-        log('signin', { profile: profile.id, discord: user.id, newKey: !!key });
-        return { key, name: user.name };
-      })
+      .callback(url.searchParams)
       .then((to) => {
-        if (to) res.writeHead(302, { location: to, 'cache-control': 'no-store' }).end();
-        else res.writeHead(400, { 'content-type': 'text/plain' }).end('That sign-in link has expired. Go back to the game and try again.');
+        if (to) res.writeHead(302, { ...API_HEADERS, location: to, 'cache-control': 'no-store' }).end();
+        else res.writeHead(400, { ...API_HEADERS, 'content-type': 'text/plain' }).end('That sign-in link has expired. Go back to the game and try again.');
+      })
+      .catch((err: unknown) => {
+        log('signin-failed', { error: (err as Error)?.message ?? String(err) });
+        if (!res.headersSent) res.writeHead(500, { ...API_HEADERS, 'content-type': 'text/plain' }).end('Signing in went wrong. Go back to the game and try again.');
       });
     return true;
   }
@@ -293,17 +310,19 @@ function accountRequest(req: import('node:http').IncomingMessage, res: import('n
       if (size > 1024 * 1024) req.destroy();
       else chunks.push(chunk);
     });
-    req.on('end', () => {
-      let did: string;
-      try {
-        did = shop.webhook(Buffer.concat(chunks), String(req.headers['stripe-signature'] ?? ''));
-      } catch (err) {
-        log('webhook-rejected', { error: (err as Error).message });
-        return json(res, 400, { error: 'Bad signature' });
-      }
-      log('webhook', { did });
-      json(res, 200, { received: true });
-    });
+    req.on('end', () =>
+      guarded(res, () => {
+        let did: string;
+        try {
+          did = shop.webhook(Buffer.concat(chunks), String(req.headers['stripe-signature'] ?? ''));
+        } catch (err) {
+          log('webhook-rejected', { error: (err as Error).message });
+          return json(res, 400, { error: 'Bad signature' });
+        }
+        log('webhook', { did });
+        json(res, 200, { received: true });
+      }),
+    );
     return true;
   }
   if (!posts.includes(path)) return false;
@@ -311,18 +330,23 @@ function accountRequest(req: import('node:http').IncomingMessage, res: import('n
     json(res, 405, { error: 'POST only' });
     return true;
   }
-  readJson(req, (body) => {
-    if (path === '/auth/claim') {
-      const claim = discord?.claim(body?.code);
-      return claim ? json(res, 200, claim) : json(res, 400, { error: 'That sign-in has expired. Try again.' });
-    }
+  readJson(req, (body) => guarded(res, () => {
     if (!body || !validKey(body.key)) return json(res, 400, { error: 'No profile key.' });
     const key = body.key;
     if (path === '/auth/signout') {
       store.signOut(key);
       return json(res, 200, { ok: true });
     }
-    if (!accountAllowed(addr)) return json(res, 429, { error: 'Too many tries just now. Wait a minute.' });
+    if (!accountTries.allow(addr)) return json(res, 429, { error: 'Too many tries just now. Wait a minute.' });
+    if (path === '/auth/claim') {
+      // Only the browser that started the sign-in (the same key) gets to finish it.
+      const claim = discord?.claim(body.code, store.idFor(key), (from, user) => {
+        const { key: given, profile } = store.signIn(from, user);
+        log('signin', { profile: profile.id, discord: user.id, newKey: !!given });
+        return { key: given };
+      });
+      return claim ? json(res, 200, claim) : json(res, 400, { error: 'That sign-in has expired. Try again.' });
+    }
     const returnTo = safeReturn(body.returnTo, PUBLIC_ORIGINS);
     if (!returnTo) return json(res, 400, { error: "Can't send you back to that page." });
     if (path === '/auth/discord') {
@@ -345,37 +369,36 @@ function accountRequest(req: import('node:http').IncomingMessage, res: import('n
         log('checkout-failed', { profile: p.id, sku: body.sku, error: (err as Error).message });
         json(res, 502, { error: "Couldn't reach the payment service. Try again in a moment." });
       });
-  });
+  }));
   return true;
 }
 
 /** POST /rooms: checks the request and the address's recent rooms, then opens one. */
 function openRoom(req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) {
-  const addr = String(req.headers['x-forwarded-for'] ?? req.socket.remoteAddress ?? '');
+  const addr = addrOf(req);
   let body = '';
   req.setEncoding('utf8');
   req.on('data', (chunk: string) => {
     body += chunk;
     if (body.length > 300 * 1024) req.destroy(); // (a custom map can be big)
   });
-  req.on('end', () => {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(body);
-    } catch {
-      parsed = null;
-    }
-    const request = parseRoomRequest(parsed);
-    if (!request) return json(res, 400, { error: 'That room request makes no sense.' });
-    const now = Date.now();
-    const recent = (roomsOpened.get(addr) ?? []).filter((t) => now - t < 60000);
-    if (recent.length >= ROOM_CREATE_LIMIT) return json(res, 429, { error: "You've opened a few rooms just now. Try again in a minute." });
-    const room = rooms.create(request);
-    if ('error' in room) return json(res, 503, room);
-    roomsOpened.set(addr, [...recent, now]);
-    log('room', { code: room.code, name: room.name, mode: request.mode, map: request.map, private: request.private, addr });
-    json(res, 201, { code: room.code });
-  });
+  req.on('end', () =>
+    guarded(res, () => {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(body);
+      } catch {
+        parsed = null;
+      }
+      const request = parseRoomRequest(parsed);
+      if (!request) return json(res, 400, { error: 'That room request makes no sense.' });
+      if (!roomsOpened.allow(addr)) return json(res, 429, { error: "You've opened a few rooms just now. Try again in a minute." });
+      const room = rooms.create(request);
+      if ('error' in room) return json(res, 503, room);
+      log('room', { code: room.code, name: room.name, mode: request.mode, map: request.map, private: request.private, addr });
+      json(res, 201, { code: room.code });
+    }),
+  );
 }
 
 // The built client is small enough to keep in memory, compressed once: the game bundle (with
@@ -393,11 +416,13 @@ function staticFile(file: string) {
   return entry;
 }
 
-const http = createServer((req, res) => {
+const http = createServer((req, res) => guarded(res, () => serve(req, res)));
+
+function serve(req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) {
   const url = new URL(req.url ?? '/', 'http://localhost');
   if (url.pathname === '/health') {
     // (Other servers' menus time this for a ping, so anyone may ask.)
-    res.writeHead(200, { 'content-type': 'text/plain', 'access-control-allow-origin': '*', 'cache-control': 'no-store' }).end('ok');
+    res.writeHead(200, { ...API_HEADERS, 'content-type': 'text/plain', 'access-control-allow-origin': '*', 'cache-control': 'no-store' }).end('ok');
     return;
   }
   if (url.pathname === '/status') {
@@ -411,30 +436,39 @@ const http = createServer((req, res) => {
   }
   // POST /event { name }: the page saying what someone did in the menus (see analytics.ts).
   if (url.pathname === '/event' && req.method === 'POST') {
-    const addr = String(req.headers['x-forwarded-for'] ?? req.socket.remoteAddress ?? '').split(',')[0].trim();
-    readJson(req, (body) => {
-      const name = body?.name;
-      if (typeof name === 'string' && (CLIENT_EVENTS as readonly string[]).includes(name) && eventAllowed(addr)) analytics.event(name as ClientEvent);
-      res.writeHead(204, { 'access-control-allow-origin': '*' }).end();
-    });
+    const addr = addrOf(req);
+    readJson(req, (body) =>
+      guarded(res, () => {
+        const name = body?.name;
+        if (typeof name === 'string' && (CLIENT_EVENTS as readonly string[]).includes(name) && menuEvents.allow(addr)) analytics.event(name as ClientEvent);
+        res.writeHead(204, { ...API_HEADERS, 'access-control-allow-origin': '*' }).end();
+      }),
+    );
     return;
   }
   if (url.pathname === '/event' && req.method === 'OPTIONS') {
-    res.writeHead(204, { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'POST', 'access-control-allow-headers': 'content-type' }).end();
+    res.writeHead(204, { ...API_HEADERS, 'access-control-allow-origin': '*', 'access-control-allow-methods': 'POST', 'access-control-allow-headers': 'content-type' }).end();
     return;
   }
-  // GET /stats?key=STATS_KEY: the numbers (add &format=json for JSON). Off unless STATS_KEY is set.
+  // GET /stats: the numbers (add ?format=json for JSON), behind HTTP Basic auth with STATS_KEY as the
+  // password: a header, so the key isn't left in proxy logs and browser history. Off unless set.
   if (url.pathname === '/stats') {
-    if (!STATS_KEY || url.searchParams.get('key') !== STATS_KEY) return json(res, 404, { error: 'Not found' });
+    if (!STATS_KEY) return json(res, 404, { error: 'Not found' });
+    const given = basicPassword(req.headers.authorization);
+    if (given === null || !sameSecret(given, STATS_KEY)) {
+      if (given !== null) log('stats-denied', { addr: addrOf(req) });
+      res.writeHead(401, { ...API_HEADERS, 'www-authenticate': 'Basic realm="Rocket Jump stats", charset="UTF-8"', 'content-type': 'text/plain', 'cache-control': 'no-store' }).end('Sign in with the stats key as the password.');
+      return;
+    }
     const report = analytics.report();
     if (url.searchParams.get('format') === 'json') return json(res, 200, { ...report, heat: Object.fromEntries(Object.keys(MAPS).map((m) => [m, analytics.heat(m)])) });
-    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }).end(statsPage(report, { profiles: store.profileCount, rooms: rooms.count, connected: sockets.size }));
+    res.writeHead(200, { ...PAGE_HEADERS, 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }).end(statsPage(report, { profiles: store.profileCount, rooms: rooms.count, connected: sockets.size }));
     return;
   }
   if (accountRequest(req, res, url)) return;
   if (url.pathname === '/profile' || url.pathname === '/profile/look') {
     if (req.method === 'OPTIONS') {
-      res.writeHead(204, { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'POST', 'access-control-allow-headers': 'content-type' }).end();
+      res.writeHead(204, { ...API_HEADERS, 'access-control-allow-origin': '*', 'access-control-allow-methods': 'POST', 'access-control-allow-headers': 'content-type' }).end();
       return;
     }
     if (req.method !== 'POST') return json(res, 405, { error: 'POST only' });
@@ -458,7 +492,7 @@ const http = createServer((req, res) => {
   if (url.pathname === '/rooms') {
     // (A page from elsewhere, like the dev server with ?server=, asks before it posts.)
     if (req.method === 'OPTIONS') {
-      res.writeHead(204, { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET, POST', 'access-control-allow-headers': 'content-type' }).end();
+      res.writeHead(204, { ...API_HEADERS, 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET, POST', 'access-control-allow-headers': 'content-type' }).end();
       return;
     }
     if (req.method === 'POST') openRoom(req, res);
@@ -466,7 +500,7 @@ const http = createServer((req, res) => {
     return;
   }
   if (req.method !== 'GET' && req.method !== 'HEAD') {
-    res.writeHead(405).end();
+    res.writeHead(405, API_HEADERS).end();
     return;
   }
   // Static files from dist/, never outside it. Unknown paths get the game page.
@@ -493,15 +527,15 @@ const http = createServer((req, res) => {
   const gzip = body.gzip && /\bgzip\b/.test(String(req.headers['accept-encoding'] ?? ''));
   const data = gzip ? body.gzip! : body.raw;
   res.writeHead(200, {
+    ...(extname(file) === '.html' ? PAGE_HEADERS : API_HEADERS),
     'content-type': MIME[extname(file)] ?? 'application/octet-stream',
     'cache-control': hashed ? 'public, max-age=31536000, immutable' : 'no-cache',
     'content-length': data.length,
-    'x-content-type-options': 'nosniff',
     vary: 'accept-encoding',
     ...(gzip ? { 'content-encoding': 'gzip' } : {}),
   });
   res.end(req.method === 'HEAD' ? undefined : data);
-});
+}
 
 const wss = new WebSocketServer({
   server: http,
@@ -514,6 +548,13 @@ const wss = new WebSocketServer({
 let nextId = 1;
 
 wss.on('connection', (ws, req) => {
+  const addr = addrOf(req);
+  // A handful of connections per address (a few tabs), so one machine can't hold them all open.
+  if (!connections.add(addr)) {
+    ws.close(4429, 'Too many connections from your address.');
+    return;
+  }
+  ws.once('close', () => connections.remove(addr));
   const code = new URL(req.url ?? '/', 'http://localhost').searchParams.get('room') ?? MAIN_ROOM;
   const room = rooms.get(code);
   if (!room) {
@@ -524,16 +565,28 @@ wss.on('connection', (ws, req) => {
   // The id can change once: a reconnecting player takes back the one they had.
   let id = `p${nextId++}`;
   const wire = new WireEncoder();
-  const addr = String(req.headers['x-forwarded-for'] ?? req.socket.remoteAddress ?? '').split(',')[0].trim();
   const socket = { ws, wire, room, addr, profile: null as string | null };
   let joinedAt = 0;
   let joinedTo = { mode: '', map: '' };
   sockets.set(id, socket);
   ws.binaryType = 'nodebuffer';
   let joined = false;
+  // A connection that never says who it is goes (answering pings alone would keep it open for ever).
+  const deadline = setTimeout(() => {
+    if (!joined) ws.terminate();
+  }, JOIN_DEADLINE);
+  ws.once('close', () => clearTimeout(deadline));
 
   ws.on('message', (data, isBinary) => {
-    const raw = data as Buffer;
+    try {
+      receive(data as Buffer, isBinary);
+    } catch (err) {
+      // A message that trips the server up costs that connection, not everyone's game.
+      log('message-error', { id, room: room.code, error: (err as Error)?.stack ?? String(err) });
+      ws.terminate();
+    }
+  });
+  const receive = (raw: Buffer, isBinary: boolean) => {
     const msg = parseClientMessage(decodeClientMessage(isBinary ? new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength) : raw.toString()));
     if (!msg) return;
     // Snapshots are delta-coded against the newest one the client says it has.
@@ -561,13 +614,14 @@ wss.on('connection', (ws, req) => {
       } else log('join', { id, room: room.code, name: msg.name, addr });
     }
     game.receive(id, msg);
-    // Online with a profile: wear its look, show its level.
+    // Online with a profile: wear its look, show its level. (A key the server hasn't seen becomes a
+    // saved profile only once it earns something, so made-up keys don't pile up.)
     if (msg.type === 'join' && msg.profile && !socket.profile) {
       socket.profile = msg.profile;
-      const p = store.profile(msg.profile, msg.name);
+      const p = store.find(msg.profile) ? store.profile(msg.profile, msg.name) : newProfile(Store.idOf(msg.profile), msg.name, Date.now());
       game.setLook(id, encodeLook(wornLook(p)), levelOf(p.xp));
     }
-  });
+  };
   ws.on('close', () => {
     // Replaced by a reconnection (or kicked): that player isn't this socket's any more.
     if (sockets.get(id) !== socket) return;

@@ -148,7 +148,10 @@ Settings are environment variables:
 | `BOT_SKILL` | auto | easy, normal or hard. Auto starts easy and steps up while people are winning, down while they're losing |
 | `RECONNECT_GRACE` | 30 | seconds a player whose connection drops is held for them to come back |
 | `DATA_DIR` | (none) | where profiles, race records and the server's numbers are saved. Unset, they're lost on restart |
-| `STATS_KEY` | (none) | turns on `/stats?key=...`: players, sessions, early leavers, modes, maps, menu use, where people die |
+| `STATS_KEY` | (none) | turns on `/stats`, behind HTTP Basic auth with this as the password (any user name; `curl -u :KEY`): players, sessions, early leavers, modes, maps, menu use, where people die |
+| `TRUST_PROXY` | 0 | how many proxies of yours sit in front of the server. Only then is `X-Forwarded-For` used for rate limits and vote-kick bans (set it to 1 behind one TLS proxy); otherwise clients could write any address there |
+| `TRUST_CLOUDFLARE` | 0 | set to 1 when Cloudflare proxies your domain (the orange cloud) in front of those proxies. Its `CF-Connecting-IP` is believed only for requests that arrive from Cloudflare's addresses, so going straight to the host's own address (skipping Cloudflare) can't fake one. The ranges are in `src/server/guard.ts`, from https://www.cloudflare.com/ips/ |
+| `MAX_CONNECTIONS_PER_ADDRESS` | 8 | WebSockets one address may hold open at once (a connection that hasn't joined within 10 s is closed) |
 | `REGION` | (none) | where this server is, shown in server lists |
 | `SERVERS` | (none) | other Rocket Jump servers for the menu's list, with their ping: `Name|https://host,Name 2|https://host2` |
 | `STATIC_DIR` | dist | where the built client is |
@@ -178,7 +181,13 @@ docker run -p 8080:8080 rocket-jump
 ```
 
 Put it behind a TLS-terminating proxy (Caddy, nginx, or a platform load balancer) that forwards WebSocket upgrades.
-Served over HTTPS, the page uses `wss://` automatically. One process runs all its rooms. A match takes about 1 ms
+Served over HTTPS, the page uses `wss://` automatically. Set `TRUST_PROXY=1` (one proxy) so rate limits see real
+addresses, and `PUBLIC_URL=https://...` so responses carry HSTS. The page is served with a Content Security Policy
+that allows connections only to this server and the ones in `SERVERS`.
+
+On Railway with a domain proxied by Cloudflare (orange cloud), set `TRUST_PROXY=1` (Railway's edge) and
+`TRUST_CLOUDFLARE=1`, and set Cloudflare's SSL/TLS encryption mode to **Full (strict)**: with Flexible, the leg from
+Cloudflare to Railway is plain HTTP, profile keys included. One process runs all its rooms. A match takes about 1 ms
 of CPU per 60 Hz tick with 11 players on Citadel, so a small VM is plenty. Each player costs roughly 3-9 kB/s down
 (30 delta-compressed binary snapshots a second: see Netcode below) and about 4 kB/s up. The server is
 authoritative: clients send only inputs, which are validated and clamped, and names and chat are sanitized and rate
@@ -211,7 +220,8 @@ matches end on time and the race to the limit is lost. Run the wire check after 
 
 Practice needs only `npm run dev`. `?map=citadel&mode=ctf` preselects the practice map and mode. Citadel is the big
 map: 240 m square with a ring deck around a central spire, bridges out to four corner towers and beams up top to swing
-from. `?server=ws://host:port/ws` points Play online at a different server.
+from. `?server=ws://host:port/ws` points Play online at a different server (development builds only: a published
+page ignores it, since it would send the browser's profile key to whatever server the link named).
 
 Each map says where its flag bases, race rings and items go (`flags`, `race` and `items` in its `MapDef`). A map
 without them still works: flags go on the two spawns farthest apart and the race visits every mystery box.
