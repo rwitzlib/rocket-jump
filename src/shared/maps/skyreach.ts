@@ -18,6 +18,7 @@ const C_HALF = 22; // central island half-width
 const O_TOP = 4; // outer island ground
 const O_Z = 60; // outer island center
 const PERCH_TOP = 14;
+const LIFT = 0.06; // bridges' tops above the ground they rest on
 
 const quarter: BoxDef[] = [
   // Outer island, a bit higher than the middle.
@@ -33,14 +34,17 @@ const quarter: BoxDef[] = [
   block(-6, O_TOP + 6, 54, [8, 1.4, 2], 'carved', STONE_DARK),
   // Low cover walls.
   block(-8, O_TOP, 66, [6, 1.6, 1.2], 'stone', STONE_DARK),
-  // The plank bridge from the middle, with solid rails.
-  ramp([0, 0, C_HALF - 0.5], [0, O_TOP, O_Z - 12.5], 4, 'plank', PLANK, 0.5),
-  ramp([-2.1, 0.9, C_HALF - 0.5], [-2.1, O_TOP + 0.9, O_Z - 12.5], 0.2, 'plank', 0x7a5a3a, 0.9),
-  ramp([2.1, 0.9, C_HALF - 0.5], [2.1, O_TOP + 0.9, O_Z - 12.5], 0.2, 'plank', 0x7a5a3a, 0.9),
-  // A long flat bridge round the outside to the next island, so the islands make a ring.
-  ramp([15, O_TOP, 55], [55, O_TOP, 15], 4, 'plank', PLANK, 0.5),
-  ramp([13.6, O_TOP + 0.9, 53.6], [53.6, O_TOP + 0.9, 13.6], 0.2, 'plank', 0x7a5a3a, 0.9),
-  ramp([16.4, O_TOP + 0.9, 56.4], [56.4, O_TOP + 0.9, 16.4], 0.2, 'plank', 0x7a5a3a, 0.9),
+  // The plank bridge from the middle, with solid rails. Bridges sit a hair above the ground they
+  // overlap so their planks don't flicker against the grass.
+  ramp([0, LIFT, C_HALF - 0.5], [0, O_TOP + LIFT, O_Z - 12.5], 4, 'plank', PLANK, 0.5),
+  ramp([-2.1, 0.9 + LIFT, C_HALF - 0.5], [-2.1, O_TOP + 0.9 + LIFT, O_Z - 12.5], 0.2, 'plank', 0x7a5a3a, 0.9),
+  ramp([2.1, 0.9 + LIFT, C_HALF - 0.5], [2.1, O_TOP + 0.9 + LIFT, O_Z - 12.5], 0.2, 'plank', 0x7a5a3a, 0.9),
+  // A long flat bridge round the outside to the next island, so the islands make a ring. It runs
+  // diagonally, so its ends reach well into each island to leave no corner hanging off the edge;
+  // the rails stop at the island edges.
+  ramp([13, O_TOP + LIFT, 57], [57, O_TOP + LIFT, 13], 4, 'plank', PLANK, 0.5),
+  ramp([15, O_TOP + 0.9 + LIFT, 52.2], [52.2, O_TOP + 0.9 + LIFT, 15], 0.2, 'plank', 0x7a5a3a, 0.9),
+  ramp([15, O_TOP + 0.9 + LIFT, 57.8], [57.8, O_TOP + 0.9 + LIFT, 15], 0.2, 'plank', 0x7a5a3a, 0.9),
   // A high crystal perch in the corner.
   block(52, PERCH_TOP - 4, 52, [14, 4, 14], 'dirt', EARTH, { top: { mat: 'grass', color: GRASS } }),
   block(56, PERCH_TOP, 56, [3, 6, 3], 'rock', 0x8a7a8a),

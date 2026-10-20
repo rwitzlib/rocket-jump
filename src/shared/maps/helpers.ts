@@ -96,29 +96,65 @@ export function decor(kind: DecorDef['kind'], pos: Vec3Tuple, extra: Partial<Dec
 
 /**
  * Solid cores for a `floatingRock` decor hanging below `pos` (the island's bottom), so it can be
- * grappled and stood on. The drawn rock is a lumpy blob over a downward cone; this follows the same
- * taper in tiers, each an eight-pointed star (a box and the same box turned 45°) whose points sit
- * just inside its surface.
+ * grappled and stood on, and so players and rockets can't pass through it. The drawn rock is a lumpy
+ * blob over a downward cone; this follows the same taper in thin tiers, each a stack of crossed
+ * rectangles whose corners all sit on the outline's ellipse, so together they fill it to within a
+ * percent or so without any corner sticking out.
  */
 export function floatingRockSolids([x, y, z]: Vec3Tuple, [w, depth, d]: Vec3Tuple): BoxDef[] {
   // Radius as a fraction of the size, at `t` (0 at the island's bottom, 1 at the tip): see client/decor.ts.
+  // The blob's lumps run from 0.78 to 1.18 of its radius and the cone is a hexagon, so this sits
+  // about on their average surface.
   const radius = (t: number) => {
-    const blob = 0.52 * Math.sqrt(Math.max(0, 1 - ((t - 0.12) / 0.3) ** 2));
-    const cone = t < 0.1 ? 0 : 0.45 * (1 - (t - 0.1) / 0.9);
-    return Math.max(blob, cone) * 0.85; // inside the bumps
+    const blob = 0.52 * 0.97 * Math.sqrt(Math.max(0, 1 - ((t - 0.12) / 0.3) ** 2));
+    const cone = t < 0.1 ? 0 : 0.45 * 0.93 * (1 - (t - 0.1) / 0.9);
+    return Math.max(blob, cone);
   };
   const out: BoxDef[] = [];
-  const cuts = [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.85];
-  for (let i = 0; i < cuts.length - 1; i++) {
-    const [top, bottom] = [cuts[i], cuts[i + 1]];
-    const r = Math.min(radius(top), radius(bottom)); // the narrower end, so no corner sticks out
+  const tiers = 13;
+  const bottomT = 0.975;
+  for (let i = 0; i < tiers; i++) {
+    const top = (i / tiers) * bottomT;
+    const bottom = ((i + 1) / tiers) * bottomT;
+    const r = radius((top + bottom) / 2);
     const pos: Vec3Tuple = [x, y - ((top + bottom) / 2) * depth, z];
     const h = (bottom - top) * depth;
-    // A square's corners reach √2 times its half-width out: half-width R/√2 puts them on the surface.
-    const s = 2 * r * 0.75;
-    out.push(solid(pos, [s * w, h, s * d]));
-    const k = s * Math.min(w, d);
-    out.push({ ...solid(pos, [k, h, k]), rot: [0, Math.PI / 4, 0] });
+    for (const a of RECT_ANGLES) out.push(solid(pos, [2 * r * Math.cos(a) * w, h, 2 * r * Math.sin(a) * d]));
+  }
+  // The smaller spike hanging off to one side, from 0.6 down to 1.1.
+  const spikeTiers = 6;
+  for (let i = 0; i < spikeTiers; i++) {
+    const t = 0.6 + ((i + 0.5) / spikeTiers) * 0.48;
+    const r = 0.12 * 0.93 * (1 - (t - 0.6) / 0.5);
+    const pos: Vec3Tuple = [x + 0.15 * w, y - t * depth, z + 0.1 * d];
+    const h = (0.48 / spikeTiers) * depth;
+    for (const a of RECT_ANGLES) out.push(solid(pos, [2 * r * Math.cos(a) * w, h, 2 * r * Math.sin(a) * d]));
   }
   return out;
+}
+
+// Rectangles with their corners on a circle at these angles: their union is a 20-sided star whose
+// notches sit within 1% of the circle.
+const RECT_ANGLES = [15, 30, 45, 60, 75].map((deg) => (deg * Math.PI) / 180);
+
+/**
+ * Solid cores for a `statue` decor (a great stone head) at `pos`, facing +Z turned `k` quarter turns:
+ * the same boxes the head is drawn with (see client/decor.ts), so nothing passes through its face.
+ */
+export function statueSolids(pos: Vec3Tuple, scale: number, k: number): BoxDef[] {
+  const parts: [Vec3Tuple, Vec3Tuple][] = [
+    [[0, 3, 0], [6, 6, 5]], // head
+    [[0, 6.4, 0], [6.4, 1.2, 5.4]], // headdress band
+    [[0, 7.4, 0], [5.6, 1, 4.6]],
+    [[0, 4.4, 2.55], [5, 0.5, 0.3]], // brow
+    [[0, 2.6, 2.8], [1.3, 1.9, 1]], // nose (drawn tipped back a little)
+    [[0, 1.2, 2.55], [2.6, 0.7, 0.2]], // lips
+    [[-3.29, 3, 0.2], [0.6, 2.2, 1.4]], // ears
+    [[3.29, 3, 0.2], [0.6, 2.2, 1.4]],
+  ];
+  return parts.map(([offset, size]) => {
+    // Turned about the statue's own spot, then moved there.
+    const turned = turnBox(solid(offset.map((v) => v * scale) as Vec3Tuple, size.map((s) => s * scale) as Vec3Tuple), k);
+    return { ...turned, pos: [pos[0] + turned.pos[0], pos[1] + turned.pos[1], pos[2] + turned.pos[2]] };
+  });
 }

@@ -1,5 +1,5 @@
 import type { BoxDef, DecorDef, MapDef, Vec3Tuple } from '../map';
-import { block, box, decor, facingCenter, quad, ramp, solid, turnBox, turnDecor, turnPos } from './helpers';
+import { block, box, decor, facingCenter, quad, ramp, solid, statueSolids, turnBox, turnDecor, turnPos } from './helpers';
 
 // Sunken Temple: a stepped pyramid in a jungle basin, late in a golden afternoon. Grand stairs climb
 // all four sides to a shrine on top; a ring of columns (half of them still holding their lintels)
@@ -18,6 +18,7 @@ const COPPER = 0x5fa08a;
 const T1 = 4; // pyramid tier tops
 const T2 = 8;
 const T3 = 12;
+const STATUE_SCALE = 2.3; // the stone heads in the north and south cliffs
 
 // --- One quarter of the map, turned four ways --------------------------------------------------
 
@@ -106,9 +107,9 @@ const boxes: BoxDef[] = [
   ...quad(quarter, turnBox),
   ...columns,
 
-  // The statue heads' solid cores (the faces themselves are scenery).
-  solid([0, 8.5, -64.5], [14.5, 17, 11]),
-  solid([0, 8.5, 64.5], [14.5, 17, 11]),
+  // The statue heads, solid all the way out to their faces.
+  ...statueSolids([0, 0, -63], STATUE_SCALE, 0),
+  ...statueSolids([0, 0, 63], STATUE_SCALE, 2),
   // Waterfall pools' stone rims (low enough to walk over).
   ...[-1, 1].flatMap((side) => [
     block(side * 59, 0, -8, [14, 0.4, 1], 'stone', STONE_DARK),
@@ -216,8 +217,8 @@ export const TEMPLE: MapDef = {
     ...cliffTrees,
     decor('mountains', [0, 0, 0], { size: [330, 90, 0], color: 0x4f7a48 }),
     // Stone heads staring out of the north and south cliffs.
-    decor('statue', [0, 0, -63], { scale: 2.3 }),
-    decor('statue', [0, 0, 63], { scale: 2.3, yaw: Math.PI }),
+    decor('statue', [0, 0, -63], { scale: STATUE_SCALE }),
+    decor('statue', [0, 0, 63], { scale: STATUE_SCALE, yaw: Math.PI }),
     // Waterfalls down the east and west cliffs into pools.
     decor('waterfall', [66.6, 27, 0], { size: [9, 27, 0], yaw: -Math.PI / 2 }),
     decor('waterfall', [-66.6, 27, 0], { size: [9, 27, 0], yaw: Math.PI / 2 }),
