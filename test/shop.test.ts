@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import Stripe from 'stripe';
-import { allowedLook, PREMIUM, viewProfile } from '../src/shared/progress';
+import { allowedLook, DEFAULT_LOOK, ownedSkus, PREMIUM, SETS, viewProfile } from '../src/shared/progress';
 import { DiscordAuth, safeReturn } from '../src/server/auth';
 import { lookupKey, Shop } from '../src/server/shop';
 import { newKey, Store } from '../src/server/store';
@@ -164,6 +164,45 @@ test('checkout needs a sign-in and a skin not yet owned, and records the session
 
   p.owned = [sku];
   assert.equal(((await shop.checkout(p, sku, 'http://localhost:5173/')) as { status: number }).status, 409);
+});
+
+test('a set owns the skins in it: worn, refused at checkout once all are owned, and refunded together', async () => {
+  assert.ok(SETS.every((s) => s.skus.every((sku) => PREMIUM.some((p) => p.sku === sku))), "every set's skins are for sale");
+  assert.ok(SETS.every((s) => s.price < s.skus.reduce((sum, sku) => sum + PREMIUM.find((p) => p.sku === sku)!.price, 0)), 'a set costs less than its skins apart');
+  const storm = { tint: 'auto', trail: 'lightning', explosion: 'thunderclap' } as const;
+  assert.deepEqual(allowedLook(storm, 50), DEFAULT_LOOK, 'no level unlocks them');
+  assert.deepEqual(allowedLook(storm, 1, ['set:storm']), storm);
+  assert.deepEqual(allowedLook(storm, 1, ['trail:lightning']), { ...storm, explosion: 'classic' });
+  assert.deepEqual(ownedSkus(['set:storm']), ['set:storm', 'trail:lightning', 'explosion:thunderclap']);
+
+  const store = new Store(null);
+  const key = signedIn(store);
+  const id = store.idFor(key);
+  const fake = {
+    prices: { list: async () => ({ data: PREMIUM.map((s) => ({ id: `price_${s.sku}`, lookup_key: lookupKey(s.sku), unit_amount: s.price })) }) },
+    checkout: { sessions: { create: async () => ({ id: 'cs_x', url: 'https://checkout.stripe.com/c/pay/test' }) } },
+  } as unknown as Stripe;
+  const shop = new Shop(fake, SECRET, store);
+  const status = async (sku: string) => ((await shop.checkout(store.find(key)!, sku, 'http://localhost:5173/')) as { status?: number }).status;
+
+  // Owning one skin of a set still lets you buy the set; owning both doesn't.
+  store.find(key)!.owned = ['trail:lightning'];
+  assert.equal(await status('set:storm'), undefined);
+  store.find(key)!.owned = ['trail:lightning', 'explosion:thunderclap'];
+  assert.equal(await status('set:storm'), 409);
+  // ...and nor can a skin you have from a set be bought again.
+  store.find(key)!.owned = [];
+  shop.handle(event('evt_1', 'checkout.session.completed', session('cs_1', id, 'set:storm', true)));
+  assert.equal(await status('explosion:thunderclap'), 409);
+  assert.equal(await status('set:storm'), 409);
+  assert.equal(await status('trail:bubbles'), undefined);
+  assert.deepEqual(viewProfile(store.find(key)!, Date.now()).owned, ['set:storm', 'trail:lightning', 'explosion:thunderclap']);
+
+  store.setLook(key, storm);
+  assert.deepEqual(store.find(key)!.look, storm);
+  shop.handle(event('evt_2', 'charge.refunded', { id: 'ch_1', refunded: true, payment_intent: 'pi_cs_1' }));
+  assert.deepEqual(store.find(key)!.owned, []);
+  assert.deepEqual(store.find(key)!.look, DEFAULT_LOOK, 'both come off');
 });
 
 test('sign-in returns only to our own pages, and its codes work once', async () => {

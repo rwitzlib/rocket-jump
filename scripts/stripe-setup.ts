@@ -38,7 +38,7 @@ for (const skin of PREMIUM) {
     if (product.name !== skin.name || !product.active || taxCode !== TAX_CODE) product = await stripe.products.update(id, { name: skin.name, active: true, tax_code: TAX_CODE });
   } catch (err) {
     if ((err as { statusCode?: number }).statusCode !== 404) throw err;
-    product = await stripe.products.create({ id, name: skin.name, description: 'A premium Rocket Jump skin.', tax_code: TAX_CODE, metadata: { sku: skin.sku } });
+    product = await stripe.products.create({ id, name: skin.name, description: skin.skus ? 'A set of premium Rocket Jump skins.' : 'A premium Rocket Jump skin.', tax_code: TAX_CODE, metadata: { sku: skin.sku } });
   }
   const [current] = (await stripe.prices.list({ lookup_keys: [id], active: true, limit: 1 })).data;
   if (current && current.unit_amount === skin.price && current.currency === 'usd' && current.product === product.id) {

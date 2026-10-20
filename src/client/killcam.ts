@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import type { ExplosionId } from '../shared/progress';
 import type { Projectile } from '../shared/sim';
 import type { RemotePlayer } from './net/netclient';
 
@@ -25,6 +26,7 @@ interface Blast {
   normal: THREE.Vector3;
   surface: boolean;
   radius: number;
+  style: ExplosionId; // the shooter's explosion skin
 }
 
 const copyPlayer = (r: RemotePlayer): RemotePlayer => ({ ...r, pos: r.pos.clone(), anchor: r.anchor?.clone() ?? null });
@@ -59,8 +61,8 @@ export class KillcamRecorder {
     return this.shots.filter((s) => s.t > from && s.t <= to).map((s) => s.id);
   }
 
-  explosion(pos: THREE.Vector3, normal: THREE.Vector3, surface: boolean, radius: number) {
-    this.blasts.push({ t: this.clock, pos: pos.clone(), normal: normal.clone(), surface, radius });
+  explosion(pos: THREE.Vector3, normal: THREE.Vector3, surface: boolean, radius: number, style: ExplosionId = 'classic') {
+    this.blasts.push({ t: this.clock, pos: pos.clone(), normal: normal.clone(), surface, radius, style });
   }
 
   /** True if there's enough history before `t` to be worth replaying. */

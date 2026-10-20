@@ -94,6 +94,29 @@ export function puffTexture(): THREE.Texture {
   return new THREE.CanvasTexture(canvas);
 }
 
+/** A soap bubble: a clear middle, a bright rim, and a highlight up and to the left. */
+export function bubbleTexture(): THREE.Texture {
+  const size = 64;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d')!;
+  const c = size / 2;
+  const body = ctx.createRadialGradient(c, c, 0, c, c, c);
+  body.addColorStop(0, 'rgba(255,255,255,0.08)');
+  body.addColorStop(0.72, 'rgba(255,255,255,0.18)');
+  body.addColorStop(0.88, 'rgba(255,255,255,0.85)');
+  body.addColorStop(0.96, 'rgba(255,255,255,0.5)');
+  body.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = body;
+  ctx.fillRect(0, 0, size, size);
+  const shine = ctx.createRadialGradient(c * 0.68, c * 0.62, 0, c * 0.68, c * 0.62, c * 0.26);
+  shine.addColorStop(0, 'rgba(255,255,255,1)');
+  shine.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = shine;
+  ctx.fillRect(0, 0, size, size);
+  return new THREE.CanvasTexture(canvas);
+}
+
 const sharedTexture = { tex: null as THREE.Texture | null };
 const _a = new THREE.Color();
 const _b = new THREE.Color();

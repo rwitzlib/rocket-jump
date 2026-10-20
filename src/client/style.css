@@ -2084,6 +2084,10 @@ button.link {
   overflow: hidden;
 }
 
+.xp-bar + .hint {
+  margin-top: 8px;
+}
+
 .xp-bar.small {
   grid-column: 1 / -1;
   height: 5px;
@@ -2226,6 +2230,23 @@ button.link {
   margin-left: auto;
   color: #ffcf7a;
   font-size: 11px;
+}
+
+/* A set: two skins for less. Wider, to fit what's in it and the price it would be apart. */
+.look.set {
+  grid-column: span 2;
+}
+
+.look .sub {
+  display: block;
+  font-size: 11px;
+  opacity: 0.65;
+}
+
+.look .was {
+  margin-right: 6px;
+  font-weight: 400;
+  opacity: 0.55;
 }
 
 /* Signed in (or not), above the skins. */

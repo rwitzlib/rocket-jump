@@ -1,5 +1,5 @@
 import { MAPS, PLAYABLE_MAPS } from '../shared/map';
-import { decodeLook, encodeLook, EXPLOSIONS, formatPrice, PREMIUM, TINTS, TRAILS, type LapRecord, type Look, type ProfileView } from '../shared/progress';
+import { decodeLook, encodeLook, EXPLOSIONS, formatPrice, hasAll, PREMIUM, SETS, TINTS, TRAILS, type LapRecord, type Look, type ProfileView } from '../shared/progress';
 import { formatLap } from './objectives';
 import { SkinPreview } from './skinpreview';
 
@@ -401,9 +401,55 @@ export class ProfilePanel {
     };
     const bar = this.accountBar(v);
     const notice = this.notice ? [el('p', `shop-note${this.notice.error ? ' error' : ''}`, this.notice.text)] : [];
+    // Sets: a trail and an explosion that go together, for less than the two. Only where the shop
+    // is open (once bought, each skin in one shows in its own row anyway).
+    const sets = () => {
+      const wrap = el('div', 'looks');
+      for (const set of SETS) {
+        const sku = `set:${set.id}`;
+        const owned = hasAll(sku, v.owned);
+        const look: Look = { ...v.look };
+        for (const part of set.skus) {
+          const [kind, id] = part.split(':');
+          if (kind === 'trail') look.trail = id as Look['trail'];
+          else look.explosion = id as Look['explosion'];
+        }
+        const worn = look.trail === v.look.trail && look.explosion === v.look.explosion;
+        const apart = set.skus.reduce((sum, s) => sum + (PREMIUM.find((p) => p.sku === s)?.price ?? 0), 0);
+        const trail = TRAILS.find((t) => t.id === look.trail)!;
+        const explosion = EXPLOSIONS.find((t) => t.id === look.explosion)!;
+        const b = el('button', `look set premium${worn ? ' worn' : ''}`);
+        const swatch = el('span', 'swatch');
+        swatch.style.background = `linear-gradient(135deg, ${hex(trail.fire[1])} 50%, ${hex(explosion.color)} 50%)`;
+        const name = el('span', '', `${set.name} set`);
+        name.append(el('span', 'sub', `${trail.name} trail + ${explosion.name} explosion`));
+        b.append(swatch, name);
+        if (owned) b.append(el('span', 'owned-tag', '★'));
+        else {
+          const price = el('span', 'price', formatPrice(set.price));
+          price.prepend(el('s', 'was', formatPrice(apart)));
+          b.append(price);
+        }
+        b.title = owned ? `Wear the ${set.name} set` : v.account ? `Buy the ${set.name} set for ${formatPrice(set.price)} (${formatPrice(apart)} apart)` : `${set.name} set: sign in with Discord to buy it`;
+        const tryOn = () => this.preview?.wear(look);
+        const takeOff = () => this.preview?.wear(this.view?.look ?? v.look);
+        b.addEventListener('pointerenter', tryOn);
+        b.addEventListener('focus', tryOn);
+        b.addEventListener('pointerleave', takeOff);
+        b.addEventListener('blur', takeOff);
+        b.addEventListener('click', () => {
+          if (owned) void pick(look);
+          else if (v.account) void this.buy(sku);
+          else void this.signIn();
+        });
+        wrap.append(b);
+      }
+      return [el('h3', '', 'Sets'), wrap];
+    };
     return [
       ...(bar ? [bar] : []),
       ...notice,
+      ...(v.shop ? sets() : []),
       ...section('Armor', 'tint', TINTS, v.look.tint, (id) => ({ ...v.look, tint: id as Look['tint'] })),
       ...section(
         'Rocket trail',

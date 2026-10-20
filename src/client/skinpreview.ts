@@ -124,7 +124,7 @@ export class SkinPreview {
       r.pos.addScaledVector(r.vel, dt);
       this.rocketAge += dt;
       if (this.rocketAge >= FLIGHT) {
-        this.effects.explosion(r.pos, new THREE.Vector3(0, 1, 0), false, ROCKET.blastRadius * 0.6);
+        this.effects.explosion(r.pos, new THREE.Vector3(0, 1, 0), false, ROCKET.blastRadius * 0.6, this.looks.get(ID)?.explosion);
         this.rocket = null;
       }
     }

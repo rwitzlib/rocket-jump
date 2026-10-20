@@ -66,10 +66,31 @@ export const TRAILS = [
   { id: 'sunburst', name: 'Sunburst', fire: [0xfff4b0, 0xff3d7f], smoke: [0xffc0d8, 0xa05070], level: 1, price: 299 },
   { id: 'aurora', name: 'Aurora', fire: [0xc0fff0, 0x20e0a0], smoke: [0xb0e0ff, 0x6040a0], level: 1, price: 299 },
   { id: 'inferno', name: 'Inferno', fire: [0xffffff, 0xff2000], smoke: [0x404040, 0x101010], level: 1, price: 299 },
+  // Premium, and more than a recolor: these draw their own shapes (see the client's effects).
+  { id: 'lightning', name: 'Lightning', fire: [0xffffff, 0x5a9cff], smoke: [0xc8d8ff, 0x4a5a90], level: 1, price: 499 },
+  { id: 'bubbles', name: 'Bubbles', fire: [0xe8ffff, 0x60d8ff], smoke: [0xe0f8ff, 0x90c8e8], level: 1, price: 299 },
 ] as const;
 
-/** Explosions: how your blasts look. Only the base one so far; more will unlock by level. */
-export const EXPLOSIONS = [{ id: 'classic', name: 'Classic', color: 0xff8a30, level: 1 }] as const;
+/** Explosions: how your blasts look. `color` is the menu's swatch. */
+export const EXPLOSIONS = [
+  { id: 'classic', name: 'Classic', color: 0xff8a30, level: 1 },
+  { id: 'smoky', name: 'Smoky', color: 0x6a6460, level: 2 },
+  { id: 'firecracker', name: 'Firecracker', color: 0xff4040, level: 5 },
+  { id: 'flashpop', name: 'Flashpop', color: 0xfff4d0, level: 9 },
+  // Premium.
+  { id: 'thunderclap', name: 'Thunderclap', color: 0x5a9cff, level: 1, price: 499 },
+  { id: 'bubblepop', name: 'Bubble Pop', color: 0x60d8ff, level: 1, price: 299 },
+] as const;
+
+/**
+ * Sets: a trail and an explosion that go together, sold as one for less than the two. Buying one
+ * owns the set's sku, which counts as owning each skin in it (see ownedSkus), so a refund takes
+ * both back.
+ */
+export const SETS = [
+  { id: 'storm', name: 'Storm', skus: ['trail:lightning', 'explosion:thunderclap'], price: 749 },
+  { id: 'bubbles', name: 'Bubble', skus: ['trail:bubbles', 'explosion:bubblepop'], price: 449 },
+] as const;
 
 /**
  * Premium skins, the ones sold in the shop: a level doesn't unlock them, buying one does (with a
@@ -77,10 +98,12 @@ export const EXPLOSIONS = [{ id: 'classic', name: 'Classic', color: 0xff8a30, le
  */
 export interface PremiumSkin {
   sku: string; // "tint:crimson"
-  kind: 'tint' | 'trail';
+  kind: 'tint' | 'trail' | 'explosion' | 'set';
   id: string;
   name: string; // "Crimson armor"
   price: number; // US cents
+  /** A set's skins. */
+  skus?: readonly string[];
 }
 
 const priced = <T extends object>(item: T): item is T & { price: number } => 'price' in item;
@@ -88,10 +111,25 @@ const priced = <T extends object>(item: T): item is T & { price: number } => 'pr
 export const PREMIUM: PremiumSkin[] = [
   ...TINTS.filter(priced).map((t) => ({ sku: `tint:${t.id}`, kind: 'tint' as const, id: t.id, name: `${t.name} armor`, price: t.price })),
   ...TRAILS.filter(priced).map((t) => ({ sku: `trail:${t.id}`, kind: 'trail' as const, id: t.id, name: `${t.name} trail`, price: t.price })),
+  ...EXPLOSIONS.filter(priced).map((t) => ({ sku: `explosion:${t.id}`, kind: 'explosion' as const, id: t.id, name: `${t.name} explosion`, price: t.price })),
+  ...SETS.map((s) => ({ sku: `set:${s.id}`, kind: 'set' as const, id: s.id, name: `${s.name} set`, price: s.price, skus: s.skus })),
 ];
 
+/** The skus a profile's purchases let it wear: what it bought, and what's in the sets it bought. */
+export function ownedSkus(owned: readonly string[] = []): string[] {
+  const sets = PREMIUM.filter((s) => s.skus && owned.includes(s.sku));
+  return [...new Set([...owned, ...sets.flatMap((s) => s.skus!)])];
+}
+
+/** Whether buying a sku would add nothing: it's owned, or (a set) everything in it is. */
+export function hasAll(sku: string, owned: readonly string[] = []): boolean {
+  const have = ownedSkus(owned);
+  const skus = PREMIUM.find((s) => s.sku === sku)?.skus;
+  return have.includes(sku) || (!!skus && skus.every((s) => have.includes(s)));
+}
+
 /** Whether a skin can be worn with these purchases: free ones always, premium ones once bought. */
-const wearable = (kind: PremiumSkin['kind'], item: object & { id: string }, owned: readonly string[]) => !priced(item) || owned.includes(`${kind}:${item.id}`);
+const wearable = (kind: Exclude<PremiumSkin['kind'], 'set'>, item: object & { id: string }, owned: readonly string[]) => !priced(item) || ownedSkus(owned).includes(`${kind}:${item.id}`);
 
 export const formatPrice = (cents: number) => `$${(cents / 100).toFixed(2)}`;
 
@@ -126,7 +164,7 @@ export function decodeLook(text: string | undefined): Look {
 export function allowedLook(look: Partial<Look>, level: number, owned: readonly string[] = []): Look {
   const tint = TINTS.find((t) => t.id === look.tint && t.level <= level && wearable('tint', t, owned))?.id ?? 'auto';
   const trail = TRAILS.find((t) => t.id === look.trail && t.level <= level && wearable('trail', t, owned))?.id ?? 'classic';
-  const explosion = EXPLOSIONS.find((t) => t.id === look.explosion && t.level <= level)?.id ?? 'classic';
+  const explosion = EXPLOSIONS.find((t) => t.id === look.explosion && t.level <= level && wearable('explosion', t, owned))?.id ?? 'classic';
   return { tint, trail, explosion };
 }
 
@@ -135,7 +173,7 @@ export function unlocksAt(level: number): string[] {
   return [
     ...TINTS.filter((t) => t.level === level && !priced(t)).map((t) => `${t.name} armor`),
     ...TRAILS.filter((t) => t.level === level && !priced(t)).map((t) => `${t.name} trail`),
-    ...EXPLOSIONS.filter((t) => t.level === level && level > 1).map((t) => `${t.name} explosion`),
+    ...EXPLOSIONS.filter((t) => t.level === level && level > 1 && !priced(t)).map((t) => `${t.name} explosion`),
   ];
 }
 
@@ -397,7 +435,7 @@ export function viewProfile(p: Profile, now: number): ProfileView {
     dailyEnds: day + 86400000,
     weeklyEnds: new Date(weekKey(now)).getTime() + 7 * 86400000,
     account: p.account ? { provider: p.account.provider, name: p.account.name } : null,
-    owned: p.owned ?? [],
+    owned: ownedSkus(p.owned), // (with what's in their sets)
   };
 }
 

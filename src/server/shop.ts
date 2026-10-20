@@ -1,10 +1,10 @@
 import type Stripe from 'stripe';
-import { PREMIUM, type Profile } from '../shared/progress';
+import { hasAll, PREMIUM, type Profile } from '../shared/progress';
 import type { Store } from './store';
 
 // The skin shop: premium skins bought through Stripe Checkout (Stripe's hosted payment page).
 //
-//   POST /shop/checkout { key, sku, returnTo } -> { url }: the Checkout page for that skin
+//   POST /shop/checkout { key, sku, returnTo } -> { url }: the Checkout page for that skin (or set)
 //   POST /stripe/webhook                         Stripe telling us what happened (signed)
 //
 // A skin is granted only by the webhook, never by the browser coming back from Checkout: the page
@@ -42,7 +42,7 @@ export class Shop {
     const skin = PREMIUM.find((s) => s.sku === sku);
     if (!skin) return { status: 404, error: 'There is no such skin.' };
     if (!p.account) return { status: 403, error: 'Sign in with Discord to buy skins.' };
-    if (p.owned?.includes(sku)) return { status: 409, error: 'You have that one already.' };
+    if (hasAll(sku, p.owned)) return { status: 409, error: skin.skus ? 'You have everything in that set already.' : 'You have that one already.' };
     const price = await this.price(sku);
     if (!price) {
       console.error(`No Stripe price with lookup key ${lookupKey(sku)}: run npm run stripe:setup`);

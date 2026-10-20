@@ -142,7 +142,7 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
       .catch(() => {});
   }
   const vehicleView = new VehicleView(scene, sim.vehicles);
-  // What everyone wears, from the scores: armor color and rocket trail.
+  // What everyone wears, from the scores: armor color, rocket trail and explosion.
   const looks = new Map<string, Look>();
   const shownLooks = new Map<string, string>();
   effects.trailOf = (id) => {
@@ -247,9 +247,10 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
     const mine = 'playerId' in e && e.playerId === localId && !spectator;
     switch (e.type) {
       case 'explosion': {
-        recorder.explosion(e.pos, e.normal, e.surface, e.radius);
+        const style = looks.get(e.ownerId)?.explosion ?? 'classic';
+        recorder.explosion(e.pos, e.normal, e.surface, e.radius, style);
         if (killcam) break; // the replay shows its own
-        effects.explosion(e.pos, e.normal, e.surface, e.radius);
+        effects.explosion(e.pos, e.normal, e.surface, e.radius, style);
         remoteView.blast(e.pos, e.radius);
         audio.play('explosion', { at: e.pos, volume: 1.6 });
         const dist = e.pos.distanceTo(camera.position);
@@ -672,7 +673,7 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
     killcamView.localTeam = remoteView.localTeam;
     killcamView.sync(killcamShown, dt);
     for (const b of source.blastsBetween(killcam.shown, t)) {
-      effects.explosion(b.pos, b.normal, b.surface, b.radius);
+      effects.explosion(b.pos, b.normal, b.surface, b.radius, b.style);
       killcamView.blast(b.pos, b.radius);
       audio.play('explosion', { at: b.pos, volume: 1.4 });
     }
