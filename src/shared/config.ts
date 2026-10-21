@@ -54,17 +54,17 @@ export const HYPERSONIC = {
   crateKnockback: 20,
 };
 
-// The burst and area-denial weapon: empty a six-shot drum fast, then wait out a long reload. Each
-// grenade hits for less than a rocket but over a wider area, and they bounce off walls, so they can
-// be banked around corners or left rolling in a doorway until the fuse goes.
+// The burst weapon: empty a four-shot drum fast, then wait out a long reload. Each grenade hits for
+// less than a rocket but over a wider area. Lobbed in an arc, it bounces off anything close to the
+// muzzle, so it can be banked around a near corner, and once armed it goes off on whatever it hits.
 export const GRENADE = {
   speed: 24, // launch speed along the aim; gravity bends it from there
   cooldown: 0.3, // between shots while the drum has grenades in it
-  drum: 6, // grenades per load
+  drum: 4, // grenades per load
   reload: 2.5, // seconds to refill an empty drum
-  lifetime: 2.5, // fuse: explodes on its own if it hasn't hit anyone by then
+  lifetime: 2, // fuse: explodes on its own if it hasn't hit anything since arming
   radius: 0.12, // collision radius, so it bounces off surfaces instead of sinking into them
-  armDistance: 6, // meters flown before it explodes on players. Surfaces it always bounces off
+  armDistance: 4, // meters flown before it explodes on contact. Until then it bounces off everything
   restitution: 0.55, // fraction of the speed into a surface it bounces back with
   friction: 0.75, // fraction of the speed along a surface it keeps on each bounce
   blastRadius: 5,

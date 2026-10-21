@@ -34,24 +34,45 @@ export function isCloudflare(addr: string): boolean {
  * Cloudflare's addresses; from anywhere else, that address is the client's.
  */
 export function clientAddr(req: IncomingMessage, trustedProxies: number, cloudflare = false): string {
-  const direct = req.socket.remoteAddress ?? '';
-  const header = req.headers['x-forwarded-for'];
-  const chain = (Array.isArray(header) ? header.join(',') : (header ?? ''))
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
-  let addr = direct;
-  if (trustedProxies > 0) {
-    if (chain.length < trustedProxies) return direct;
-    addr = chain[chain.length - trustedProxies];
-    chain.length -= trustedProxies; // (what's left came before: only Cloudflare's entry can be believed now)
-  }
+  const { addr, chain, short } = nearestHop(req, trustedProxies);
+  if (short) return addr;
   if (cloudflare && isCloudflare(addr)) {
     const connecting = String(req.headers['cf-connecting-ip'] ?? '').trim();
     if (isIP(connecting)) return connecting;
     return chain.at(-1) ?? addr; // (Cloudflare appends the client's address too)
   }
   return addr;
+}
+
+/**
+ * The first address in front of our own proxies, and the X-Forwarded-For entries written before it
+ * (only Cloudflare's can be believed). Short: fewer entries than proxies, so it's the direct address.
+ */
+function nearestHop(req: IncomingMessage, trustedProxies: number): { addr: string; chain: string[]; short: boolean } {
+  const direct = req.socket.remoteAddress ?? '';
+  const header = req.headers['x-forwarded-for'];
+  const chain = (Array.isArray(header) ? header.join(',') : (header ?? ''))
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (trustedProxies === 0) return { addr: direct, chain, short: false };
+  if (chain.length < trustedProxies) return { addr: direct, chain: [], short: true };
+  const addr = chain[chain.length - trustedProxies];
+  chain.length -= trustedProxies;
+  return { addr, chain, short: false };
+}
+
+/**
+ * The country a request came from, as Cloudflare tells it (CF-IPCountry, two letters), for the
+ * server's numbers. Only with TRUST_CLOUDFLARE and only on requests that really came through
+ * Cloudflare; null otherwise, or when Cloudflare doesn't know (XX) or it's Tor (T1).
+ */
+export function clientCountry(req: IncomingMessage, trustedProxies: number, cloudflare = false): string | null {
+  if (!cloudflare) return null;
+  const { addr, short } = nearestHop(req, trustedProxies);
+  if (short || !isCloudflare(addr)) return null;
+  const country = String(req.headers['cf-ipcountry'] ?? '').trim().toUpperCase();
+  return /^[A-Z]{2}$/.test(country) && country !== 'XX' ? country : null;
 }
 
 /** At most `max` actions per address in a sliding window. Keeps a bounded number of addresses. */

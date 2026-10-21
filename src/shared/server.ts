@@ -74,6 +74,39 @@ interface Stats {
   lastKillAt: number; // the match clock (time left) at their last kill, for multikills
 }
 
+/** One person's fighting with one weapon (or other way of dying) over a match, for the server's numbers. */
+export interface WeaponTally {
+  held: number; // seconds carried as their primary, alive and on foot
+  shots: number;
+  hits: number; // hits on someone else that did damage
+  damage: number;
+  kills: number;
+  airshots: number;
+  distance: number; // meters, summed over their kills
+  deaths: number; // times it killed them (whoever held it, bots too)
+  suicides: number;
+  pickups: number;
+}
+
+export const blankTally = (): WeaponTally => ({ held: 0, shots: 0, hits: 0, damage: 0, kills: 0, airshots: 0, distance: 0, deaths: 0, suicides: 0, pickups: 0 });
+
+/** How a match was fought, person by person (never by name): what the weapon balance numbers are made of. */
+export interface MatchReport {
+  map: string;
+  mode: GameMode;
+  seconds: number; // played, not counting the results screen
+  finished: boolean; // false: everyone left before the end
+  bots: number;
+  people: {
+    weapons: Record<string, WeaponTally>; // by weapon or other cause (DeathCause), plus the grapple's pickups
+    kills: number;
+    deaths: number;
+    won: boolean;
+    place: number | null; // 1 for first .. 0 for last; null if they'd left (or watched) by the end, or played alone
+  }[];
+  matchups: Record<string, Record<string, number>>; // what killed -> what the victim was holding -> kills (a person on either end)
+}
+
 const MULTIKILL_WINDOW = 1.5; // seconds between two kills for the second to make a multikill
 const ROCKET_JUMP_STRENGTH = 0.35; // how much of a blast's full push on yourself counts as a rocket jump
 const DIRECT_HIT_STRENGTH = 0.9; // ...and on someone else, as a direct hit
@@ -147,6 +180,13 @@ export class GameServer {
   onDeath: (map: string, x: number, z: number, cause: string) => void = () => {};
   /** Something that counts toward a player's profile happened (only for people who sent a profile key). */
   onStat: (id: string, profile: string, name: string, e: StatEvent) => void = () => {};
+  /** A match's fighting, for the weapon balance numbers: at its end, or when everyone left first. Not races, not maps from the editor. */
+  onMatchReport: (r: MatchReport) => void = () => {};
+  /** This match's fighting by the people in it (kept when they leave), and who beat what with what. */
+  private fights = new Map<string, { weapons: Record<string, WeaponTally>; kills: number; deaths: number }>();
+  private matchups: Record<string, Record<string, number>> = {};
+  private matchSeconds = 0;
+  private reported = false;
 
   constructor(
     private readonly send: (clientId: string, msg: ServerMessage) => void,
@@ -170,6 +210,7 @@ export class GameServer {
     if (!this.rotation.length) this.rotation.push({ map: 'arena', mode: this.options.mode });
     this.options.maps = this.rotation.map((r) => `${r.map}:${r.mode}`);
     this.sim = new GameSim(MAPS[this.mapName], this.mode);
+    this.watchHits();
     this.match = this.newMatch(1);
     if (this.options.botSkill !== 'auto') this.skill = this.options.botSkill;
   }
@@ -255,6 +296,7 @@ export class GameServer {
     this.inputs.delete(id);
     this.stats.delete(id);
     this.sim.removePlayer(id);
+    if (this.connections.size === 0 && this.match.phase === 'playing') this.report(false);
     this.notice(`${conn.name} left`);
     if (!conn.spectator) this.admitWaiting();
     this.fillBots();
@@ -666,11 +708,16 @@ export class GameServer {
     this.match = this.newMatch(this.match.id + 1);
     for (const s of this.stats.values()) Object.assign(s, { streak: 0, bestStreak: 0, airshots: 0, lastKillAt: Infinity });
     for (const c of this.connections.values()) c.aim.reset();
+    this.fights.clear();
+    this.matchups = {};
+    this.matchSeconds = 0;
+    this.reported = false;
 
     if (this.mapName !== oldMap) {
       const tick = this.sim.tick;
       this.sim.world.free();
       this.sim = new GameSim(MAPS[this.mapName], this.mode);
+      this.watchHits();
       this.sim.tick = tick; // ticks keep counting up, so clients never see time run backwards
       this.recentEvents = [];
       for (const [id, conn] of this.connections) if (!conn.spectator) this.sim.addPlayer(id);
@@ -777,6 +824,7 @@ export class GameServer {
     }
 
     const events = this.sim.step(this.inputs);
+    if (!frozen) this.tallyHeld();
     for (const e of events) {
       this.track(e);
       this.recentEvents.push(toWireEvent(e, this.sim.tick));
@@ -821,6 +869,7 @@ export class GameServer {
   /** Kill streaks and airshots, for the scoreboard and the end-of-match awards; and profile stats. */
   private track(e: SimEvent) {
     if (this.match.phase !== 'playing') return;
+    this.tallyFight(e);
     if (e.type === 'flag' && e.action === 'captured' && e.playerId) this.stat(e.playerId, { type: 'capture' });
     // (Not on maps from the editor: anyone can make a lap there as short as they like.)
     if (e.type === 'lap' && !this.mapName.startsWith(CUSTOM_PREFIX)) {
@@ -857,6 +906,95 @@ export class GameServer {
     killer.lastKillAt = this.match.timeLeft;
   }
 
+  // --- the weapon balance numbers (onMatchReport) ---------------------------------------------------
+
+  /** Whether this match's fighting counts: not races (no fighting), not maps from the editor (anything goes there). */
+  private get counted(): boolean {
+    return this.mode !== 'race' && !this.mapName.startsWith(CUSTOM_PREFIX);
+  }
+
+  /** A person's tally for one weapon this match; undefined for bots, or a match that doesn't count. */
+  private tally(id: string, weapon: string): WeaponTally | undefined {
+    if (!this.counted || !this.connections.has(id)) return undefined;
+    let f = this.fights.get(id);
+    if (!f) this.fights.set(id, (f = { weapons: {}, kills: 0, deaths: 0 }));
+    return (f.weapons[weapon] ??= blankTally());
+  }
+
+  /** Hits, with the weapon that made them (which the damaged event doesn't carry). */
+  private watchHits() {
+    this.sim.onHit = (target, source, amount, cause) => {
+      if (this.match.phase !== 'playing' || target === source) return;
+      const t = this.tally(source, cause);
+      if (!t) return;
+      t.hits++;
+      t.damage += amount;
+    };
+  }
+
+  /** What everyone's carrying, a tick at a time: how much each weapon gets used, to weigh its kills by. */
+  private tallyHeld() {
+    if (this.match.phase !== 'playing') return;
+    this.matchSeconds += DT;
+    for (const [id, conn] of this.connections) {
+      if (conn.spectator || conn.away > 0) continue;
+      const p = this.sim.players.get(id);
+      const t = p?.alive && p.vehicle < 0 ? this.tally(id, p.primary) : undefined;
+      if (t) t.held += DT;
+    }
+  }
+
+  private tallyFight(e: SimEvent) {
+    if (e.type === 'fired') {
+      // (A helicopter's guns are the vehicle's, not the weapon in hand.)
+      if ((this.sim.players.get(e.playerId)?.vehicle ?? -1) < 0) {
+        const t = this.tally(e.playerId, e.weapon);
+        if (t) t.shots++;
+      }
+      return;
+    }
+    if (e.type === 'pickup') {
+      const t = this.tally(e.playerId, e.weapon);
+      if (t) t.pickups++;
+      return;
+    }
+    if (e.type !== 'killed') return;
+    const own = !e.killerId || e.killerId === e.playerId;
+    const died = this.tally(e.playerId, e.cause);
+    if (died) {
+      if (own) died.suicides++;
+      else died.deaths++;
+      this.fights.get(e.playerId)!.deaths++;
+    }
+    if (own) return;
+    const shot = this.tally(e.killerId!, e.cause);
+    if (shot) {
+      shot.kills++;
+      if (e.midair) shot.airshots++;
+      shot.distance += e.distance;
+      this.fights.get(e.killerId!)!.kills++;
+    }
+    const victim = this.sim.players.get(e.playerId);
+    if ((shot || died) && victim) {
+      const row = (this.matchups[e.cause] ??= {});
+      row[victim.primary] = (row[victim.primary] ?? 0) + 1;
+    }
+  }
+
+  /** Hands the match's fighting over, once. Finished: with who won and where everyone placed. */
+  private report(finished: boolean) {
+    if (this.reported || !this.counted || !this.fights.size) return;
+    this.reported = true;
+    const ranked = finished ? this.scores().sort(compareScores(this.mode)) : [];
+    const people = [...this.fights].map(([id, f]) => {
+      const i = ranked.findIndex((s) => s.id === id);
+      const present = i >= 0 && this.connections.get(id)?.spectator === false;
+      const won = present && (this.sim.teams ? ranked[i].team >= 0 && ranked[i].team === this.match.winnerTeam : this.match.winnerId === id);
+      return { ...f, won, place: present && ranked.length > 1 ? 1 - i / (ranked.length - 1) : null };
+    });
+    this.onMatchReport({ map: this.mapName, mode: this.mode, seconds: Math.round(this.matchSeconds), finished, bots: this.bots.size, people, matchups: this.matchups });
+  }
+
   /** Race: everyone's path through their lap under way, a sample every few ticks. */
   private recordLaps() {
     for (const [id, conn] of this.connections) {
@@ -875,6 +1013,7 @@ export class GameServer {
     const scores = this.scores().sort(compareScores(this.mode));
     const people = scores.filter((s) => !s.bot).length;
     this.onMatchOver(this.mode, this.mapName, people);
+    this.report(true);
     if (!this.options.botRewards && people < 2) return; // a match against nobody but bots you picked
     scores.forEach((s, i) => {
       const conn = this.connections.get(s.id);

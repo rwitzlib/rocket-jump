@@ -75,8 +75,27 @@ function apiBase(): string {
 }
 
 /** Tells the server what someone did in the menus (for its owner's numbers; see server/analytics.ts). */
-function track(name: string) {
-  void fetch(`${apiBase()}/event`, { method: 'POST', keepalive: true, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name }) }).catch(() => {});
+function track(name: string, extra: Record<string, string> = {}) {
+  void fetch(`${apiBase()}/event`, { method: 'POST', keepalive: true, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name, ...extra }) }).catch(() => {});
+}
+
+/** Where this visit came from, roughly: a time zone, the site that linked here, a campaign (?utm_source=). */
+function visitOrigin(): Record<string, string> {
+  const origin: Record<string, string> = {};
+  try {
+    origin.tz = Intl.DateTimeFormat().resolvedOptions().timeZone ?? '';
+  } catch {
+    // no time zone
+  }
+  try {
+    const ref = document.referrer ? new URL(document.referrer).hostname : '';
+    if (ref && ref !== location.hostname) origin.ref = ref;
+  } catch {
+    // no referrer
+  }
+  const utm = new URLSearchParams(location.search).get('utm_source');
+  if (utm) origin.utm = utm.slice(0, 30);
+  return origin;
 }
 
 /** Round trip to a server's /health, the best of three (ms), or null if it doesn't answer. */
@@ -121,7 +140,7 @@ async function main() {
 
   const touchDevice = isTouchDevice();
   if (touchDevice) $('touch-warning').hidden = false;
-  track('visit');
+  track('visit', visitOrigin());
   if (touchDevice) track('touch-device');
   let trained = hasTrained();
 

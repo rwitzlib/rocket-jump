@@ -106,9 +106,9 @@ export class Flight {
   }
 
   /**
-   * Gravity, then a sweep along this tick's motion. Grenades bounce off surfaces, so they can be
-   * banked around corners. A player they touch sets them off once they've flown GRENADE.armDistance;
-   * closer than that they bounce off the player too, hurting them. Otherwise the fuse sets them off.
+   * Gravity, then a sweep along this tick's motion. Once a grenade has flown GRENADE.armDistance,
+   * anything it touches sets it off. Closer than that it bounces, so it can be banked around a near
+   * corner, and a player it bounces off gets hurt. Otherwise the fuse sets it off.
    * True once it has exploded.
    */
   private stepGrenade(g: Projectile, events: SimEvent[], mode: StepMode): boolean {
@@ -137,6 +137,10 @@ export class Flight {
     }
     if (kind === 'vehicle' && isArmed(g)) {
       this.explode(g, normal, true, events, mode, undefined, this.sim.aim.vehicleIndex);
+      return true;
+    }
+    if (!player && isArmed(g)) {
+      this.explode(g, normal, true, events, mode);
       return true;
     }
 

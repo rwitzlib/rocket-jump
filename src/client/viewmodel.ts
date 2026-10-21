@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { WEAPONS } from '../shared/config';
+import { GRENADE, WEAPONS } from '../shared/config';
 import type { WeaponId } from '../shared/types';
 import { buildGauntlet, LAUNCHER, PRIMARY_MODELS, type LauncherModel } from './weapons';
 
@@ -19,7 +19,7 @@ const CHARGING = new THREE.Color(0xff5a3c);
 const CHARGING_GLOW = new THREE.Color(0x401008);
 
 const SWAP_TIME = 0.45; // seconds to lower one launcher and raise the other
-const CHAMBER = Math.PI / 3; // one turn of a six-shot drum
+const CHAMBER = (Math.PI * 2) / GRENADE.drum; // one turn of the drum: a chamber per grenade
 
 const _p = new THREE.Vector3();
 

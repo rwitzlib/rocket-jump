@@ -41,7 +41,7 @@ export interface Projectile {
   prevPos: Vector3;
   vel: Vector3;
   life: number;
-  traveled: number; // meters flown: a grenade arms (explodes on players) at GRENADE.armDistance
+  traveled: number; // meters flown: a grenade arms (explodes on contact) at GRENADE.armDistance
   lag: number; // ticks to rewind other players by when testing hits: how far behind the shooter was seeing
   struck: string | null; // the last player an unarmed grenade bounced off, so one hit only hurts once
   target: string | null; // the player a seeker missile is steering for

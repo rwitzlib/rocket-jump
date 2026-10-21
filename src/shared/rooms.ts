@@ -6,7 +6,7 @@ import type { MapDef } from './map';
 import { MAPS } from './map';
 import type { StatEvent } from './progress';
 import { cleanText, type ServerMessage } from './protocol';
-import { GameServer, type ServerOptions } from './server';
+import { GameServer, type MatchReport, type ServerOptions } from './server';
 
 // Rooms: one server process hosts several games at once. The main room plays the server's own
 // rotation and is always there. Anyone can open another one from the menu, public (listed in the
@@ -80,6 +80,8 @@ export class Rooms {
   onSuspect: (room: Room, id: string, name: string, detail: { hits: number; snaps: number }) => void = () => {};
   onDeath: (map: string, x: number, z: number, cause: string) => void = () => {};
   onMatchOver: (mode: GameMode, map: string, people: number) => void = () => {};
+  /** A match's fighting, for the weapon balance numbers (see GameServer.onMatchReport). */
+  onMatchReport: (room: Room, r: MatchReport) => void = () => {};
   /** A room's tick threw: for the server's log. The room carries on. */
   onError: (room: Room, err: unknown) => void = () => {};
   /** Something for a player's profile happened in a room. */
@@ -103,6 +105,7 @@ export class Rooms {
     room.server.onSuspect = (id, name, detail) => this.onSuspect(room, id, name, detail);
     room.server.onDeath = (map, x, z, cause) => this.onDeath(map, x, z, cause);
     room.server.onMatchOver = (mode, map, people) => this.onMatchOver(mode, map, people);
+    room.server.onMatchReport = (r) => this.onMatchReport(room, r);
   }
 
   get count(): number {

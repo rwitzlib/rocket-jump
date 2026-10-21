@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { GRENADE } from '../shared/config';
 import type { PrimaryId } from '../shared/sim';
 
 // Weapon and projectile models, shared by the first-person view, other players and the rockets in
@@ -152,7 +153,7 @@ const grenadeLauncherGeo = {
 };
 
 /**
- * A revolver-style grenade launcher: a fat six-shot drum behind a short, wide barrel, gripped
+ * A revolver-style grenade launcher: a fat revolving drum, one chamber per grenade, behind a short, wide barrel, gripped
  * where the rocket launcher is. Same landmarks as `buildLauncher`, so it can stand in for it.
  */
 export function buildGrenadeLauncher(accent: THREE.Material = DEFAULT_ACCENT): LauncherModel {
@@ -166,12 +167,13 @@ export function buildGrenadeLauncher(accent: THREE.Material = DEFAULT_ACCENT): L
   const drum = new THREE.Group();
   drum.add(part(g.drum, dark, 0, 0, 0.02), part(g.drumCap, gunmetal, 0, 0, -0.1), part(g.drumCap, gunmetal, 0, 0, 0.14));
   root.add(drum);
-  for (let k = 0; k < 6; k++) {
-    const a = (k / 6) * Math.PI * 2 + Math.PI / 6;
+  const step = (Math.PI * 2) / GRENADE.drum;
+  for (let k = 0; k < GRENADE.drum; k++) {
+    const a = k * step + step / 2;
     const flute = part(g.flute, gunmetal, Math.cos(a) * 0.145, Math.sin(a) * 0.145, 0.02);
     flute.rotation.z = a + Math.PI / 2;
     // Chamber mouths on the drum's front face, between the flutes.
-    const b = a + Math.PI / 6;
+    const b = a + step / 2;
     const chamber = part(g.chamber, bore, Math.cos(b) * 0.085, Math.sin(b) * 0.085, -0.101);
     chamber.rotation.y = Math.PI;
     drum.add(flute, chamber);

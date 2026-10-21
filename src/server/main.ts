@@ -10,10 +10,10 @@ import { isOffensive, VOTE_KICK } from '../shared/moderation';
 import Stripe from 'stripe';
 import { decodeLook, encodeLook, levelOf, newProfile, viewProfile, wornLook, type Profile } from '../shared/progress';
 import { DiscordAuth, safeReturn } from './auth';
-import { basicPassword, clientAddr, ConnectionCap, MessageBudget, RateLimiter, sameSecret, securityHeaders } from './guard';
+import { basicPassword, clientAddr, clientCountry, ConnectionCap, MessageBudget, RateLimiter, sameSecret, securityHeaders } from './guard';
 import { Shop } from './shop';
 import { Store } from './store';
-import { Analytics, CLIENT_EVENTS, statsPage, type ClientEvent } from './analytics';
+import { Analytics, CLIENT_EVENTS, cleanOrigin, parseFilter, statsPage, type ClientEvent } from './analytics';
 import { parseClientMessage, type ServerMessage } from '../shared/protocol';
 import { MAIN_ROOM, parseRoomRequest, Rooms, type Room } from '../shared/rooms';
 import { decodeClientMessage, WireEncoder } from '../shared/wire';
@@ -44,7 +44,8 @@ import { decodeClientMessage, WireEncoder } from '../shared/wire';
 //   DATA_DIR=/data        where profiles (XP, stats, challenges), race records and the server's
 //                         numbers are saved; unset, they're kept in memory only and lost on restart
 //   STATS_KEY=secret      turns on /stats (HTTP Basic auth, any user name, this as the password):
-//                         players, sessions, early leavers, modes, maps
+//                         players, where they come from, sessions, early leavers, maps and modes,
+//                         and weapon balance (countries need TRUST_CLOUDFLARE: Cloudflare's CF-IPCountry)
 //   TRUST_PROXY=0         how many proxies of ours sit in front (a TLS proxy, a load balancer): only
 //                         then is X-Forwarded-For believed, for rate limits and vote-kick bans
 //   TRUST_CLOUDFLARE=0    1: Cloudflare may be in front of those (its orange-cloud proxy). Its
@@ -85,6 +86,7 @@ const JOIN_DEADLINE = 10000; // ms a new connection has to say who it is
 const TRUST_PROXY = Math.max(0, Math.floor(env('TRUST_PROXY', 0)));
 const TRUST_CLOUDFLARE = process.env.TRUST_CLOUDFLARE === '1' || process.env.TRUST_CLOUDFLARE === 'true';
 const addrOf = (req: import('node:http').IncomingMessage) => clientAddr(req, TRUST_PROXY, TRUST_CLOUDFLARE);
+const countryOf = (req: import('node:http').IncomingMessage) => clientCountry(req, TRUST_PROXY, TRUST_CLOUDFLARE);
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -199,6 +201,7 @@ rooms.onMatchOver = (mode, map, people) => {
   if (people > 0) analytics.match();
   log('match', { mode, map, people });
 };
+rooms.onMatchReport = (_room, r) => analytics.fights(r);
 
 rooms.onKick = (room, id) => {
   const socket = sockets.get(id);
@@ -450,13 +453,16 @@ function serve(req: import('node:http').IncomingMessage, res: import('node:http'
     json(res, 200, { region: REGION, servers: SERVERS });
     return;
   }
-  // POST /event { name }: the page saying what someone did in the menus (see analytics.ts).
+  // POST /event { name }: the page saying what someone did in the menus (see analytics.ts). A visit
+  // also says where it came from: { tz, ref, utm }.
   if (url.pathname === '/event' && req.method === 'POST') {
     const addr = addrOf(req);
     readJson(req, (body) =>
       guarded(res, () => {
         const name = body?.name;
-        if (typeof name === 'string' && (CLIENT_EVENTS as readonly string[]).includes(name) && menuEvents.allow(addr)) analytics.event(name as ClientEvent);
+        if (typeof name === 'string' && (CLIENT_EVENTS as readonly string[]).includes(name) && menuEvents.allow(addr)) {
+          analytics.event(name as ClientEvent, name === 'visit' ? cleanOrigin(body, countryOf(req), req.headers['accept-language']) : undefined);
+        }
         res.writeHead(204, { ...API_HEADERS, 'access-control-allow-origin': '*' }).end();
       }),
     );
@@ -466,7 +472,7 @@ function serve(req: import('node:http').IncomingMessage, res: import('node:http'
     res.writeHead(204, { ...API_HEADERS, 'access-control-allow-origin': '*', 'access-control-allow-methods': 'POST', 'access-control-allow-headers': 'content-type' }).end();
     return;
   }
-  // GET /stats: the numbers (add ?format=json for JSON), behind HTTP Basic auth with STATS_KEY as the
+  // GET /stats?days=30&map=&mode=&games=all|pvp|bots: the numbers (add &format=json for JSON), behind HTTP Basic auth with STATS_KEY as the
   // password: a header, so the key isn't left in proxy logs and browser history. Off unless set.
   if (url.pathname === '/stats') {
     if (!STATS_KEY) return json(res, 404, { error: 'Not found' });
@@ -481,9 +487,9 @@ function serve(req: import('node:http').IncomingMessage, res: import('node:http'
       res.writeHead(401, { ...API_HEADERS, 'www-authenticate': 'Basic realm="Rocket Jump stats", charset="UTF-8"', 'content-type': 'text/plain', 'cache-control': 'no-store' }).end('Sign in with the stats key as the password.');
       return;
     }
-    const report = analytics.report();
-    if (url.searchParams.get('format') === 'json') return json(res, 200, { ...report, heat: Object.fromEntries(Object.keys(MAPS).map((m) => [m, analytics.heat(m)])) });
-    res.writeHead(200, { ...PAGE_HEADERS, 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }).end(statsPage(report, { profiles: store.profileCount, rooms: rooms.count, connected: sockets.size }));
+    const view = analytics.view(parseFilter(url.searchParams));
+    if (url.searchParams.get('format') === 'json') return json(res, 200, { ...view, heat: Object.fromEntries(Object.keys(MAPS).map((m) => [m, analytics.heat(m)])) });
+    res.writeHead(200, { ...PAGE_HEADERS, 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }).end(statsPage(view, { profiles: store.profileCount, rooms: rooms.count, connected: sockets.size, hottest: analytics.hottest() }));
     return;
   }
   if (accountRequest(req, res, url)) return;
@@ -593,9 +599,11 @@ wss.on('connection', (ws, req) => {
   let id = `p${nextId++}`;
   const wire = new WireEncoder();
   const socket = { ws, wire, room, addr, profile: null as string | null };
+  const country = countryOf(req);
   let joinedAt = 0;
   let joinedTo = { mode: '', map: '' };
   sockets.set(id, socket);
+  analytics.connected(sockets.size);
   ws.binaryType = 'nodebuffer';
   let joined = false;
   // A connection that never says who it is goes (answering pings alone would keep it open for ever).
@@ -663,7 +671,7 @@ wss.on('connection', (ws, req) => {
     sockets.delete(id);
     if (joined) {
       log('leave', { id, room: room.code });
-      analytics.session(socket.profile ?? addr, (Date.now() - joinedAt) / 1000, joinedTo.mode, joinedTo.map);
+      analytics.session(socket.profile ?? addr, (Date.now() - joinedAt) / 1000, joinedTo.mode, joinedTo.map, country);
     }
     game.disconnect(id);
   });

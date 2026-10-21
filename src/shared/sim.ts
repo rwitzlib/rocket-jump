@@ -123,6 +123,8 @@ export class GameSim {
   remoteProjectiles: readonly Projectile[] | null = null;
   /** Client only: other players' teams, so seekers don't lock onto teammates. */
   remoteTeams: ReadonlyMap<string, number> | null = null;
+  /** Server only: every hit that did damage, with what did it (the wire's damaged event leaves the weapon out), for the server's numbers. */
+  onHit: ((targetId: string, sourceId: string, amount: number, cause: DeathCause) => void) | null = null;
 
   private readonly crateIndex = new Map<number, number>(); // rigid-body handle -> index in `crates`
   private readonly vehicleIndex = new Map<number, number>(); // rigid-body handle -> index in `vehicles`
@@ -1181,6 +1183,7 @@ export class GameSim {
     }
     const midair = sourceId !== p.id && this.isMidair(p, cause);
     events.push({ type: 'damaged', playerId: p.id, sourceId, amount: taken, midair });
+    this.onHit?.(p.id, sourceId, taken, cause);
     if (p.health <= 0) this.kill(p, killer, cause, events, midair);
   }
 
