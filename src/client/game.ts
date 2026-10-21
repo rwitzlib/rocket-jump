@@ -1017,7 +1017,7 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
     hud.setResults(client.match, client.scores);
     announcer.update(dt, client.match, client.scores);
 
-    level.update(dt, camera);
+    level.update(dt, camera, client.moverTick(alpha));
     const firstPerson = (me.alive && !ride && !intermission && !spectator) || (replaying && !!killcamKiller && killcamKiller.vehicle < 0);
     ctx.post.render(scene, camera, firstPerson ? viewModel : null);
   };

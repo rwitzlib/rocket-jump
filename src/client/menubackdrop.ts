@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { TICK_RATE } from '../shared/config';
 import { MAPS } from '../shared/map';
 import { buildLevel, type Level } from './level';
 import type { PostFX } from './postfx';
@@ -14,6 +15,7 @@ export class MenuBackdrop {
   private readonly camera = new THREE.PerspectiveCamera(55, 1, 0.1, 500);
   private readonly level: Level;
   private angle = Math.random() * Math.PI * 2;
+  private ticks = 0; // the movers' clock: nobody's playing, so it's just time
   private readonly center = new THREE.Vector3();
 
   constructor(private readonly renderer: THREE.WebGLRenderer, private readonly post: PostFX) {
@@ -37,7 +39,8 @@ export class MenuBackdrop {
     this.camera.lookAt(this.center);
     this.renderer.toneMappingExposure = this.level.theme.exposure;
     this.post.outlineFade = [Math.max(35, this.level.extent * 0.6), Math.max(90, this.level.extent * 1.6)];
-    this.level.update(dt, this.camera);
+    this.ticks += dt * TICK_RATE;
+    this.level.update(dt, this.camera, this.ticks);
     this.post.render(this.scene, this.camera);
   }
 

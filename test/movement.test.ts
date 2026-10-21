@@ -106,3 +106,19 @@ test('falling off the map within 5 s of a hit is the hitter\'s kill', () => {
   assert.equal(killed.cause, 'fall');
   assert.equal(killed.killerId, 'a');
 });
+
+test('walking up a ramp keeps about your flat-ground speed', () => {
+  const walk = (x: number, z: number) => {
+    const sim = makeSim();
+    const p = sim.addPlayer('a');
+    place(p, x, 6, z);
+    settle(sim, p);
+    run(sim, 40, { a: { forward: 1, yaw: Math.PI } });
+    const z0 = p.pos.z;
+    run(sim, 10, { a: { forward: 1, yaw: Math.PI } });
+    return ((p.pos.z - z0) * 60) / 10;
+  };
+  const flat = walk(0, 40);
+  const ramp = walk(-20, 26); // the arena ramp rising toward +z
+  assert.ok(ramp > flat * 0.95, `${ramp.toFixed(2)} m/s up the ramp against ${flat.toFixed(2)} m/s on the flat`);
+});

@@ -98,6 +98,7 @@ export class NetClient {
   private latestTick = -1;
   private latestAt = 0;
   private renderTick = -1;
+  private predictedTick = 0; // the server tick the newest predicted input should run on
   private lastEventTick = -1;
   private ackedTick = -1; // spectators acknowledge snapshots on their own (players do it with their inputs)
   private timeline: WireEvent[] = []; // remote events waiting for the render clock to reach them
@@ -153,7 +154,10 @@ export class NetClient {
     this.stats.pending = this.pending.length;
     this.send({ type: 'input', frames: this.pending.slice(-NET.inputRedundancy), snap: Math.max(0, this.latestTick) });
     this.me.seq = this.seq;
-    const events = this.sim.predict(this.me, input).filter((e) => this.firstSighting(e));
+    // The server runs the input after the newest one it has answered on the snapshot's own tick,
+    // and one a tick after that: so the movers are where they'll be when it gets to this one.
+    this.predictedTick = this.inputTick(this.pending.length - 1);
+    const events = this.sim.predict(this.me, input, this.predictedTick).filter((e) => this.firstSighting(e));
     if (this.exploded.size > 64) {
       for (const shot of this.exploded) if (shot < this.seq - MAX_PENDING) this.exploded.delete(shot);
     }
@@ -242,10 +246,10 @@ export class NetClient {
     if (driving) driving.restore(msg.vehicles[driving.index]);
     this.restoreProjectiles(msg);
     while (this.pending.length && this.pending[0].seq <= msg.ack) this.pending.shift();
-    for (const frame of this.pending) {
+    this.pending.forEach((frame, i) => {
       me.seq = frame.seq;
-      this.sim.replay(me, frame.input);
-    }
+      this.sim.replay(me, frame.input, this.inputTick(i));
+    });
     me.seq = this.seq;
     if (!this.pending.length) me.prevPos.copy(me.pos).sub(_oldStep);
 
@@ -255,6 +259,19 @@ export class NetClient {
     if (error > 0.001) this.stats.corrections++;
     this.visualOffset.add(_old.sub(me.pos));
     if (this.visualOffset.length() > SNAP_DISTANCE) this.visualOffset.set(0, 0, 0);
+  }
+
+  /** The server tick `pending[i]` is expected to run on (before any snapshot, just a count). */
+  private inputTick(i: number): number {
+    return Math.max(this.latestTick, 0) + i;
+  }
+
+  /**
+   * Where to draw the movers, in (fractional) ticks: in step with our own predicted motion, so what
+   * we stand on stays under our feet. `alpha` is the part of a tick since the last prediction.
+   */
+  moverTick(alpha: number): number {
+    return this.spectator ? this.renderTick : this.predictedTick - 1 + alpha;
   }
 
   /** Our projectiles as the server has them. Ones fired by inputs it hasn't seen yet come back during the replay. */

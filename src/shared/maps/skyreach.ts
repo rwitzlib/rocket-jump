@@ -1,4 +1,4 @@
-import type { BoxDef, DecorDef, MapDef, Vec3Tuple } from '../map';
+import type { BoxDef, DecorDef, MapDef, MoverDef, Vec3Tuple } from '../map';
 import { block, decor, facingCenter, floatingRockSolids, quad, ramp, turnBox, turnDecor, turnPos } from './helpers';
 
 // Skyreach: floating islands above a sea of clouds at sunset. A big central island under crossed
@@ -67,6 +67,19 @@ const boxes: BoxDef[] = [
   ...floatingRockSolids([0, -6, 0], [44, 34, 44]),
 ];
 
+// The stone ring high over the middle, turning slowly and bobbing, with glowing runes round it:
+// one solid piece, so you can walk right round it as it carries you, grapple it or bounce rockets
+// off it.
+const HALO_RADIUS = 16;
+const halo: MoverDef = {
+  pivot: [0, 34, 0],
+  spin: 0.08,
+  bob: [0.8, 0.5],
+  boxes: [],
+  rings: [{ pos: [0, 0, 0], radius: HALO_RADIUS, width: 1.2, height: 1.6, mat: 'stone', color: 0x8a7a9a }],
+  decor: [decor('runes', [0, 0, 0], { size: [HALO_RADIUS, 0, 0], color: 0x9af0ff })],
+};
+
 const crates: Vec3Tuple[] = quad<Vec3Tuple>(
   [
     [-10, O_TOP + 0.6, 62], [-8.8, O_TOP + 0.6, 62],
@@ -122,11 +135,11 @@ export const SKYREACH: MapDef = {
   // Deep, so a fall leaves about three seconds to grapple the rocks or a bridge and climb back.
   killY: -100,
   botOrbit: 57,
+  movers: [halo],
   decor: [
     ...quad(quarterDecor, turnDecor),
     decor('floatingRock', [0, -6, 0], { size: [44, 34, 44] }),
     decor('crystal', [0, 1.2, 0], { color: 0xffd27a, scale: 1.1 }),
-    decor('halo', [0, 34, 0], { size: [16, 0, 0], color: 0x9af0ff }),
     decor('cloudSea', [0, -75, 0], { size: [340, 0, 60] }),
     decor('skyIslands', [0, -5, 0], { size: [240, 70, 0] }),
     decor('mountains', [0, -110, 0], { size: [430, 190, 0], color: 0x7a6a8a }),

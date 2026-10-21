@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { CRATE } from '../shared/config';
-import type { BoxDef, MapDef } from '../shared/map';
+import type { BoxDef, MapDef, RingDef } from '../shared/map';
+import { moverPose } from '../shared/mover';
 import type { GameSim } from '../shared/sim';
 import { buildDecor } from './decor';
 import { Sky } from './sky';
@@ -68,7 +69,8 @@ export interface Level {
   /** Half-width of the map, meters. */
   extent: number;
   bounds: THREE.Box3;
-  update(dt: number, camera: THREE.Camera): void;
+  /** `moverTick`: where to draw the moving solids (MapDef.movers), in ticks. */
+  update(dt: number, camera: THREE.Camera, moverTick?: number): void;
 }
 
 /** One of a level's boxes, painted with its surfaces (the map editor builds them one at a time too). */
@@ -85,6 +87,60 @@ export function boxMesh(box: BoxDef): THREE.Mesh {
   if (box.rot) mesh.rotation.set(...box.rot);
   mesh.castShadow = mesh.receiveShadow = true;
   mesh.updateMatrixWorld();
+  return mesh;
+}
+
+/**
+ * A ring (see RingDef), the same shape it collides as: flat top and bottom, the walls smooth round
+ * the curve. UVs in meters (the walls' u runs round the middle radius), and `aBase` like a box's.
+ */
+export function ringMesh(ring: RingDef): THREE.Mesh {
+  const n = ring.segments ?? 64;
+  const r0 = ring.radius - ring.width / 2;
+  const r1 = ring.radius + ring.width / 2;
+  const h = ring.height / 2;
+  const position: number[] = [];
+  const normal: number[] = [];
+  const uv: number[] = [];
+  const base: number[] = [];
+  const index: number[] = [];
+  // Each face of the cross-section, swept round: its two edges (radius, height), and which way it faces.
+  const faces: [number, number, number, number, 'in' | 'up' | 'out' | 'down'][] = [
+    [r0, -h, r0, h, 'in'],
+    [r0, h, r1, h, 'up'],
+    [r1, h, r1, -h, 'out'],
+    [r1, -h, r0, -h, 'down'],
+  ];
+  for (const [ra, ya, rb, yb, facing] of faces) {
+    const start = position.length / 3;
+    for (let i = 0; i <= n; i++) {
+      const a = (i / n) * Math.PI * 2;
+      const c = Math.cos(a);
+      const s = Math.sin(a);
+      for (const [r, y] of [[ra, ya], [rb, yb]]) {
+        position.push(c * r, y, s * r);
+        const [nx, ny, nz] = facing === 'up' ? [0, 1, 0] : facing === 'down' ? [0, -1, 0] : facing === 'out' ? [c, 0, s] : [-c, 0, -s];
+        normal.push(nx, ny, nz);
+        if (facing === 'up' || facing === 'down') uv.push(c * r, s * r);
+        else uv.push(a * ring.radius, y);
+        base.push(y + h);
+      }
+    }
+    for (let i = 0; i < n; i++) {
+      const a = start + i * 2;
+      // (Same outward winding as the collision mesh.)
+      index.push(a, a + 3, a + 1, a, a + 2, a + 3);
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(position, 3));
+  geo.setAttribute('normal', new THREE.Float32BufferAttribute(normal, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  geo.setAttribute('aBase', new THREE.Float32BufferAttribute(base, 1));
+  geo.setIndex(index);
+  const mesh = new THREE.Mesh(geo, levelMaterial(ring.mat ?? 'grid', ring.color));
+  mesh.position.set(...ring.pos);
+  mesh.castShadow = mesh.receiveShadow = true;
   return mesh;
 }
 
@@ -130,14 +186,29 @@ export function buildLevel(scene: THREE.Scene, map: MapDef): Level {
 
   const decor = buildDecor(scene, map.decor ?? [], theme);
 
+  // Moving solids: their boxes and scenery in a group each, posed from the tick every frame. (Not
+  // in `meshes`: a scorch mark projected onto one would hang in the air when it moved on.)
+  const movers = (map.movers ?? []).map((def) => {
+    const group = new THREE.Group();
+    for (const box of def.boxes) if (!box.hidden) group.add(boxMesh(box));
+    for (const ring of def.rings ?? []) group.add(ringMesh(ring));
+    const parts = buildDecor(group, def.decor ?? [], theme);
+    scene.add(group);
+    return { def, group, decor: parts };
+  });
+
   return {
     meshes: [...meshes, ...decor.surfaces],
     theme,
     extent,
     bounds,
-    update(dt) {
+    update(dt, _camera, moverTick = 0) {
       sky.update(dt);
       decor.update(dt);
+      for (const m of movers) {
+        moverPose(m.def, moverTick, m.group.position, m.group.quaternion);
+        m.decor.update(dt);
+      }
     },
   };
 }

@@ -8,6 +8,7 @@ import { capsuleNormal, rayCapsule, REWIND_TICKS } from './hits';
 import type { MapDef, SpawnDef } from './map';
 import { isTeamMode, noPickups, teamSpawns, type RaceCourse } from './modes';
 import { aimDirection, applyGrapple, updateVelocity, type GrappleState, type Hook } from './movement';
+import { Movers } from './mover';
 import { clipVelocity, PLAYER_COLLISION_GROUPS, raySphere, VEHICLE_COLLIDER_GROUPS } from './physics';
 import { PlayerSim } from './player';
 import { BLAST_CAUSE, isSeeker, lockedOn, lockReady, type Blast, type DeathCause, type MissilePhase, type Projectile, type ProjectileKind } from './projectile';
@@ -37,6 +38,9 @@ export type { Flag, Item } from './rules';
  * `hasFooting`) and that you aren't moving up faster than this.
  */
 const MAX_GROUNDED_RISE = 1;
+/** The character controller's climb limit, as the up component of the steepest walkable ground normal. */
+const MAX_CLIMB_ANGLE = (50 * Math.PI) / 180;
+const MIN_WALKABLE_NORMAL_Y = Math.cos(MAX_CLIMB_ANGLE);
 /** Footing rays start at the capsule center, here and this far out each way: support within ~30° of straight down. */
 const FOOTING_SPREAD = PLAYER.radius * 0.5;
 const FOOTING_DEPTH = PLAYER.halfHeight + PLAYER.radius + 0.3; // reaches the ground under you on slopes up to the climb limit
@@ -73,7 +77,7 @@ const MIDAIR_HEIGHT = 3;
 export type AimKind = 'none' | 'world' | 'player' | 'crate' | 'rocket' | 'vehicle';
 
 /** Result of aimHit, reused between calls (GameSim.aim). */
-const _aim = { kind: 'none' as AimKind, dist: 0, playerId: '', crateIndex: -1, vehicleIndex: -1, center: new Vector3(), rocket: null as Projectile | null };
+const _aim = { kind: 'none' as AimKind, dist: 0, playerId: '', crateIndex: -1, vehicleIndex: -1, moverIndex: -1, center: new Vector3(), rocket: null as Projectile | null };
 /** How far the crosshair ray reaches when working out what a shot from a vehicle is aimed at. */
 const AIM_RANGE = 300;
 const _vq = new Quaternion();
@@ -113,7 +117,14 @@ export class GameSim {
    * snapshots, like crates.
    */
   readonly vehicles: VehicleSim[] = [];
+  /** The level's moving solids (MapDef.movers), placed by the tick. */
+  readonly movers: Movers;
   tick = 0;
+  /**
+   * The tick being simulated, for where the movers are. The server's own; on a client, the server
+   * tick the input being predicted or replayed is expected to run on.
+   */
+  private simTick = 0;
   /**
    * Client only: where other players are being drawn (alive ones), set by the netcode. A client's
    * sim has no colliders for them, so hooks and predicted rockets test against these instead.
@@ -156,6 +167,9 @@ export class GameSim {
       );
     }
 
+    this.movers = new Movers(this.world, map.movers);
+    this.movers.place(this.tick);
+
     const h = CRATE.size / 2;
     for (const pos of map.crates) {
       const body = this.world.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(...pos));
@@ -166,7 +180,7 @@ export class GameSim {
 
     this.controller = this.world.createCharacterController(0.02);
     this.controller.enableAutostep(0.45, 0.2, false);
-    this.controller.setMaxSlopeClimbAngle((50 * Math.PI) / 180);
+    this.controller.setMaxSlopeClimbAngle(MAX_CLIMB_ANGLE);
     this.controller.disableSnapToGround(); // snapping would glue you to the floor when a rocket launches you
     this.controller.setApplyImpulsesToDynamicBodies(true);
 
@@ -325,6 +339,32 @@ export class GameSim {
     return best;
   }
 
+  /**
+   * Standing on a mover: it carries you from where it was last tick to where it is now, before you
+   * move. (No turning your view with it: your aim is yours.)
+   */
+  private rideMover(p: PlayerSim) {
+    _rayDir.set(0, -1, 0);
+    for (const [dx, dz] of FOOTING_OFFSETS) {
+      _rayOrigin.set(p.pos.x + dx, p.pos.y, p.pos.z + dz);
+      const hit = this.world.castRay(_ray, FOOTING_DEPTH, true, undefined, PLAYER_COLLISION_GROUPS);
+      const index = hit ? this.movers.indexOf(hit.collider) : -1;
+      if (index < 0) continue;
+      this.movers.carry(index, this.simTick - 1, this.simTick, p.pos);
+      p.collider.setTranslation(p.pos);
+      return;
+    }
+  }
+
+  /** How fast the ground under you rises along your horizontal velocity (m/s), on a slope you can walk up. */
+  private slopeRise(p: PlayerSim): number {
+    _rayOrigin.copy(p.pos);
+    _rayDir.set(0, -1, 0);
+    const hit = this.world.castRayAndGetNormal(_ray, FOOTING_DEPTH, true, undefined, PLAYER_COLLISION_GROUPS);
+    if (!hit || hit.normal.y < MIN_WALKABLE_NORMAL_Y) return 0;
+    return -(hit.normal.x * p.vel.x + hit.normal.z * p.vel.z) / hit.normal.y;
+  }
+
   /** True if there's something to stand on under a capsule centered here, not just an edge brushing its side. */
   private hasFooting(center: Vector3): boolean {
     _rayDir.set(0, -1, 0);
@@ -442,6 +482,7 @@ export class GameSim {
       _aim.kind = crate !== undefined ? 'crate' : vehicle !== undefined ? 'vehicle' : 'world';
       _aim.crateIndex = crate ?? -1;
       _aim.vehicleIndex = vehicle ?? -1;
+      _aim.moverIndex = this.movers.indexOf(hit.collider);
       outNormal?.set(hit.normal.x, hit.normal.y, hit.normal.z);
     }
     this.forEachTarget(excludeId, view, excludeVehicle, (id, center) => {
@@ -500,6 +541,11 @@ export class GameSim {
       g.anchor.copy(h.local).applyQuaternion(v.rotation(_vq)).add(v.pos);
       return true;
     }
+    if (h.kind === 'mover') {
+      this.movers.toWorld(h.index, this.simTick, h.local, g.anchor);
+      g.normal.copy(h.localNormal).applyQuaternion(this.movers.rotation(h.index, this.simTick, _q));
+      return true;
+    }
     if (h.kind === 'rocket') {
       // Once it explodes (or fizzles) the rope has nothing left to hold.
       const rocket = this.findRocket(h.ownerId, h.shot);
@@ -518,7 +564,7 @@ export class GameSim {
 
   /** The other end of a rope's pull, on whatever it's hooked into. Server only. */
   private pullHooked(p: PlayerSim, h: Hook) {
-    if (h.kind === 'rocket' || h.kind === 'vehicle') return; // too heavy (or too fast) to be reeled in
+    if (h.kind === 'rocket' || h.kind === 'vehicle' || h.kind === 'mover') return; // too heavy (or too fast, or fixed) to be reeled in
     if (h.kind === 'player') {
       // Tug of war: they get dragged toward us too.
       const target = this.players.get(h.id);
@@ -545,6 +591,8 @@ export class GameSim {
   /** One authoritative tick for every player, vehicle, rocket and crate. */
   step(inputs: ReadonlyMap<string, PlayerInput>): SimEvent[] {
     const events = this.takePendingEvents();
+    this.movers.ensure(this.tick); // (only does anything after the tick was set, for a new map)
+    this.simTick = this.tick;
     for (const p of this.players.values()) {
       this.stepPlayer(p, inputs.get(p.id) ?? EMPTY_INPUT, events, 'authority');
     }
@@ -565,6 +613,7 @@ export class GameSim {
     if (this.mode === 'ctf') this.rules.stepFlags(events);
     if (this.mode === 'koth') this.rules.stepHill(events);
     this.flight.stepProjectiles(events, 'authority');
+    this.movers.place(this.tick + 1);
     this.world.step();
     this.tick++;
     for (const p of this.players.values()) if (p.alive) p.history.record(this.tick, p.pos);
@@ -574,20 +623,27 @@ export class GameSim {
   /**
    * Client prediction: one tick for just this player and the projectiles in this sim (its own).
    * Other players, their projectiles, the crates and the mystery boxes come from the server.
+   * `tick` is the server tick this input should run on, which is where the movers are.
    */
-  predict(p: PlayerSim, input: PlayerInput): SimEvent[] {
+  predict(p: PlayerSim, input: PlayerInput, tick = this.tick): SimEvent[] {
     const events = this.takePendingEvents();
+    this.movers.ensure(tick);
+    this.simTick = tick;
     this.stepPlayer(p, input, events, 'predict');
     this.flight.stepProjectiles(events, 'predict');
+    this.movers.place(tick + 1);
     this.world.step();
     return events;
   }
 
   /**
    * Re-runs one already-predicted tick for this player and its projectiles after a server correction.
-   * No physics step and no events, so replaying a handful of ticks per snapshot is cheap.
+   * No physics step and no events, so replaying a handful of ticks per snapshot is cheap (on a
+   * map with movers it does step, to put them where they were at `tick`).
    */
-  replay(p: PlayerSim, input: PlayerInput) {
+  replay(p: PlayerSim, input: PlayerInput, tick = this.tick) {
+    this.movers.ensure(tick);
+    this.simTick = tick;
     this.stepPlayer(p, input, _discard, 'replay');
     this.flight.stepProjectiles(_discard, 'replay');
     _discard.length = 0;
@@ -646,6 +702,7 @@ export class GameSim {
     // `pos` is the source of truth. Normally the collider is already there (world.step moved it),
     // but a replay runs several ticks without stepping the world.
     p.collider.setTranslation(p.pos);
+    if (p.grounded && this.movers.length) this.rideMover(p);
 
     // Grapple: fires on press, or the moment its cooldown ends if the button is still held.
     // Releases on let go.
@@ -672,6 +729,11 @@ export class GameSim {
         } else if (_aim.kind === 'vehicle') {
           const v = this.vehicles[_aim.vehicleIndex];
           hook = { kind: 'vehicle', index: v.index, local: anchor.clone().sub(v.pos).applyQuaternion(v.rotation(_vq).invert()) };
+        } else if (_aim.kind === 'world' && _aim.moverIndex >= 0) {
+          const index = _aim.moverIndex;
+          const local = this.movers.toLocal(index, this.simTick, anchor, new Vector3());
+          const localNormal = normal.clone().applyQuaternion(this.movers.rotation(index, this.simTick, _q).invert());
+          hook = { kind: 'mover', index, local, localNormal };
         } else if (_aim.kind === 'crate') {
           const crate = this.crates[_aim.crateIndex];
           const r = crate.rotation();
@@ -716,13 +778,18 @@ export class GameSim {
       if (speed > CTF.carrierSpeedCap) p.vel.multiplyScalar(CTF.carrierSpeedCap / speed);
     }
 
+    // Walking on a slope, the step follows the ground: otherwise the controller slides you along it,
+    // less far than you asked, and the clipping below would take that out of your walk speed.
+    const rise = wasGrounded && p.vel.y <= 0 && !p.grapple ? this.slopeRise(p) : 0;
+
     // Move through the world with collision, then drop whatever velocity was blocked.
     _desired.copy(p.vel).multiplyScalar(DT);
+    _desired.y += rise * DT;
     this.controller.computeColliderMovement(p.collider, _desired, undefined, PLAYER_COLLISION_GROUPS);
     const moved = this.controller.computedMovement();
     const touching = this.controller.computedGrounded() && p.vel.y <= MAX_GROUNDED_RISE;
     p.vel.x = clipVelocity(p.vel.x, _desired.x, moved.x);
-    p.vel.y = clipVelocity(p.vel.y, _desired.y, moved.y);
+    p.vel.y = clipVelocity(p.vel.y, _desired.y - rise * DT, moved.y - rise * DT);
     p.vel.z = clipVelocity(p.vel.z, _desired.z, moved.z);
     p.pos.x += moved.x;
     p.pos.y += moved.y;

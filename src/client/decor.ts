@@ -172,8 +172,8 @@ export interface Decor {
   update(dt: number): void;
 }
 
-/** Builds a map's scenery into the scene. */
-export function buildDecor(scene: THREE.Scene, defs: readonly DecorDef[], theme: Theme): Decor {
+/** Builds a map's scenery into the scene (or into a group, like a mover's, to move it all together). */
+export function buildDecor(scene: THREE.Object3D, defs: readonly DecorDef[], theme: Theme): Decor {
   const time = { value: 0 };
   const batches: Record<BatchKind, Batch> = {
     solid: new Batch(),
@@ -692,6 +692,18 @@ export function buildDecor(scene: THREE.Scene, defs: readonly DecorDef[], theme:
           ring.rotation.y = t * 0.08;
           ring.position.y = d.pos[1] + Math.sin(t * 0.5) * 0.8;
         });
+        break;
+      }
+      case 'runes': {
+        // Glowing bands round a ring of radius `size[0]`: the runes on a mover's stone ring (see
+        // Skyreach), which turns them with it.
+        const radius = d.size?.[0] ?? 16;
+        const segs = 16;
+        const arc = (radius * Math.PI * 2) / segs;
+        for (let k = 0; k < segs; k++) {
+          const a = (k / segs) * Math.PI * 2;
+          put('glow', GEO.box, d.color ?? 0x9af0ff, mat(Math.cos(a) * radius, 0, Math.sin(a) * radius, 0, -a, 0, 1.25, 0.4, arc * 0.45), 0, 2.2);
+        }
         break;
       }
       case 'gull': {

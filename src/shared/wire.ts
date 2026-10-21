@@ -502,7 +502,7 @@ const EVENTS: Record<WireEvent['type'], Schema> = {
 };
 const EVENT_TYPES = Object.keys(EVENTS) as WireEvent['type'][];
 
-const HOOKS = ['player', 'crate', 'rocket', 'vehicle'] as const;
+const HOOKS = ['player', 'crate', 'rocket', 'vehicle', 'mover'] as const;
 
 // Plain shapes the schemas describe, converted to and from the protocol's own.
 const playerRecord = (p: RemotePlayerState) => ({ ...p, anchor: p.anchor ?? [0, 0, 0], anchored: !!p.anchor });
@@ -542,7 +542,7 @@ function writeSnapshot(msg: SnapshotMessage, base: Sent | undefined, self: strin
       if (h?.kind === 'player') {
         body.uv(codec.idIndex(h.id));
         for (const c of h.offset) body.f64(c);
-      } else if (h?.kind === 'crate') {
+      } else if (h?.kind === 'crate' || h?.kind === 'mover') {
         body.uv(h.index);
         for (const c of [...h.local, ...h.localNormal]) body.f64(c);
       } else if (h?.kind === 'rocket') {
@@ -656,6 +656,7 @@ function readSnapshot(bytes: Uint8Array, baselines: Map<number, Sent>): Sent {
       else if (kind === 2) hook = { kind: 'crate', index: r.uv(), local: v3(), localNormal: v3() };
       else if (kind === 3) hook = { kind: 'rocket', ownerId: codec.idAt(r.uv())!, shot: r.uv() };
       else if (kind === 4) hook = { kind: 'vehicle', index: r.uv(), local: v3() };
+      else if (kind === 5) hook = { kind: 'mover', index: r.uv(), local: v3(), localNormal: v3() };
       you.grapple = { anchor: [ax, ay, az], normal: [nx, ny, nz], length, hook };
     }
   }

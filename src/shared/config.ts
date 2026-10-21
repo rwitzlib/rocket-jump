@@ -202,7 +202,7 @@ export const NET = {
 };
 
 /** Bump whenever client and server stop understanding each other; mismatched clients are told to reload. */
-export const PROTOCOL_VERSION = 5;
+export const PROTOCOL_VERSION = 6;
 
 /**
  * - ffa: free-for-all deathmatch, first to the frag limit.

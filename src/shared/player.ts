@@ -44,13 +44,15 @@ export type HookState =
   | { kind: 'player'; id: string; offset: Vec3Tuple }
   | { kind: 'crate'; index: number; local: Vec3Tuple; localNormal: Vec3Tuple }
   | { kind: 'rocket'; ownerId: string; shot: number }
-  | { kind: 'vehicle'; index: number; local: Vec3Tuple };
+  | { kind: 'vehicle'; index: number; local: Vec3Tuple }
+  | { kind: 'mover'; index: number; local: Vec3Tuple; localNormal: Vec3Tuple };
 
 export function hookToState(h: Hook | null): HookState | null {
   if (!h) return null;
   if (h.kind === 'player') return { kind: 'player', id: h.id, offset: tuple(h.offset) };
   if (h.kind === 'crate') return { kind: 'crate', index: h.index, local: tuple(h.local), localNormal: tuple(h.localNormal) };
   if (h.kind === 'vehicle') return { kind: 'vehicle', index: h.index, local: tuple(h.local) };
+  if (h.kind === 'mover') return { kind: 'mover', index: h.index, local: tuple(h.local), localNormal: tuple(h.localNormal) };
   return { ...h };
 }
 
@@ -59,6 +61,7 @@ export function hookFromState(h: HookState | null): Hook | null {
   if (h.kind === 'player') return { kind: 'player', id: h.id, offset: new Vector3(...h.offset) };
   if (h.kind === 'crate') return { kind: 'crate', index: h.index, local: new Vector3(...h.local), localNormal: new Vector3(...h.localNormal) };
   if (h.kind === 'vehicle') return { kind: 'vehicle', index: h.index, local: new Vector3(...h.local) };
+  if (h.kind === 'mover') return { kind: 'mover', index: h.index, local: new Vector3(...h.local), localNormal: new Vector3(...h.localNormal) };
   return { ...h };
 }
 

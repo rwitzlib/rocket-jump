@@ -95,7 +95,8 @@ export type DecorKind =
   | 'rail'
   | 'piling'
   | 'waterfall'
-  | 'halo';
+  | 'halo'
+  | 'runes';
 
 export interface SpawnDef {
   pos: Vec3Tuple;
@@ -139,6 +140,42 @@ export interface MapDef {
   vehicles?: VehicleDef[];
   theme?: string; // sky, light and fog, by name in client/themes.ts (default 'classic')
   decor?: DecorDef[];
+  /** Solid pieces of the level that move on a fixed schedule: see shared/mover.ts. */
+  movers?: MoverDef[];
+}
+
+/**
+ * Level geometry that moves: its boxes (and scenery) turn and bob together about `pivot`. Where it
+ * is depends only on the tick, so the server and every client agree without sending anything. You
+ * can stand on it (it carries you), grapple it (the hook rides along) and shoot it.
+ */
+/**
+ * A flat ring (an annulus with height) lying level, centered on `pos`: like a thick washer. It
+ * collides as a triangle mesh with exactly the drawn shape (see ringMesh in shared/mover.ts).
+ */
+export interface RingDef {
+  pos: Vec3Tuple;
+  radius: number; // to the middle of its width
+  width: number; // outer radius minus inner
+  height: number;
+  /** Straight pieces round the circle (default 64): its top is one flat surface whatever the count. */
+  segments?: number;
+  color: number;
+  mat?: SurfaceKind;
+}
+
+export interface MoverDef {
+  pivot: Vec3Tuple;
+  /** In the mover's own frame: `pos` is relative to the pivot. */
+  boxes: BoxDef[];
+  /** Round rings, also in the mover's own frame: solid all the way round, with no seams. */
+  rings?: RingDef[];
+  /** Scenery drawn in the mover's frame, moving with it (no collision of its own). */
+  decor?: DecorDef[];
+  /** Radians per second about the vertical axis through the pivot. */
+  spin?: number;
+  /** Up and down: amplitude in meters, and rate in radians per second. */
+  bob?: [number, number];
 }
 
 const FLOOR = 0x8a94a6;
