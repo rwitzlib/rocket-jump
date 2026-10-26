@@ -3,7 +3,7 @@ import { DT, GRAPPLE, GRENADE, HELI, HYPERSONIC, PLAYER, ROCKET, SEEKERS, TEAMS,
 import { MAPS } from '../shared/map';
 import { aimDirection } from '../shared/movement';
 import type { ServerMessage } from '../shared/protocol';
-import { GameSim, lockReady, type SimEvent } from '../shared/sim';
+import { GameSim, lockReady, type DeathCause, type SimEvent } from '../shared/sim';
 import type { Announcer } from './announcer';
 import type { GameAudio } from './audio';
 import { CameraFX } from './camerafx';
@@ -41,6 +41,15 @@ const VIEWMODEL_FOV = 60; // weapons get their own FOV so changing the world FOV
 const DEATH_CAM_TIME = 0.75;
 /** The play of the match replays in slow motion so it is easier to follow. */
 const HIGHLIGHT_SPEED = 0.5;
+// The final kill of a match replays from just behind the shot that made it: the killer's view until
+// it leaves the barrel, then riding along at full speed, slowing right down as it lands.
+const FINAL_KILL_BEFORE = 4; // at most this far back, for a long missile flight
+const FINAL_KILL_AFTER = 0.7;
+const FINAL_KILL_LEAD = 0.5; // seconds of the killer's view before the shot leaves
+const FINAL_KILL_SLOW = 0.3;
+const CHASE_DISTANCE = 3;
+/** Others' events come a little behind the snapshot that ends a match: how long to wait for the last kill's. */
+const LAST_KILL_GRACE = 0.4;
 const SPECTATE_DISTANCE = 4.5;
 const FREE_CAM_SPEED = 18; // m/s
 
@@ -162,7 +171,7 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
   effects.muzzleOffset = (id, out) => {
     // In a vehicle we're in third person: our shots leave our model's launcher (if it's drawn), not
     // the first-person one. In the killcam the first-person weapon is the killer's.
-    const firstPerson = killcamKiller ? id === killcamKiller.id && killcamKiller.vehicle < 0 : id === localId && me.vehicle < 0 && !spectator;
+    const firstPerson = killcamKiller ? !killcamChasing && id === killcamKiller.id && killcamKiller.vehicle < 0 : id === localId && me.vehicle < 0 && !spectator;
     if (!firstPerson) return remoteView.muzzleOffset(id, out);
     camera.updateMatrixWorld();
     return camera.localToWorld(viewModel.muzzleOrigin(fov, out)).sub(camera.position);
@@ -197,11 +206,40 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
   // After we die: the camera backs off into third person to watch our body fly, then (if someone
   // killed us) the killcam replays the last couple of seconds from their eyes.
   let deathCam: { from: THREE.Vector3; yaw: number; age: number; target: THREE.Vector3 } | null = null;
-  // `source`: the live recorder for our own death, or a saved copy for the play of the match.
-  let killcam: { killerId: string; diedAt: number; age: number; shown: number; source: KillcamRecorder; highlight: boolean } | null = null;
-  // The play of the match: the best kill this client saw, kept to replay on the results screen.
-  let highlight: { score: number; killerId: string; t: number; label: string; source: KillcamRecorder | null } | null = null;
-  let highlightShown = -1; // the match id it was last shown for
+  // `source`: the live recorder for our own death, or a saved copy for the results screen's replays.
+  // It plays `from` to `to` (`t`: where it's up to); `chase`: the shot the camera rides behind, if any.
+  let killcam: {
+    killerId: string;
+    diedAt: number;
+    from: number;
+    to: number;
+    t: number;
+    age: number;
+    shown: number;
+    source: KillcamRecorder;
+    highlight: boolean;
+    chase: number | null;
+  } | null = null;
+  // A kill kept to replay on the results screen: `before` and `after` it are kept, `chase` rides its shot.
+  interface Replay {
+    match: number;
+    killerId: string;
+    victimId: string;
+    cause: DeathCause;
+    t: number;
+    title: string;
+    before: number;
+    after: number;
+    chase: boolean;
+    source: KillcamRecorder | null;
+  }
+  // The play of the match: the best kill this client saw. And the match's last kill.
+  let highlight: (Replay & { score: number }) | null = null;
+  let finalKill: Replay | null = null;
+  // The results screen's replays still to show (null until planned), for the match that ended at `endedAt`.
+  let replays: Replay[] | null = null;
+  let endedMatch = -1;
+  let endedAt = 0;
   const lastKill = new Map<string, number>(); // killer -> recorder clock of their last kill, for multi kills
   const clips = new ClipRecorder();
   clips.onReady = (label) => tips.show('clip', `Press K to save that replay (${label}) as a video.`);
@@ -210,6 +248,12 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
   let killcamKiller: RemotePlayer | null = null;
   let killcamSpeed = 0;
   let killcamRope = false;
+  // Riding behind the final kill's shot: where it was last seen, its (smoothed) heading, and how
+  // long ago it landed (-1: still flying).
+  let killcamChasing = false;
+  const chaseAt = new THREE.Vector3();
+  const chaseDir = new THREE.Vector3();
+  let chaseLanded = -1;
   const killcamLast = new THREE.Vector3();
   const ropeNormal = new THREE.Vector3();
   const killcamPlayers = new Map<string, RemotePlayer>();
@@ -242,6 +286,21 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
     killcam = null;
     killcamView.dispose();
     remoteView.setVisible(true);
+  };
+
+  /** Starts the next of the results screen's replays, once it's been kept. False if there's none to start. */
+  const startReplay = (): boolean => {
+    const r = replays?.[0];
+    if (!r?.source) return false;
+    replays!.shift();
+    endKillcam();
+    // Riding a shot starts just before it was fired (thunder, falls and rams have none to ride).
+    const shot = r.chase ? r.source.killingShot(r.killerId, r.victimId, r.cause, r.t) : null;
+    const from = shot ? Math.min(Math.max(shot.firstSeen - FINAL_KILL_LEAD, r.t - r.before), r.t - 0.6) : r.t - KILLCAM_BEFORE;
+    killcam = { killerId: r.killerId, diedAt: r.t, from, to: r.t + r.after, t: from, age: DEATH_CAM_TIME, shown: from - 0.01, source: r.source, highlight: true, chase: shot?.shot ?? null };
+    killcamChasing = false;
+    hud.setHighlight(r.title);
+    return true;
   };
 
   let flash = 0;
@@ -474,21 +533,28 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
           rope.release();
           const intermission = client.match?.phase === 'intermission';
           if (settings.killcam && e.killerId && e.killerId !== localId && !race && !intermission && recorder.covers(recorder.clock)) {
-            killcam = { killerId: e.killerId, diedAt: recorder.clock, age: 0, shown: recorder.clock - KILLCAM_BEFORE, source: recorder, highlight: false };
+            const from = recorder.clock - KILLCAM_BEFORE;
+            killcam = { killerId: e.killerId, diedAt: recorder.clock, from, to: recorder.clock + KILLCAM_AFTER, t: from, age: 0, shown: from, source: recorder, highlight: false, chase: null };
           }
         } else if (e.killerId === localId && !spectator) {
           hud.hitMarker(true);
           audio.play('kill', { volume: 0.7 });
         }
-        // A contender for the play of the match: airshots, long shots and multi kills score highest.
-        if (e.killerId && e.killerId !== e.playerId && !race && client.match?.phase === 'playing' && recorder.covers(recorder.clock)) {
+        // Perhaps the match's last kill, and a contender for the play of the match: airshots, long
+        // shots and multi kills score highest. The match-ending kill can land just after the match
+        // ends (the server stops the fighting then, so nothing later counts).
+        const counts = client.match && (client.match.phase === 'playing' || client.match.id !== endedMatch || recorder.clock < endedAt + LAST_KILL_GRACE);
+        if (e.killerId && e.killerId !== e.playerId && !race && client.match && counts && recorder.covers(recorder.clock)) {
+          const kill = { match: client.match.id, killerId: e.killerId, victimId: e.playerId, cause: e.cause, t: recorder.clock, source: null };
+          finalKill = { ...kill, title: `FINAL KILL · ${hud.name(e.killerId)}`, before: FINAL_KILL_BEFORE, after: FINAL_KILL_AFTER, chase: true };
           const previous = lastKill.get(e.killerId) ?? -Infinity;
           lastKill.set(e.killerId, recorder.clock);
           const multi = recorder.clock - previous < 3;
           const score = 1 + (e.midair ? 2.5 : 0) + Math.min(e.distance, 60) / 20 + (multi ? 1.5 : 0) + (e.cause === 'fall' ? 0.5 : 0);
-          if (!highlight || score > highlight.score) {
+          if (!highlight || highlight.match !== kill.match || score > highlight.score) {
             const how = [e.midair ? 'airshot' : '', multi ? 'multi kill' : '', e.distance > 25 ? `${Math.round(e.distance)} m` : ''].filter(Boolean).join(', ');
-            highlight = { score, killerId: e.killerId, t: recorder.clock, label: `${hud.name(e.killerId)}${how ? `: ${how}` : ''}`, source: null };
+            const title = `PLAY OF THE MATCH · ${hud.name(e.killerId)}${how ? `: ${how}` : ''}`;
+            highlight = { ...kill, score, title, before: KILLCAM_BEFORE, after: KILLCAM_AFTER, chase: false };
           }
         }
         break;
@@ -660,22 +726,39 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
     if (!killcam) return false;
     killcam.age += frameDt;
     if (killcam.age < DEATH_CAM_TIME) return false;
-    // Replay time from here on: everything below runs on it, so slow motion slows it all.
-    const speed = killcam.highlight ? HIGHLIGHT_SPEED : 1;
+    // Replay time from here on: everything below runs on it, so slow motion slows it all. Riding a
+    // shot, it's full speed until the shot's about to land.
+    const landing = THREE.MathUtils.smoothstep(killcam.t, killcam.diedAt - 0.5, killcam.diedAt - 0.1);
+    const speed = killcam.chase !== null ? 1 + (FINAL_KILL_SLOW - 1) * landing : killcam.highlight ? HIGHLIGHT_SPEED : 1;
     const dt = frameDt * speed;
-    const t = killcam.diedAt - KILLCAM_BEFORE + (killcam.age - DEATH_CAM_TIME) * speed;
-    if (t > killcam.diedAt + KILLCAM_AFTER) {
+    const t = (killcam.t += dt);
+    if (t > killcam.to) {
       clips.stop();
       return false; // over: back to watching the body until we respawn
     }
     const source = killcam.source;
-    if (killcam.shown <= killcam.diedAt - KILLCAM_BEFORE) clips.start(renderer.domElement, killcam.highlight ? 'play of the match' : 'killcam');
+    if (killcam.shown <= killcam.from) clips.start(renderer.domElement, killcam.chase !== null ? 'final kill' : killcam.highlight ? 'play of the match' : 'killcam');
     remoteView.setVisible(false);
     const projectiles = source.sample(t, killcamPlayers);
     const killer = killcamPlayers.get(killcam.killerId);
     if (!killer) return false;
+    const shot = killcam.chase !== null ? projectiles.find((p) => p.ownerId === killer.id && p.shot === killcam!.chase) : undefined;
+    if (shot) {
+      // Riding behind the shot: its heading eased, so a seeker's turns don't whip the camera round.
+      if (shot.vel.lengthSq() > 0.01) {
+        fxAt.copy(shot.vel).normalize();
+        if (killcamChasing) chaseDir.lerp(fxAt, Math.min(1, dt * 8)).normalize();
+        else chaseDir.copy(fxAt);
+      }
+      chaseAt.copy(shot.pos);
+      killcamChasing = true;
+      chaseLanded = -1;
+    } else if (killcamChasing) chaseLanded = chaseLanded < 0 ? 0 : chaseLanded + dt;
+    // Riding the shot, the camera starts at the killer's eye: they're hidden until it's well clear of them.
+    pivot.copy(killer.pos).y += PLAYER.eyeOffset;
+    const fromEye = chaseAt.distanceTo(pivot);
     killcamShown.clear();
-    for (const [id, r] of killcamPlayers) if (id !== killcam.killerId || killer.vehicle >= 0) killcamShown.set(id, r);
+    for (const [id, r] of killcamPlayers) if (id !== killcam.killerId || killer.vehicle >= 0 || (killcamChasing && fromEye > CHASE_DISTANCE + 2)) killcamShown.set(id, r);
     killcamView.names = remoteView.names;
     killcamView.teams = remoteView.teams;
     killcamView.looks = looks;
@@ -693,6 +776,19 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
     killcamSpeed = killcamKiller && dt > 0 ? Math.hypot(killer.pos.x - killcamLast.x, killer.pos.z - killcamLast.z) / dt : 0;
     killcamLast.copy(killer.pos);
     killcamKiller = killer;
+    if (killcamChasing) {
+      // Just behind and above the shot, looking a little ahead of it (pulling back from the killer's
+      // eye as it leaves); once it's landed, drifting back to take in the blast. Kept out of walls.
+      if (killcamRope) rope.release();
+      killcamRope = false;
+      lookBack.copy(chaseDir).negate();
+      lookBack.y += 0.3;
+      lookBack.normalize();
+      const back = Math.min(CHASE_DISTANCE, fromEye) + Math.max(0, chaseLanded) * 2.5;
+      camera.position.copy(chaseAt).addScaledVector(lookBack, sim.clearDistance(chaseAt, lookBack, back));
+      camera.lookAt(fxAt.copy(chaseAt).addScaledVector(chaseDir, 2));
+      return true;
+    }
     if (killer.anchor && killer.vehicle < 0) {
       ropeNormal.copy(killer.pos).sub(killer.anchor).normalize();
       if (!killcamRope) rope.attach(killer.anchor, ropeNormal);
@@ -778,23 +874,27 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
       recorded.set(localId, { ...self, pos: ride ? self.pos : lerpPos });
     }
     recorder.record(dt, recorded.values(), client.renderProjectiles);
-    // Once the moment after the best kill is in, keep a copy of it for the results screen.
-    if (highlight && !highlight.source && recorder.clock >= highlight.t + KILLCAM_AFTER) {
-      highlight.source = recorder.snapshot(highlight.t - KILLCAM_BEFORE - 0.1, highlight.t + KILLCAM_AFTER);
+    // Once the moment after the best kill (and the last) is in, keep a copy of it for the results screen.
+    for (const r of [highlight, finalKill]) {
+      if (r && !r.source && recorder.clock >= r.t + r.after) r.source = recorder.snapshot(r.t - r.before - 0.1, r.t + r.after);
     }
-    // The match is over: show the play of the match before the results.
+    // The match is over: before the results, replay its last kill riding the shot that made it, then
+    // the play of the match (unless that was the last kill).
     const over = client.match?.phase === 'intermission';
-    if (over && highlight?.source && highlightShown !== client.match!.id && !spectator) {
-      highlightShown = client.match!.id;
-      endKillcam();
-      killcam = { killerId: highlight.killerId, diedAt: highlight.t, age: DEATH_CAM_TIME, shown: highlight.t - KILLCAM_BEFORE - 0.01, source: highlight.source, highlight: true };
-      hud.setHighlight(`PLAY OF THE MATCH · ${highlight.label}`);
-    }
-    if (!over && highlightShown >= 0 && highlight?.source) {
-      // A new match: start looking for the next one.
-      highlight = null;
+    if (over && client.match!.id !== endedMatch) {
+      endedMatch = client.match!.id;
+      endedAt = recorder.clock;
+      replays = null;
       lastKill.clear();
     }
+    if (over && !spectator && !replays && recorder.clock >= endedAt + LAST_KILL_GRACE) {
+      const last = finalKill?.match === endedMatch && finalKill.t > endedAt - 2 ? finalKill : null;
+      const best = highlight?.match === endedMatch && highlight.t !== last?.t ? highlight : null;
+      replays = [last, best].filter((r) => r !== null);
+    }
+    if (over && !killcam?.highlight) startReplay();
+    // Until the replays start, the results wait (not for long: the last one's kept 0.7 s after its kill).
+    hud.holdResults = over && !spectator && (!replays || replays.length > 0) && recorder.clock < endedAt + 2;
 
     // Camera: interpolated position, but the latest mouse look so aiming never lags. In a vehicle
     // it orbits behind a pivot above your seat (the sim aims along the same line), pulled in
@@ -816,8 +916,12 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
       camera.rotation.set(input.pitch, input.yaw, 0);
       replaying = (!me.alive || !!killcam?.highlight) && playKillcam(dt);
       if (!replaying && killcam?.highlight) {
-        hud.setHighlight(null);
-        endKillcam();
+        // Straight on to the next replay, if there's one; else the results.
+        if (startReplay()) replaying = playKillcam(0);
+        else {
+          hud.setHighlight(null);
+          endKillcam();
+        }
       }
       if (!replaying && killcam) {
         killcamView.dispose();
@@ -825,6 +929,7 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
       }
       if (!replaying && killcamKiller) {
         killcamKiller = null;
+        killcamChasing = false;
         viewModel.setPrimary(me.primary, true);
         if (killcamRope) rope.release();
         killcamRope = false;
@@ -1018,7 +1123,7 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
     announcer.update(dt, client.match, client.scores);
 
     level.update(dt, camera, client.moverTick(alpha));
-    const firstPerson = (me.alive && !ride && !intermission && !spectator) || (replaying && !!killcamKiller && killcamKiller.vehicle < 0);
+    const firstPerson = (me.alive && !ride && !intermission && !spectator) || (replaying && !!killcamKiller && killcamKiller.vehicle < 0 && !killcamChasing);
     ctx.post.render(scene, camera, firstPerson ? viewModel : null);
   };
 

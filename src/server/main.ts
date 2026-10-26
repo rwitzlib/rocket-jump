@@ -665,7 +665,7 @@ wss.on('connection', (ws, req) => {
       game.setLook(id, encodeLook(wornLook(p)), levelOf(p.xp));
     }
   };
-  ws.on('close', () => {
+  ws.on('close', (code: number) => {
     // Replaced by a reconnection (or kicked): that player isn't this socket's any more.
     if (sockets.get(id) !== socket) return;
     sockets.delete(id);
@@ -673,7 +673,8 @@ wss.on('connection', (ws, req) => {
       log('leave', { id, room: room.code });
       analytics.session(socket.profile ?? addr, (Date.now() - joinedAt) / 1000, joinedTo.mode, joinedTo.map, country);
     }
-    game.disconnect(id);
+    // Left on purpose (quit, or closed or reloaded the page, which can't resume anyway): no need to hold them.
+    game.disconnect(id, code === 1000 || code === 1001);
   });
   ws.on('error', () => ws.close());
 });

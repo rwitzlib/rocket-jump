@@ -92,11 +92,10 @@ export class KillcamRecorder {
       out.set(r.id, r);
     }
     return (f < 0.5 ? a : b).projectiles.map((p) => {
-      const q = b.projectiles.find((o) => o.id === p.id);
       const r = copyProjectile(p);
-      if (q && f >= 0.5) return r;
       const from = a.projectiles.find((o) => o.id === p.id);
-      if (from && q) r.pos.copy(from.pos).lerp(q.pos, f);
+      const to = b.projectiles.find((o) => o.id === p.id);
+      if (from && to) r.pos.copy(from.pos).lerp(to.pos, f);
       return r;
     });
   }
@@ -109,6 +108,36 @@ export class KillcamRecorder {
     copy.shots.push(...this.shots.filter((s) => s.t >= from && s.t <= to));
     copy.clock = to;
     return copy;
+  }
+
+  /**
+   * The shot (Projectile.shot) of `killerId`'s that killed `victimId` at about `t`, and when it was
+   * first seen: of their `kind` projectiles in flight around then, the one last seen nearest the
+   * victim (and nearest `t`). Null if there was none. Matched by shot, not id: our own predicted
+   * copies change id when the server's replaces them.
+   */
+  killingShot(killerId: string, victimId: string, kind: string, t: number): { shot: number; firstSeen: number } | null {
+    const seen = new Map<number, { first: number; last: number; miss: number }>();
+    for (const f of this.frames) {
+      const victim = f.players.find((p) => p.id === victimId);
+      for (const p of f.projectiles) {
+        if (p.ownerId !== killerId || p.kind !== kind) continue;
+        const s = seen.get(p.shot) ?? { first: f.t, last: f.t, miss: Infinity };
+        s.last = f.t;
+        s.miss = victim ? p.pos.distanceTo(victim.pos) : Infinity;
+        seen.set(p.shot, s);
+      }
+    }
+    let best: { shot: number; firstSeen: number } | null = null;
+    let bestScore = Infinity;
+    for (const [shot, s] of seen) {
+      // A meter off the victim weighs about as much as an eighth of a second off the kill.
+      const score = s.miss + 8 * Math.abs(s.last - t);
+      if (s.last < t - 1.5 || score >= bestScore) continue;
+      bestScore = score;
+      best = { shot, firstSeen: s.first };
+    }
+    return best;
   }
 
   /** Explosions that went off in (from, to]. */

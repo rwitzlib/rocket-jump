@@ -260,11 +260,14 @@ export class GameServer {
     };
   }
 
-  /** The connection is gone. A player is held for a while to reconnect, if the server allows it. */
-  disconnect(id: string) {
+  /**
+   * The connection is gone. A player is held for a while to reconnect, if the server allows it,
+   * unless they left on purpose (then holding them would only keep their name taken).
+   */
+  disconnect(id: string, left = false) {
     const conn = this.connections.get(id);
     if (!conn) return;
-    if (this.options.reconnectGrace > 0 && !conn.spectator && conn.away === 0) {
+    if (!left && this.options.reconnectGrace > 0 && !conn.spectator && conn.away === 0) {
       conn.away = this.options.reconnectGrace;
       conn.queue = [];
       conn.buffering = true;

@@ -169,6 +169,8 @@ export class Hud {
   boardOpen = false; // Tab held
   private readonly xpBox = el('xp-gain');
   private highlightOn = false;
+  /** The results wait for a replay that's about to start. */
+  holdResults = false;
   private xpTotal = 0;
   /** Whether the game has the keyboard (the mouse captured, or playing without it): Tab opens the board only then. */
   isPlaying: () => boolean = () => !!document.pointerLockElement;
@@ -426,8 +428,8 @@ export class Hud {
 
   /** The results screen between matches; hidden otherwise. */
   setResults(match: MatchState | null, scores: readonly ScoreEntry[]) {
-    // (held back while the play of the match is showing)
-    const show = match?.phase === 'intermission' && !this.highlightOn;
+    // (held back while the final kill and the play of the match are showing)
+    const show = match?.phase === 'intermission' && !this.highlightOn && !this.holdResults;
     this.results.hidden = !show;
     if (!show || !match) {
       this.shownResults = '';

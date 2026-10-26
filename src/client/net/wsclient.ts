@@ -57,6 +57,6 @@ export class WsTransport implements Transport {
 
   close() {
     this.closed = true;
-    this.ws.close();
+    this.ws.close(1000, 'Left'); // a normal close: the server lets the player go instead of holding them to reconnect
   }
 }
