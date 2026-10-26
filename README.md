@@ -242,6 +242,7 @@ without them still works: flags go on the two spawns farthest apart and the race
 | M | Mute / unmute |
 | P | Frame-time overlay (long frames are also logged to the console) |
 | Esc | Pause menu (Spectate is there) |
+| F5 | Third person on foot (over the shoulder) / back to first person |
 | K | Save the last replay (killcam, play of the match) as a video |
 | Chat `/votekick`, `/yes`, `/no`, `/mute`, `/unmute`, `/help` | Vote someone out, hide someone's chat |
 | Spectating: click / right click | Follow the next / previous player |

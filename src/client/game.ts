@@ -3,6 +3,7 @@ import { DT, GRAPPLE, GRENADE, HELI, HYPERSONIC, PLAYER, ROCKET, SEEKERS, TEAMS,
 import { MAPS } from '../shared/map';
 import { aimDirection } from '../shared/movement';
 import type { ServerMessage } from '../shared/protocol';
+import type { PlayerInput } from '../shared/types';
 import { GameSim, lockReady, type DeathCause, type SimEvent } from '../shared/sim';
 import type { Announcer } from './announcer';
 import type { GameAudio } from './audio';
@@ -78,8 +79,15 @@ export interface Game {
   applySettings(): void;
   /** Saves the last replay as a video file. False if there isn't one. */
   saveClip(): boolean;
+  /** Switches on foot between first person and over the shoulder. True if it's now third person. */
+  toggleView(): boolean;
   dispose(): void;
 }
+
+/** Over the shoulder on foot (F5). Kept from one game to the next. */
+let thirdPersonView = false;
+/** The third-person camera on foot: this far behind a pivot up and to the right of the eye. */
+const SHOULDER = { right: 0.55, up: 0.35, back: 3.2 };
 
 export interface GameSetup {
   map: string;
@@ -167,11 +175,13 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
   let couldGrapple = false;
   let grappleCue = 0;
   let fov = settings.fov;
+  // This frame's camera is over our shoulder (third person on foot, alive, not in a replay).
+  let overShoulder = false;
   // Rockets and grenades are drawn leaving the barrel you see: the first-person one for ours, the model's for others.
   effects.muzzleOffset = (id, out) => {
     // In a vehicle we're in third person: our shots leave our model's launcher (if it's drawn), not
     // the first-person one. In the killcam the first-person weapon is the killer's.
-    const firstPerson = killcamKiller ? !killcamChasing && id === killcamKiller.id && killcamKiller.vehicle < 0 : id === localId && me.vehicle < 0 && !spectator;
+    const firstPerson = killcamKiller ? !killcamChasing && id === killcamKiller.id && killcamKiller.vehicle < 0 : id === localId && me.vehicle < 0 && !spectator && !overShoulder;
     if (!firstPerson) return remoteView.muzzleOffset(id, out);
     camera.updateMatrixWorld();
     return camera.localToWorld(viewModel.muzzleOrigin(fov, out)).sub(camera.position);
@@ -720,6 +730,33 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
   const recorded = new Map<string, RemotePlayer>();
   const killcamShown = new Map<string, RemotePlayer>();
   const lerpPos = new THREE.Vector3();
+  const aimDir = new THREE.Vector3();
+  const aimAt = new THREE.Vector3();
+  const toPlayer = new THREE.Vector3();
+
+  /**
+   * Over the shoulder the crosshair's line starts at the camera, but the sim fires from our eye:
+   * turn the aim we send so the shot from the eye goes where the crosshair is (the first wall or
+   * player along its line).
+   */
+  const aimFromEye = (s: PlayerInput) => {
+    aimDirection(s.yaw, s.pitch, aimDir);
+    let dist = sim.clearDistance(camera.position, aimDir, 400);
+    for (const r of client.remotes.values()) {
+      if (!r.alive || r.hidden) continue;
+      toPlayer.copy(r.pos).sub(camera.position);
+      const along = toPlayer.dot(aimDir);
+      if (along > 0 && along < dist && toPlayer.addScaledVector(aimDir, -along).lengthSq() < 0.5) dist = along;
+    }
+    aimAt.copy(camera.position).addScaledVector(aimDir, dist);
+    me.eye(eye);
+    aimAt.sub(eye);
+    // Something between the camera and us (or right by us): aim as the camera does.
+    if (aimAt.dot(aimDir) < 1.5) return;
+    aimAt.normalize();
+    s.yaw = Math.atan2(-aimAt.x, -aimAt.z);
+    s.pitch = Math.asin(THREE.MathUtils.clamp(aimAt.y, -1, 1));
+  };
 
   /** One frame of the killcam: everyone as they were, seen through the killer's eyes. */
   const playKillcam = (frameDt: number): boolean => {
@@ -818,7 +855,9 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
 
     while (accumulator >= DT) {
       if (!spectator) {
-        for (const e of client.predict(input.sample())) handleEvent(e);
+        const sampled = input.sample();
+        if (overShoulder) aimFromEye(sampled);
+        for (const e of client.predict(sampled)) handleEvent(e);
         ghost?.record(me.lapTime, me.pos);
       }
       accumulator -= DT;
@@ -855,6 +894,8 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
       vehicleView.seatPosition(ride.index, me.seat, alpha, self.pos);
       shownPlayers.set(localId, self);
     }
+    overShoulder = thirdPersonView && !spectator && me.alive && !ride && !killcam?.highlight;
+    if (overShoulder) shownPlayers.set(localId, self);
     remoteView.names = hud.setNames(client.scores);
     for (const s of client.scores) {
       if (shownLooks.get(s.id) === s.look) continue;
@@ -911,6 +952,16 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
         me.eye(eye);
         prevEye.copy(me.prevPos).y += eye.y - me.pos.y;
         camera.position.lerpVectors(prevEye, eye, alpha);
+        if (overShoulder) {
+          // Over the right shoulder, kept out of walls both ways.
+          pivot.copy(camera.position);
+          lookBack.set(Math.cos(input.yaw), 0, -Math.sin(input.yaw)).multiplyScalar(SHOULDER.right).y = SHOULDER.up;
+          const reach = lookBack.length();
+          lookBack.divideScalar(reach);
+          pivot.addScaledVector(lookBack, sim.clearDistance(pivot, lookBack, reach));
+          aimDirection(input.yaw, input.pitch, lookBack).negate();
+          camera.position.copy(pivot).addScaledVector(lookBack, sim.clearDistance(pivot, lookBack, SHOULDER.back));
+        }
       }
       camera.position.add(client.visualOffset);
       camera.rotation.set(input.pitch, input.yaw, 0);
@@ -992,6 +1043,8 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
     hillView?.update(dt, client.match?.hill ?? 0, hillContested ? 'contested' : !hillHolder ? 'free' : hillHolder === localId && !spectator ? 'mine' : 'theirs');
     ghost?.update(me.alive ? me.lapTime : -1);
     if (me.grapple) rope.follow(me.grapple.anchor, me.grapple.normal);
+    // Over the shoulder our model draws its own rope.
+    rope.shown = !overShoulder;
     rope.update(dt, camera.localToWorld(viewModel.ropeOrigin(fov, hand)), camera);
     audio.update(camera, projectiles);
 
@@ -1123,7 +1176,7 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
     announcer.update(dt, client.match, client.scores);
 
     level.update(dt, camera, client.moverTick(alpha));
-    const firstPerson = (me.alive && !ride && !intermission && !spectator) || (replaying && !!killcamKiller && killcamKiller.vehicle < 0 && !killcamChasing);
+    const firstPerson = (me.alive && !ride && !intermission && !spectator && !overShoulder) || (replaying && !!killcamKiller && killcamKiller.vehicle < 0 && !killcamChasing);
     ctx.post.render(scene, camera, firstPerson ? viewModel : null);
   };
 
@@ -1138,6 +1191,7 @@ export function startGame(ctx: GameContext, setup: GameSetup): Game {
     frame,
     receive: (msg) => client.receive(msg),
     saveClip: () => clips.save(),
+    toggleView: () => (thirdPersonView = !thirdPersonView),
     applySettings() {
       cameraFx.baseFov = settings.fov;
     },

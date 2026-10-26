@@ -33,6 +33,8 @@ export class Rope {
   // Calling setPositions() per frame would allocate a new GPU buffer every time and leak the old one.
   private readonly segments: InstancedInterleavedBuffer;
   private state: State = { kind: 'idle' };
+  /** False hides it (it still shoots out and retracts, unseen). */
+  shown = true;
 
   constructor(scene: THREE.Scene) {
     this.geometry.setPositions(new Float32Array((SEGMENTS + 1) * 3));
@@ -146,6 +148,6 @@ export class Rope {
     this.segments.needsUpdate = true;
 
     this.hook.position.copy(_tip);
-    this.line.visible = this.hook.visible = true;
+    this.line.visible = this.hook.visible = this.shown;
   }
 }

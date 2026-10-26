@@ -696,6 +696,9 @@ export class RemotePlayersView {
       model.root.name = `${id}Launcher`;
       model.muzzle.name = `${id}Muzzle`;
       model.root.visible = id === 'rocket';
+      // Shouldered, the Javelin's sight unit would sit inside the head: carried further up the tube instead.
+      const clu = model.root.getObjectByName('clu');
+      if (clu) clu.position.z = -0.4;
       return model;
     });
     const launcherModel = models[0];

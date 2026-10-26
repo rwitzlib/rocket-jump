@@ -458,6 +458,11 @@ async function main() {
       if (saved) track('clip-saved');
       chat.add(null, saved ? 'Replay saved to your downloads.' : 'No replay to save yet: they come from the killcam and the play of the match.');
     }
+    // F5: third person on foot (and not the browser's reload).
+    if (e.code === 'F5' && screen === 'game' && session?.game) {
+      e.preventDefault();
+      if (!session.game.spectator) session.game.toggleView();
+    }
     // Watching: J joins the game.
     if (e.code === 'KeyJ' && screen === 'game' && session?.game?.spectator) session.transport.send({ type: 'spectate', on: false });
   });

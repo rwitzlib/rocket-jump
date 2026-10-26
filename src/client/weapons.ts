@@ -409,11 +409,15 @@ export function buildJavelin(accent: THREE.Material = DEFAULT_ACCENT): LauncherM
   const g = javelinGeo;
   const root = new THREE.Group();
   root.add(part(g.tube, tubeOlive), part(g.band, accent, 0, 0, -0.25), part(g.band, accent, 0, 0, 0.25));
-  root.add(part(g.clu, dark, -0.21, 0.02, 0.04), part(g.cluHood, gunmetal, -0.21, 0.15, 0.02), part(g.eyepiece, dark, -0.21, 0.05, 0.2));
+  // The command launch unit, grouped so a player model can slide it forward, out of the head.
+  const clu = new THREE.Group();
+  clu.name = 'clu';
+  clu.add(part(g.clu, dark, -0.21, 0.02, 0.04), part(g.cluHood, gunmetal, -0.21, 0.15, 0.02), part(g.eyepiece, dark, -0.21, 0.05, 0.2));
   const lensL = part(g.lens, lensMat, -0.25, 0.04, -0.091);
   const lensR = part(g.lens, lensMat, -0.17, 0.04, -0.091);
   lensL.rotation.y = lensR.rotation.y = Math.PI;
-  root.add(lensL, lensR, part(g.battery, gunmetal, 0, -0.15, 0.28));
+  clu.add(lensL, lensR);
+  root.add(clu, part(g.battery, gunmetal, 0, -0.15, 0.28));
   return finishLauncher(root, SEEKER_MUZZLE_Z.javelin, 0.1, new THREE.Vector3(-0.311, -0.04, 0.04));
 }
 
